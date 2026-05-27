@@ -251,7 +251,14 @@ class DmSenderManager:
                     next_status = refreshed["status"]
             self.db.update_account_status(account_id, status=next_status, last_error=last_error)
             current = self.repository.get_dm_task(task_id)
-            final_task_account_status = "stopped" if current and self.repository.should_stop_dm_task(task_id) else "completed"
+            row_after_run = next((row for row in self.repository.list_dm_task_accounts(task_id) if int(row["account_id"]) == account_id), None)
+            current_account_status = str(row_after_run["status"] or "") if row_after_run else ""
+            if current_account_status == "error" or next_status in {"unauthorized", "error"}:
+                final_task_account_status = "error"
+            elif current and self.repository.should_stop_dm_task(task_id):
+                final_task_account_status = "stopped"
+            else:
+                final_task_account_status = "completed"
             self.repository.update_dm_task_account(task_id, account_id, status=final_task_account_status, last_error=last_error)
             self.repository.sync_dm_task_metrics(task_id)
             await self._emit_progress(task_id)

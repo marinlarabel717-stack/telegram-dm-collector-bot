@@ -1108,12 +1108,18 @@ class DmCollectorBot:
         if result.restriction_status in {"session_invalid", "frozen"}:
             label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
             bucket = "invalid" if result.restriction_status == "session_invalid" else "frozen"
-            await self._send_account_export(query.message.chat_id, [account], bucket, auto_delete=True)
+            backup_note = "已自动导出原始文件"
+            try:
+                await self._send_account_export(query.message.chat_id, [account], bucket, auto_delete=True)
+            except FileNotFoundError:
+                self._purge_account_files(account)
+                self.db.delete_account(account_id)
+                backup_note = "未找到可导出的原始文件，已直接删除账号"
             text = (
                 f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>账号已自动删除</b>\n"
                 f"名称：<code>{html.escape(str(label), quote=False)}</code>\n"
                 f"原因：<code>{html.escape(issue_text, quote=False)}</code>\n"
-                f"备份：<code>已自动导出原始文件</code>"
+                f"备份：<code>{backup_note}</code>"
             )
             await self._safe_edit(query, text, self._single_back_keyboard("account:list:1"))
             return
@@ -1222,10 +1228,21 @@ class DmCollectorBot:
                 ]),
             )
 
+        export_warnings: list[str] = []
         if removed_invalid_rows:
-            await self._send_account_export(query.message.chat_id, removed_invalid_rows, "invalid", auto_delete=True)
+            try:
+                await self._send_account_export(query.message.chat_id, removed_invalid_rows, "invalid", auto_delete=True)
+            except FileNotFoundError:
+                for row in removed_invalid_rows:
+                    self._purge_account_files(row)
+                export_warnings.append("失效/封禁账号没有找到可导出的原始文件")
         if removed_frozen_rows:
-            await self._send_account_export(query.message.chat_id, removed_frozen_rows, "frozen", auto_delete=True)
+            try:
+                await self._send_account_export(query.message.chat_id, removed_frozen_rows, "frozen", auto_delete=True)
+            except FileNotFoundError:
+                for row in removed_frozen_rows:
+                    self._purge_account_files(row)
+                export_warnings.append("冻结账号没有找到可导出的原始文件")
 
         total_alive = self.db.count_accounts()
         lines = [
@@ -1261,6 +1278,11 @@ class DmCollectorBot:
             lines.append("")
             lines.append("<b>暂未删除：其他异常</b>")
             for item in kept_other_errors[:8]:
+                lines.append(f"• {html.escape(item, quote=False)}")
+        if export_warnings:
+            lines.append("")
+            lines.append("<b>导出提示</b>")
+            for item in export_warnings:
                 lines.append(f"• {html.escape(item, quote=False)}")
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup([
             [
@@ -3059,10 +3081,11 @@ class DmCollectorBot:
                 matched.append(row)
         return matched
 
-    def _build_accounts_export_zip(self, rows: list, bucket: str) -> Path:
+    def _build_accounts_export_zip(self, rows: list, bucket: str) -> tuple[Path, int]:
         self.settings.export_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         zip_path = self.settings.export_dir / f"accounts_{bucket}_{stamp}.zip"
+        added_files = 0
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for row in rows:
                 session_path = Path(str(row["session_file"] or ""))
@@ -3070,15 +3093,19 @@ class DmCollectorBot:
                     continue
                 folder_name = f"{self._account_display_code(row)}_{session_path.stem}"
                 archive.write(session_path, arcname=f"{folder_name}/{session_path.name}")
+                added_files += 1
                 sidecar = session_path.with_suffix(".json")
                 if sidecar.exists():
                     archive.write(sidecar, arcname=f"{folder_name}/{sidecar.name}")
-        return zip_path
+                    added_files += 1
+        return zip_path, added_files
 
     async def _send_account_export(self, chat_id: int, rows: list, bucket: str, *, auto_delete: bool) -> None:
         if not rows:
             return
-        zip_path = self._build_accounts_export_zip(rows, bucket)
+        zip_path, added_files = self._build_accounts_export_zip(rows, bucket)
+        if added_files <= 0:
+            raise FileNotFoundError("没有找到可打包的 session 或 json 原文件")
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
         with zip_path.open("rb") as fp:
             await self.application.bot.send_document(
@@ -3102,7 +3129,11 @@ class DmCollectorBot:
         if not rows:
             await query.answer(f"没有可导出的{self._account_export_bucket_label(bucket)}账号", show_alert=True)
             return
-        await self._send_account_export(chat_id, rows, bucket, auto_delete=bucket in {"invalid", "frozen"})
+        try:
+            await self._send_account_export(chat_id, rows, bucket, auto_delete=bucket in {"invalid", "frozen"})
+        except FileNotFoundError as exc:
+            await query.answer(str(exc), show_alert=True)
+            return
         await self._show_accounts_menu(query, page=1)
 
     async def _send_dm_exports(self, chat_id: int) -> None:
