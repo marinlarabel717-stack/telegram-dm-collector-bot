@@ -132,6 +132,9 @@ class DmCollectorBot:
             account_id = int(data.split(":")[-1])
             await self._show_account_detail(query, account_id)
             return
+        if data == "account:check_all":
+            await self._check_all_accounts(query)
+            return
         if data.startswith("account:check:"):
             account_id = int(data.split(":")[-1])
             await self._check_account(query, account_id)
@@ -244,10 +247,13 @@ class DmCollectorBot:
             return
 
         imported_accounts = []
-        warning_sessions = []
+        deleted_broken: list[tuple[str, str]] = []
+        deleted_banned: list[tuple[str, str]] = []
+        kept_other_errors: list[tuple[str, str]] = []
         for session_file in session_files:
-            try:
-                result = await self.collection_manager.verify_session_file(session_file)
+            result = await self.collection_manager.verify_session_file(session_file)
+            issue_text = self._humanize_account_issue(result.status, result.last_error)
+            if result.status == "active":
                 account = self.db.upsert_account(
                     session_name=session_file.stem,
                     session_file=str(session_file),
@@ -259,24 +265,19 @@ class DmCollectorBot:
                     last_error=result.last_error,
                 )
                 imported_accounts.append(account)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("导入 session 失败，改为异常入库: %s", session_file)
-                error_text = str(exc) or exc.__class__.__name__
-                account = self.db.upsert_account(
-                    session_name=session_file.stem,
-                    session_file=str(session_file),
-                    tg_user_id=None,
-                    phone=None,
-                    username=None,
-                    display_name=session_file.stem,
-                    status="error",
-                    last_error=error_text,
-                )
-                imported_accounts.append(account)
-                warning_sessions.append((session_file.name, error_text))
+                continue
+
+            self._purge_session_artifacts(session_file)
+            if self._should_auto_purge_account(result.status, result.last_error):
+                if "损坏" in issue_text:
+                    deleted_broken.append((session_file.name, issue_text))
+                else:
+                    deleted_banned.append((session_file.name, issue_text))
+            else:
+                kept_other_errors.append((session_file.name, issue_text))
 
         self._clear_state(update.effective_user.id)
-        if len(imported_accounts) == 1 and not warning_sessions:
+        if len(imported_accounts) == 1 and not deleted_broken and not deleted_banned and not kept_other_errors:
             await update.effective_message.reply_text(
                 self._format_account_text(imported_accounts[0]),
                 parse_mode=ParseMode.HTML,
@@ -288,16 +289,30 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>导入处理完成</b>",
             f"成功导入：<code>{len(imported_accounts)}</code>",
-            f"异常数量：<code>{len(warning_sessions)}</code>",
-            "",
+            f"自动删除损坏：<code>{len(deleted_broken)}</code>",
+            f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
         ]
-        for account in imported_accounts[:10]:
-            label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
-            lines.append(f"• #{account['id']} {html.escape(str(label), quote=False)} · {status_badge(account['status'])}")
-        if warning_sessions:
+        if imported_accounts:
             lines.append("")
-            for failed_name, failed_error in warning_sessions[:3]:
-                lines.append(f"× <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
+            lines.append("<b>已保留可用账号</b>")
+            for account in imported_accounts[:10]:
+                label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+                lines.append(f"• #{account['id']} {html.escape(str(label), quote=False)} · {status_badge(account['status'])}")
+        if deleted_broken:
+            lines.append("")
+            lines.append("<b>已删除：session 已损坏</b>")
+            for failed_name, failed_error in deleted_broken[:5]:
+                lines.append(f"• <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
+        if deleted_banned:
+            lines.append("")
+            lines.append("<b>已删除：封禁 / 失效</b>")
+            for failed_name, failed_error in deleted_banned[:5]:
+                lines.append(f"• <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
+        if kept_other_errors:
+            lines.append("")
+            lines.append("<b>暂未保留到账号列表：其他异常</b>")
+            for failed_name, failed_error in kept_other_errors[:5]:
+                lines.append(f"• <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
         await update.effective_message.reply_text(
             "\n".join(lines),
             parse_mode=ParseMode.HTML,
@@ -418,11 +433,12 @@ class DmCollectorBot:
         count = self.db.count_accounts()
         text = (
             f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
-            f"当前已保存账号：<code>{count}</code>\n\n"
-            f"上传 .session 后会立即做一次登录验证，并在账号列表里显示状态。"
+            f"当前存活账号：<code>{count}</code>\n\n"
+            f"上传 .session 后会立即做一次登录验证；损坏 / 封禁 / 失效账号会自动清掉。"
         )
         keyboard = [
             [premium_button("上传 session", self.settings.emoji_upload_id, callback_data="account:upload")],
+            [premium_button("批量检测", self.settings.emoji_stats_id, callback_data="account:check_all")],
             [premium_button("账号列表", self.settings.emoji_list_id, callback_data=f"account:list:{page}")],
             [premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main")],
         ]
@@ -436,7 +452,7 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>账号列表</b>",
             f"页码：<code>{page}/{total_pages}</code>",
-            f"总账号：<code>{total}</code>",
+            f"存活账号：<code>{total}</code>",
             "",
         ]
         if not rows:
@@ -476,16 +492,88 @@ class DmCollectorBot:
             return
         self.db.update_account_status(account_id, status="checking", last_error=None)
         await self._safe_edit(query, self._format_account_text(self.db.get_account(account_id)), self._build_account_detail_keyboard(account_id))
-        await self.collection_manager.verify_account(account)
+        result = await self.collection_manager.verify_account(account)
+        account = self.db.get_account(account_id)
+        if not account:
+            await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
+            return
+        issue_text = self._humanize_account_issue(result.status, result.last_error)
+        if self._should_auto_purge_account(result.status, result.last_error):
+            label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+            self._purge_account_files(account)
+            self.db.delete_account(account_id)
+            text = (
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>账号已自动删除</b>\n"
+                f"名称：<code>{html.escape(str(label), quote=False)}</code>\n"
+                f"原因：<code>{html.escape(issue_text, quote=False)}</code>"
+            )
+            await self._safe_edit(query, text, self._single_back_keyboard("account:list:1"))
+            return
         await self._show_account_detail(query, account_id)
+
+    async def _check_all_accounts(self, query) -> None:
+        rows = self.db.list_all_accounts()
+        if not rows:
+            await self._safe_edit(query, self._not_found_text("当前没有可检测的账号。"), self._single_back_keyboard("menu:accounts"))
+            return
+
+        kept_active = 0
+        deleted_broken: list[str] = []
+        deleted_banned: list[str] = []
+        kept_other_errors: list[str] = []
+
+        for row in rows:
+            result = await self.collection_manager.verify_account(row)
+            refreshed = self.db.get_account(row["id"])
+            account = refreshed or row
+            label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+            issue_text = self._humanize_account_issue(result.status, result.last_error)
+            if result.status == "active":
+                kept_active += 1
+                continue
+            if self._should_auto_purge_account(result.status, result.last_error):
+                if "损坏" in issue_text:
+                    deleted_broken.append(str(label))
+                else:
+                    deleted_banned.append(str(label))
+                if refreshed:
+                    self._purge_account_files(refreshed)
+                    self.db.delete_account(refreshed["id"])
+                continue
+            kept_other_errors.append(f"{label}｜{issue_text}")
+
+        total_alive = self.db.count_accounts()
+        lines = [
+            f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检测完成</b>",
+            f"存活账号：<code>{kept_active}</code>",
+            f"自动删除损坏 session：<code>{len(deleted_broken)}</code>",
+            f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
+            f"当前列表保留：<code>{total_alive}</code>",
+        ]
+        if deleted_broken:
+            lines.append("")
+            lines.append("<b>已删除：session 已损坏</b>")
+            for item in deleted_broken[:8]:
+                lines.append(f"• {html.escape(item, quote=False)}")
+        if deleted_banned:
+            lines.append("")
+            lines.append("<b>已删除：封禁 / 失效</b>")
+            for item in deleted_banned[:8]:
+                lines.append(f"• {html.escape(item, quote=False)}")
+        if kept_other_errors:
+            lines.append("")
+            lines.append("<b>暂未删除：其他异常</b>")
+            for item in kept_other_errors[:8]:
+                lines.append(f"• {html.escape(item, quote=False)}")
+        await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup([
+            [premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1")],
+            [premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts")],
+        ]))
 
     async def _delete_account(self, query, account_id: int) -> None:
         row = self.db.delete_account(account_id)
         if row:
-            try:
-                Path(row["session_file"]).unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001
-                logger.exception("删除 session 文件失败: %s", row["session_file"])
+            self._purge_account_files(row)
         await self._show_account_list(query, page=1)
 
     async def _show_collect_menu(self, query) -> None:
@@ -711,7 +799,10 @@ class DmCollectorBot:
             f"最近检测：<code>{account['last_checked_at'] or '-'}</code>",
         ]
         if account["last_error"]:
-            lines.append(f"错误：<code>{html.escape(str(account['last_error']), quote=False)}</code>")
+            friendly = self._humanize_account_issue(account["status"], account["last_error"])
+            lines.append(f"结果：<code>{html.escape(friendly, quote=False)}</code>")
+            if friendly != account["last_error"]:
+                lines.append(f"原始错误：<code>{html.escape(str(account['last_error']), quote=False)}</code>")
         return "\n".join(lines)
 
     def _format_task_text(self, task_id: int) -> str:
@@ -1101,6 +1192,32 @@ class DmCollectorBot:
             seen.add(normalized.lower())
             result.append(normalized)
         return result
+
+    def _humanize_account_issue(self, status: str, last_error: str | None) -> str:
+        raw = (last_error or "").strip()
+        text = raw.lower()
+        if status == "unauthorized" or any(key in text for key in ["user_deactivated", "banned", "revoked", "auth key duplicated", "phone_number_banned"]):
+            return "session 已失效或已封禁"
+        if any(key in text for key in ["malformed", "not valid sqlite", "file is not a database", "缺少 sessions 表", "没有可用的登录记录", "缺少 telethon 必要字段", "已损坏或不是有效 sqlite"]):
+            return "session 已损坏"
+        if "floodwait" in text:
+            return "触发 Telegram 限流，稍后再试"
+        return raw or "账号不可用"
+
+    def _should_auto_purge_account(self, status: str, last_error: str | None) -> bool:
+        friendly = self._humanize_account_issue(status, last_error)
+        return friendly in {"session 已失效或已封禁", "session 已损坏"}
+
+    def _purge_session_artifacts(self, session_file: Path) -> None:
+        session_file.unlink(missing_ok=True)
+        session_file.with_suffix(".json").unlink(missing_ok=True)
+        session_file.with_name(f"{session_file.stem}.compat.session").unlink(missing_ok=True)
+
+    def _purge_account_files(self, account) -> None:
+        try:
+            self._purge_session_artifacts(Path(account["session_file"]))
+        except Exception:  # noqa: BLE001
+            logger.exception("删除账号 session 文件失败: %s", account["session_file"])
 
     def _clear_state(self, user_id: int) -> None:
         self.user_states.pop(user_id, None)

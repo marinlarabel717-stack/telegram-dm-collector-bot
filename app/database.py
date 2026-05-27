@@ -326,13 +326,19 @@ class Database:
     def list_accounts(self, *, limit: int = 20, offset: int = 0) -> list[sqlite3.Row]:
         with self.lock:
             return self.conn.execute(
-                "SELECT * FROM accounts ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM accounts WHERE status IN ('active','checking','collecting') ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
                 (limit, offset),
+            ).fetchall()
+
+    def list_all_accounts(self) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM accounts ORDER BY updated_at DESC, id DESC"
             ).fetchall()
 
     def count_accounts(self) -> int:
         with self.lock:
-            return self.conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
+            return self.conn.execute("SELECT COUNT(*) FROM accounts WHERE status IN ('active','checking','collecting')").fetchone()[0]
 
     def get_account(self, account_id: int) -> sqlite3.Row | None:
         with self.lock:
