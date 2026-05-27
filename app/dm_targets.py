@@ -37,9 +37,10 @@ def parse_target(raw: str) -> ParsedTarget | None:
     return None
 
 
-def parse_targets_text(text: str) -> tuple[list[ParsedTarget], list[str]]:
+def parse_targets_text(text: str) -> tuple[list[ParsedTarget], list[str], list[str]]:
     parsed: list[ParsedTarget] = []
     invalid: list[str] = []
+    duplicates: list[str] = []
     seen: set[str] = set()
 
     for line in text.splitlines():
@@ -49,8 +50,9 @@ def parse_targets_text(text: str) -> tuple[list[ParsedTarget], list[str]]:
                 invalid.append(line.strip())
             continue
         if item.normalized_input in seen:
+            duplicates.append(item.normalized_input)
             continue
         seen.add(item.normalized_input)
         parsed.append(item)
 
-    return parsed, invalid
+    return parsed, invalid, duplicates

@@ -6,7 +6,7 @@ import html
 def content_type_label(content_type: str | None) -> str:
     mapping = {
         "text": "文本",
-        "post": "post 图文",
+        "post": "PostBot 图文代码",
         "media": "媒体",
         "forward": "频道转发",
     }
@@ -20,12 +20,25 @@ def message_mode_label(message_mode: str | None, *, content_type: str | None = N
 def payload_preview(payload: dict | None, *, content_type: str | None = None, max_len: int = 240) -> str:
     payload = payload or {}
     kind = str(content_type or payload.get("content_type") or "text")
-    if kind in {"media", "post"}:
+    if kind == "post":
+        main_text = str(payload.get("body") or payload.get("post_code") or payload.get("text") or "").strip()
+        summary = f"PostBot代码：{main_text[:160]}" if main_text else "PostBot代码：-"
+        if str(payload.get("mode") or "single") == "three_stage":
+            greeting = str(payload.get("greeting") or "").strip()[:60]
+            closing = str(payload.get("closing") or "").strip()[:60]
+            parts = []
+            if greeting:
+                parts.append(f"第1段：{greeting}")
+            parts.append(f"第2段：{summary[:120]}")
+            if closing:
+                parts.append(f"第3段：{closing}")
+            return html.escape("\n".join(parts)[:max_len], quote=False)
+        return html.escape(summary[:max_len], quote=False)
+    if kind == "media":
         media_kind = str(payload.get("media_kind") or "file")
         file_name = str(payload.get("file_name") or "未命名文件")
         caption = str(payload.get("caption") or "").strip()
-        summary_prefix = "图文" if kind == "post" else media_kind
-        summary = f"{summary_prefix}｜{file_name}"
+        summary = f"{media_kind}｜{file_name}"
         if caption:
             summary += f"｜说明：{caption}"
         if str(payload.get("mode") or "single") == "three_stage":

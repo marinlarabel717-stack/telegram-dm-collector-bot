@@ -150,7 +150,7 @@ class DmSenderManager:
                     success_count += 1
                     self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
                     self.repository.update_dm_task_account(task_id, account_id, success_delta=1, last_error=None)
-                    self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="success", message="发送成功")
+                    self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="success", message=self._action_success_message(content_type))
                     logger.info(compose_log("发送成功", task_id=task_id, account_id=account_id, recipient=target))
                 except FloodWaitError as exc:
                     wait_seconds = int(getattr(exc, "seconds", 0) or 0)
@@ -268,7 +268,7 @@ class DmSenderManager:
             if client is not None:
                 await client.disconnect()
 
-    async def _send_text_message(self, client, entity, text: str, policy: DMTaskPolicy):
+    async def _send_text_message(self, client, entity, text: str, policy: DMTaskPolicy, *, parse_mode: str | None = None):
         content = str(text or "").strip()
         if not content:
             return None
@@ -278,10 +278,12 @@ class DmSenderManager:
                     await asyncio.sleep(min(2.5, max(0.5, policy.delay_window.next_delay() / 3)))
             except Exception:
                 logger.debug("typing 模拟失败，改为直接发送", exc_info=True)
+        if parse_mode:
+            return await client.send_message(entity, content, parse_mode=parse_mode)
         return await client.send_message(entity, content)
 
     async def _dispatch_single_payload(self, client, entity, payload: dict, content_type: str, policy: DMTaskPolicy):
-        if content_type in {"media", "post"}:
+        if content_type == "media":
             media_path = Path(str(payload.get("media_path") or "")).expanduser()
             if not media_path.exists():
                 raise FileNotFoundError(f"媒体文件不存在: {media_path}")
@@ -294,6 +296,9 @@ class DmSenderManager:
                 force_document=(media_kind == "document"),
                 supports_streaming=(media_kind == "video"),
             )
+        if content_type == "post":
+            main_text = str(payload.get("body") or payload.get("post_code") or payload.get("text") or "").strip()
+            return await self._send_text_message(client, entity, main_text, policy, parse_mode="html")
         if content_type == "forward":
             forward_link = str(payload.get("forward_link") or "").strip()
             if forward_link:
@@ -333,11 +338,11 @@ class DmSenderManager:
             return [
                 part for part in (
                     str(payload.get("greeting") or "").strip(),
-                    str(payload.get("body") or "").strip(),
+                    str(payload.get("body") or payload.get("post_code") or "").strip(),
                     str(payload.get("closing") or "").strip(),
                 ) if part
             ]
-        return [str(payload.get("text") or "").strip()]
+        return [str(payload.get("text") or payload.get("post_code") or "").strip()]
 
     async def _resolve_channel_post_link(self, client, link: str):
         parsed = parse_channel_post_link(link)
@@ -442,6 +447,15 @@ class DmSenderManager:
     async def _emit_complete(self, task_id: int) -> None:
         if self.on_complete:
             await self.on_complete(task_id)
+
+    @staticmethod
+    def _action_success_message(content_type: str) -> str:
+        return {
+            "text": "文本发送成功",
+            "post": "PostBot 图文发送成功",
+            "media": "媒体发送成功",
+            "forward": "频道帖子转发成功",
+        }.get(str(content_type or "text"), "发送成功")
 
     @staticmethod
     def _append_limit_progress(message: str, success_count: int, policy: DMTaskPolicy) -> str:

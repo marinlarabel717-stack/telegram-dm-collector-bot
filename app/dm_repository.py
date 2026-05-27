@@ -12,6 +12,92 @@ if TYPE_CHECKING:
     from .dm_targets import ParsedTarget
 
 
+DM_TASK_STATUS_LABELS = {
+    "queued": "排队中",
+    "running": "私信中",
+    "paused": "已暂停",
+    "stopped": "已停止",
+    "error": "异常",
+    "completed": "已完成",
+}
+
+DM_LOG_ACTION_LABELS = {
+    "account_check": "账号检查",
+    "send": "发送",
+    "pin": "置顶",
+}
+
+DM_LOG_STATUS_LABELS = {
+    "success": "成功",
+    "failed": "失败",
+    "retry": "重试中",
+    "pending": "待发送",
+    "sending": "发送中",
+    "queued": "排队中",
+    "running": "私信中",
+    "stopped": "已停止",
+    "error": "异常",
+    "completed": "已完成",
+}
+
+DM_REPORT_SECTION_LABELS = {
+    "overview": "概览",
+    "failure_reason": "失败原因",
+    "account_stats": "账号统计",
+    "failed_target": "失败目标",
+    "log": "日志",
+}
+
+DM_ERROR_LABELS = {
+    "peer_flood": "官方判定发送过于频繁",
+    "privacy_restricted": "对方隐私限制，无法私信",
+    "user_not_found": "用户不存在或无法解析",
+    "bot_target": "目标不是可私信的普通用户",
+    "blocked": "对方已拉黑或关系异常",
+    "too_many_requests": "请求过于频繁",
+    "mutual_limit": "账号存在双向或发送限制",
+    "frozen": "账号疑似冻结",
+    "flood_wait": "官方限速等待中",
+    "chat_write_forbidden": "这个会话当前不允许发送消息",
+    "media_forbidden": "当前聊天不允许发送媒体",
+    "text_forbidden": "当前聊天不允许发送文本",
+    "forward_forbidden": "这个目标不允许转发该帖子内容",
+    "admin_required": "当前账号没有执行该操作的权限",
+    "send_failed": "发送失败",
+}
+
+
+def dm_task_status_label(status: str | None) -> str:
+    return DM_TASK_STATUS_LABELS.get(str(status or ""), str(status or "-"))
+
+
+
+def dm_log_action_label(action: str | None) -> str:
+    return DM_LOG_ACTION_LABELS.get(str(action or ""), str(action or "-"))
+
+
+
+def dm_log_status_label(status: str | None) -> str:
+    return DM_LOG_STATUS_LABELS.get(str(status or ""), str(status or "-"))
+
+
+
+def dm_report_section_label(section: str | None) -> str:
+    return DM_REPORT_SECTION_LABELS.get(str(section or ""), str(section or "-"))
+
+
+
+def dm_error_label(code: str | None, message: str | None = None) -> str:
+    raw_message = str(message or "").strip()
+    raw_code = str(code or "").strip()
+    if raw_message:
+        return raw_message
+    if raw_code:
+        return DM_ERROR_LABELS.get(raw_code, raw_code)
+    return "未知失败"
+
+
+
 def ensure_dm_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -668,7 +754,7 @@ class DmRepository:
         pending_txt.write_text("\n".join(str(row["normalized_input"]) for row in pending_rows), encoding="utf-8-sig")
         with report_csv.open("w", newline="", encoding="utf-8-sig") as fp:
             writer = csv.writer(fp)
-            writer.writerow(["section", "field_1", "field_2", "field_3", "field_4", "field_5"])
+            writer.writerow(["分区", "字段1", "字段2", "字段3", "字段4", "字段5"])
             if task_row is not None:
                 pending_count = max(
                     0,
@@ -677,30 +763,37 @@ class DmRepository:
                     - int(task_row["failed_count"] or 0)
                     - int(task_row["skipped_count"] or 0),
                 )
-                writer.writerow(["overview", "task_id", task_id, "status", str(task_row["status"] or "-"), "-"])
-                writer.writerow(["overview", "success_count", int(task_row["success_count"] or 0), "failed_count", int(task_row["failed_count"] or 0), "-"])
-                writer.writerow(["overview", "pending_count", pending_count, "skipped_count", int(task_row["skipped_count"] or 0), "-"])
-                writer.writerow(["overview", "worker_count", int(task_row["worker_count"] or 0), "active_accounts", int(task_row["active_accounts"] or 0), "-"])
+                writer.writerow([dm_report_section_label("overview"), "任务ID", task_id, "任务状态", dm_task_status_label(task_row["status"]), "-"])
+                writer.writerow([dm_report_section_label("overview"), "成功数", int(task_row["success_count"] or 0), "失败数", int(task_row["failed_count"] or 0), "-"])
+                writer.writerow([dm_report_section_label("overview"), "待发送数", pending_count, "跳过数", int(task_row["skipped_count"] or 0), "-"])
+                writer.writerow([dm_report_section_label("overview"), "并发线程", int(task_row["worker_count"] or 0), "运行账号", int(task_row["active_accounts"] or 0), "-"])
             for row in failure_summary_rows:
-                writer.writerow(["failure_reason", row["reason"], int(row["total"]), "-", "-", "-"])
+                writer.writerow([dm_report_section_label("failure_reason"), dm_error_label(None, str(row["reason"] or "未知失败")), int(row["total"]), "-", "-", "-"])
             for row in account_rows:
                 writer.writerow([
-                    "account_stats",
+                    dm_report_section_label("account_stats"),
                     row["account_label"],
                     int(row["sent_success_count"] or 0),
                     int(row["sent_fail_count"] or 0),
-                    str(row["status"] or "-"),
+                    dm_task_status_label(row["status"]),
                     str(row["last_error"] or ""),
                 ])
             for row in failed_rows:
-                writer.writerow(["failed_target", row["normalized_input"], row["error_code"], row["error_message"], row["retry_count"], "-"])
+                writer.writerow([
+                    dm_report_section_label("failed_target"),
+                    row["normalized_input"],
+                    dm_error_label(row["error_code"], row["error_message"]),
+                    str(row["error_code"] or "-"),
+                    row["retry_count"],
+                    "-",
+                ])
             for row in log_rows:
                 writer.writerow([
-                    "log",
+                    dm_report_section_label("log"),
                     row["created_at"],
                     row["account_label"],
                     row["normalized_input"],
-                    f"{row['action']}:{row['status']}",
+                    f"{dm_log_action_label(row['action'])}:{dm_log_status_label(row['status'])}",
                     str(row["message"] or row["raw_error"] or "-"),
                 ])
         return DMExportPaths(success_txt=success_txt, failed_txt=failed_txt, report_csv=report_csv, pending_txt=pending_txt)

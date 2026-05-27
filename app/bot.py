@@ -30,7 +30,7 @@ from .database import Database
 from .dm_account_checker import DmAccountChecker
 from .dm_content import content_type_label, message_mode_label, payload_preview
 from .dm_links import normalize_channel_post_link, parse_channel_post_link
-from .dm_repository import DmRepository
+from .dm_repository import DmRepository, dm_log_action_label, dm_log_status_label
 from .dm_sender import DmSenderManager
 from .dm_targets import ParsedTarget, parse_targets_text
 from .emoji import premium_button, restriction_badge, status_badge, tg_emoji
@@ -350,7 +350,7 @@ class DmCollectorBot:
             state = self.user_states.get(update.effective_user.id) or {}
             draft = state.get("draft") or {}
             content_type = draft.get("content_type") or "text"
-            state["mode"] = "await_dm_body" if content_type == "text" else ("await_dm_media" if content_type in {"media", "post"} else "await_dm_forward")
+            state["mode"] = "await_dm_body" if content_type in {"text", "post"} else ("await_dm_media" if content_type == "media" else "await_dm_forward")
             await self._safe_edit(query, self._dm_body_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:greeting"))
             return
         if data == "dm:wizard:back:input":
@@ -575,7 +575,7 @@ class DmCollectorBot:
                 text = bytes(raw_bytes).decode("utf-8")
             except UnicodeDecodeError:
                 text = bytes(raw_bytes).decode("utf-8-sig", errors="ignore")
-            targets, invalid = parse_targets_text(text)
+            targets, invalid, duplicates = parse_targets_text(text)
             if not targets:
                 await update.effective_message.reply_text(
                     f"{tg_emoji(self.settings.emoji_error_id, '❌')} txt 里没识别到有效用户名 / 手机号，请检查后重传。",
@@ -585,6 +585,7 @@ class DmCollectorBot:
             draft = state.setdefault("draft", {})
             draft["targets"] = [asdict(item) for item in targets]
             draft["invalid_targets"] = invalid
+            draft["duplicate_targets"] = duplicates
             draft["account_page"] = 1
             state["mode"] = "dm_select_accounts"
             await update.effective_message.reply_text(
@@ -650,7 +651,7 @@ class DmCollectorBot:
             )
             return
         draft = state.setdefault("draft", {})
-        draft["content_type"] = draft.get("content_type") if draft.get("content_type") in {"media", "post"} else "media"
+        draft["content_type"] = "media"
         draft["media_kind"] = payload["media_kind"]
         draft["media_path"] = payload["media_path"]
         draft["media_file_name"] = payload["file_name"]
@@ -846,7 +847,7 @@ class DmCollectorBot:
             return
 
         if mode == "await_dm_targets":
-            targets, invalid = parse_targets_text(text)
+            targets, invalid, duplicates = parse_targets_text(text)
             if not targets:
                 await update.effective_message.reply_text(
                     f"{tg_emoji(self.settings.emoji_error_id, '❌')} 没识别到有效用户名 / 手机号，请按一行一个重新发送。",
@@ -856,6 +857,7 @@ class DmCollectorBot:
             draft = state.setdefault("draft", {})
             draft["targets"] = [asdict(item) for item in targets]
             draft["invalid_targets"] = invalid
+            draft["duplicate_targets"] = duplicates
             draft["account_page"] = 1
             state["mode"] = "dm_select_accounts"
             await update.effective_message.reply_text(
@@ -873,7 +875,11 @@ class DmCollectorBot:
                 )
                 return
             draft = state.setdefault("draft", {})
-            draft["text"] = text
+            if (draft.get("content_type") or "text") == "post":
+                draft["post_code"] = text
+                draft["text"] = text
+            else:
+                draft["text"] = text
             state["mode"] = "dm_confirm"
             await update.effective_message.reply_text(
                 self._dm_confirm_text(draft),
@@ -886,7 +892,7 @@ class DmCollectorBot:
             draft = state.setdefault("draft", {})
             draft["greeting"] = text
             content_type = draft.get("content_type") or "text"
-            state["mode"] = "await_dm_body" if content_type == "text" else ("await_dm_media" if content_type in {"media", "post"} else "await_dm_forward")
+            state["mode"] = "await_dm_body" if content_type in {"text", "post"} else ("await_dm_media" if content_type == "media" else "await_dm_forward")
             await update.effective_message.reply_text(
                 self._dm_body_prompt_text(draft),
                 parse_mode=ParseMode.HTML,
@@ -903,6 +909,8 @@ class DmCollectorBot:
                 return
             draft = state.setdefault("draft", {})
             draft["body"] = text
+            if (draft.get("content_type") or "text") == "post":
+                draft["post_code"] = text
             state["mode"] = "await_dm_closing"
             await update.effective_message.reply_text(
                 self._dm_closing_prompt_text(draft),
@@ -1485,7 +1493,7 @@ class DmCollectorBot:
             await self._safe_edit(query, self._dm_closing_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:body"))
             return
         content_type = draft.get("content_type") or "text"
-        if content_type in {"media", "post"}:
+        if content_type == "media":
             state["mode"] = "await_dm_media"
         elif content_type == "forward":
             state["mode"] = "await_dm_forward"
@@ -1506,7 +1514,7 @@ class DmCollectorBot:
         current = str(draft.get("content_type") or "text")
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else "text"
         draft["content_type"] = next_value
-        for key in ("text", "body", "media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview", "forward_message_preview", "forward_preview_error"):
+        for key in ("text", "body", "post_code", "media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview", "forward_message_preview", "forward_preview_error"):
             draft.pop(key, None)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
@@ -1602,7 +1610,7 @@ class DmCollectorBot:
             await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
             return
         content_type = draft.get("content_type") or "text"
-        if content_type in {"media", "post"}:
+        if content_type == "media":
             state["mode"] = "await_dm_media"
         elif content_type == "forward":
             state["mode"] = "await_dm_forward"
@@ -1616,8 +1624,10 @@ class DmCollectorBot:
         raw_targets = draft.get("targets") or []
         mode = draft.get("message_mode") or "single"
         content_type = draft.get("content_type") or "text"
-        if content_type in {"media", "post"}:
+        if content_type == "media":
             has_content = bool(draft.get("media_path"))
+        elif content_type == "post":
+            has_content = bool((draft.get("post_code") or draft.get("body") or draft.get("text") or "").strip())
         elif content_type == "forward":
             has_content = bool(draft.get("forward_link"))
         else:
@@ -1667,13 +1677,15 @@ class DmCollectorBot:
         if mode == "three_stage":
             payload["greeting"] = draft.get("greeting") or ""
             payload["closing"] = draft.get("closing") or ""
-        if content_type in {"media", "post"}:
+        if content_type == "media":
             payload.update({
                 "media_kind": draft.get("media_kind") or "file",
                 "media_path": draft.get("media_path") or "",
                 "file_name": draft.get("media_file_name") or "",
                 "caption": draft.get("media_caption") or "",
             })
+        elif content_type == "post":
+            payload["post_code"] = draft.get("post_code") or draft.get("body") or draft.get("text") or ""
         elif content_type == "forward":
             payload.update({
                 "forward_link": draft.get("forward_link") or "",
@@ -1694,13 +1706,17 @@ class DmCollectorBot:
         chat_id = query.message.chat_id if query.message else None
         if not chat_id:
             return
-        await self._send_dm_preview(chat_id, payload, draft.get("content_type") or "text")
+        try:
+            await self._send_dm_preview(chat_id, payload, draft.get("content_type") or "text")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("私信预览失败")
+            await query.answer(f"预览失败：{self._humanize_dm_error(None, str(exc))[:120]}", show_alert=True)
 
     async def _send_dm_preview(self, chat_id: int, payload: dict, content_type: str) -> None:
         mode = str(payload.get("mode") or "single")
         if mode == "three_stage" and str(payload.get("greeting") or "").strip():
             await self.application.bot.send_message(chat_id=chat_id, text=str(payload.get("greeting") or ""))
-        if content_type in {"media", "post"}:
+        if content_type == "media":
             media_path = Path(str(payload.get("media_path") or ""))
             if media_path.exists():
                 with media_path.open("rb") as fp:
@@ -1719,6 +1735,10 @@ class DmCollectorBot:
                         )
             else:
                 await self.application.bot.send_message(chat_id=chat_id, text="【预览失败】媒体文件不存在")
+        elif content_type == "post":
+            post_code = str(payload.get("body") or payload.get("post_code") or payload.get("text") or "").strip()
+            if post_code:
+                await self.application.bot.send_message(chat_id=chat_id, text=post_code, parse_mode=ParseMode.HTML)
         elif content_type == "forward":
             preview_text = str(payload.get("forward_message_preview") or "").strip() or str(payload.get("forward_preview") or "").strip() or "暂时无法抓到帖子摘要"
             await self.application.bot.send_message(
@@ -2429,9 +2449,10 @@ class DmCollectorBot:
         rows, page, total_pages = self._get_dm_account_page_rows(draft)
         targets = draft.get("targets") or []
         invalid = draft.get("invalid_targets") or []
+        duplicates = draft.get("duplicate_targets") or []
         lines = [
             f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>选择私信账号</b>",
-            f"目标数：<code>{len(targets)}</code> · 无效行：<code>{len(invalid)}</code>",
+            f"目标数：<code>{len(targets)}</code> · 重复行：<code>{len(duplicates)}</code> · 无效行：<code>{len(invalid)}</code>",
             f"已选账号：<code>{len(draft.get('account_ids') or [])}</code>",
             f"页码：<code>{page}/{total_pages}</code> · 本页：<code>{len(rows)}</code>",
             "",
@@ -2442,6 +2463,12 @@ class DmCollectorBot:
             lines.append(
                 f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {mark} · {restriction_badge(row['restriction_status'])}"
             )
+        if duplicates:
+            sample = "、".join(html.escape(str(item), quote=False) for item in duplicates[:5])
+            lines.extend(["", f"重复目标已自动去重：<code>{len(duplicates)}</code>"])
+            if sample:
+                suffix = " …" if len(duplicates) > 5 else ""
+                lines.append(f"示例：<code>{sample}{suffix}</code>")
         return "\n".join(lines)
 
     def _get_dm_account_page_rows(self, draft: dict) -> tuple[list, int, int]:
@@ -2464,9 +2491,9 @@ class DmCollectorBot:
             )
         if content_type == "post":
             return (
-                f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送图文 post</b>\n"
+                f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送 PostBot 图文代码</b>\n"
                 f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-                f"请直接发送图片 / 视频 / 文件，并尽量附带 caption 作为正文。"
+                f"请直接粘贴 PostBot 生成的文案代码，我会按代码内容预览和发送。"
             )
         if content_type == "media":
             return (
@@ -2497,9 +2524,9 @@ class DmCollectorBot:
         content_type = draft.get("content_type") or "text"
         if content_type == "post":
             return (
-                f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送第 2 段主内容（图文 post）</b>\n"
+                f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送第 2 段主内容（PostBot 图文代码）</b>\n"
                 f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-                f"请发送图片 / 视频 / 文件，并尽量附带 caption 作为正文。"
+                f"请直接粘贴 PostBot 生成的文案代码。"
             )
         if content_type == "media":
             return (
@@ -2545,7 +2572,6 @@ class DmCollectorBot:
         ]
         if draft.get("message_mode") == "three_stage":
             lines.append(f"三段间隔：<code>第1段后 {stage1_label} / 第2段后 {stage2_label}</code>")
-        lines.extend(["", "配置页只改参数，不会自动发送预览；想看效果请点下面的【预览文案】。"])
         return "\n".join(lines)
 
     def _dm_confirm_text(self, draft: dict) -> str:
@@ -2571,7 +2597,7 @@ class DmCollectorBot:
             lines.append(f"三段间隔：<code>第1段后 {int(policy.get('stage1_delay_seconds', 5))}秒 / 第2段后 {int(policy.get('stage2_delay_seconds', 3))}秒</code>")
         if content_type == "forward" and preview_error:
             lines.append(f"帖子预览状态：<code>抓取失败｜{html.escape(preview_error[:120], quote=False)}</code>")
-        lines.extend(["", "这里不再自动把文案发出来。需要看真实效果，请点【预览文案】。"])
+        lines.extend(["", "需要看真实效果，请点【预览文案】。"])
         return "\n".join(lines)
 
     def _format_dm_task_text(self, task_id: int) -> str:
@@ -2653,8 +2679,10 @@ class DmCollectorBot:
                 account_label = row["account_username"] or row["account_phone"] or row["account_display_name"] or (row["account_id"] and f"#{row['account_id']}") or "-"
                 target = row["normalized_input"] or "-"
                 detail = self._format_dm_log_detail(row, policy)
+                action_label = dm_log_action_label(row["action"])
+                status_label = dm_log_status_label(row["status"])
                 lines.append(
-                    f"• [{html.escape(str(row['status']), quote=False)}] {html.escape(str(account_label), quote=False)} → {html.escape(str(target), quote=False)} · <code>{html.escape(detail, quote=False)[:80]}</code>"
+                    f"• [{html.escape(str(action_label), quote=False)} / {html.escape(str(status_label), quote=False)}] {html.escape(str(account_label), quote=False)} → {html.escape(str(target), quote=False)} · <code>{html.escape(detail, quote=False)[:80]}</code>"
                 )
         return "\n".join(lines)
 
@@ -3261,7 +3289,7 @@ class DmCollectorBot:
             await query.answer(f"没有可导出的{self._account_export_bucket_label(bucket)}账号", show_alert=True)
             return
         try:
-            await self._send_account_export(chat_id, rows, bucket, auto_delete=bucket in {"invalid", "frozen"})
+            await self._send_account_export(chat_id, rows, bucket, auto_delete=True)
         except FileNotFoundError as exc:
             await query.answer(str(exc), show_alert=True)
             return
