@@ -32,9 +32,12 @@ def payload_preview(payload: dict | None, *, content_type: str | None = None, ma
     if kind == "forward":
         link = str(payload.get("forward_link") or "").strip()
         preview = str(payload.get("forward_preview") or "").strip()
+        message_preview = str(payload.get("forward_message_preview") or "").strip()
         summary = f"频道帖子链接：{link or '-'}"
         if preview:
             summary += f"｜备注：{preview}"
+        if message_preview:
+            summary += f"｜帖子预览：{message_preview}"
         return html.escape(summary[:max_len], quote=False)
     mode = str(payload.get("mode") or "single")
     if mode == "three_stage":

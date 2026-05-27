@@ -28,7 +28,7 @@ from .config import Settings
 from .database import Database
 from .dm_account_checker import DmAccountChecker
 from .dm_content import content_type_label, message_mode_label, payload_preview
-from .dm_links import normalize_channel_post_link
+from .dm_links import normalize_channel_post_link, parse_channel_post_link
 from .dm_repository import DmRepository
 from .dm_sender import DmSenderManager
 from .dm_targets import ParsedTarget, parse_targets_text
@@ -596,11 +596,14 @@ class DmCollectorBot:
                 disable_web_page_preview=True,
             )
             return
+        preview_text, preview_error = await self._fetch_channel_post_preview(link, state)
         draft = state.setdefault("draft", {})
         draft["content_type"] = "forward"
         draft["message_mode"] = "single"
         draft["forward_link"] = link
         draft["forward_preview"] = link
+        draft["forward_message_preview"] = preview_text or ""
+        draft["forward_preview_error"] = preview_error or ""
         state["mode"] = "dm_confirm"
         await message.reply_text(
             self._dm_confirm_text(draft),
@@ -608,6 +611,55 @@ class DmCollectorBot:
             disable_web_page_preview=True,
             reply_markup=self._build_dm_confirm_keyboard(),
         )
+
+    async def _fetch_channel_post_preview(self, link: str, state: dict) -> tuple[str | None, str | None]:
+        parsed = parse_channel_post_link(link)
+        if not parsed:
+            return None, "链接格式无法解析"
+        draft = state.get("draft") or {}
+        account_ids = [int(item) for item in (draft.get("account_ids") or [])]
+        if not account_ids:
+            return None, "未选择预览账号"
+        account = None
+        for account_id in account_ids:
+            row = self.db.get_account(account_id)
+            if row and row["status"] == "active":
+                account = row
+                break
+        if not account:
+            return None, "没有可用账号可抓取帖子预览"
+
+        client = None
+        try:
+            client = self.collection_manager._build_client(Path(account["session_file"]))
+            await client.connect()
+            if not await client.is_user_authorized():
+                return None, "预览账号 session 已失效"
+            entity = None
+            if parsed["kind"] == "public":
+                entity = await client.get_entity(f"@{parsed['username']}")
+            else:
+                entity = await client.get_entity(int(f"-100{parsed['channel_id']}"))
+            post = await client.get_messages(entity, ids=int(parsed["message_id"]))
+            if not post:
+                return None, "帖子不存在或当前账号无权查看"
+            text = (getattr(post, "message", None) or getattr(post, "text", None) or getattr(post, "raw_text", None) or "").strip()
+            media_parts: list[str] = []
+            if getattr(post, "photo", None):
+                media_parts.append("图片")
+            if getattr(post, "video", None):
+                media_parts.append("视频")
+            if getattr(post, "document", None):
+                media_parts.append("文件")
+            media_label = f"[{'+'.join(media_parts)}] " if media_parts else ""
+            summary = (media_label + text).strip() or (media_label + "无正文，仅含媒体").strip() or "空消息"
+            return summary[:180], None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("抓取频道帖子预览失败: %s", self.collection_manager._short_error(exc))
+            return None, self.collection_manager._short_error(exc)
+        finally:
+            if client is not None:
+                await client.disconnect()
 
     async def _save_dm_media_payload(self, message) -> dict | None:
         media = None
@@ -1270,7 +1322,7 @@ class DmCollectorBot:
             draft["message_mode"] = "single"
             for key in ("text", "greeting", "body", "closing"):
                 draft.pop(key, None)
-        for key in ("media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview"):
+        for key in ("media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview", "forward_message_preview", "forward_preview_error"):
             draft.pop(key, None)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
@@ -1360,6 +1412,8 @@ class DmCollectorBot:
                 {
                     "forward_link": draft.get("forward_link") or "",
                     "forward_preview": draft.get("forward_preview") or "",
+                    "forward_message_preview": draft.get("forward_message_preview") or "",
+                    "forward_preview_error": draft.get("forward_preview_error") or "",
                 }
             )
             mode = "single"
@@ -2150,10 +2204,12 @@ class DmCollectorBot:
                 {
                     "forward_link": draft.get("forward_link"),
                     "forward_preview": draft.get("forward_preview"),
+                    "forward_message_preview": draft.get("forward_message_preview"),
                 },
                 content_type="forward",
                 max_len=200,
             )
+            preview_error = str(draft.get("forward_preview_error") or "").strip()
             mode_label = "频道帖子链接"
         elif draft.get("message_mode") == "three_stage":
             preview = payload_preview(
@@ -2170,6 +2226,9 @@ class DmCollectorBot:
         else:
             preview = payload_preview({"text": draft.get("text")}, content_type="text", max_len=200)
             mode_label = "单条文本私信"
+        extra_preview_line = ""
+        if content_type == "forward" and preview_error:
+            extra_preview_line = f"\n帖子预览：<code>抓取失败｜{html.escape(preview_error[:120], quote=False)}</code>"
         return (
             f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>确认启动私信任务</b>\n"
             f"模式：<code>{mode_label}</code>\n"
@@ -2179,7 +2238,7 @@ class DmCollectorBot:
             f"随机间隔：<code>{policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒</code>\n"
             f"打字状态：<code>{'开启' if policy.get('typing_simulation', True) else '关闭'}</code>\n"
             f"账号策略：<code>{'自动切号' if policy.get('auto_switch_account', True) else '单号用完即停'}</code>\n\n"
-            f"文案预览：\n<code>{preview}</code>"
+            f"文案预览：\n<code>{preview}</code>{extra_preview_line}"
         )
 
     def _format_dm_task_text(self, task_id: int) -> str:
@@ -2210,6 +2269,8 @@ class DmCollectorBot:
             f"发送模式：<code>{message_mode_label(task['message_mode'], content_type=content_type)}</code>",
             f"发送配置：<code>上限 {policy.get('per_account_success_limit', 40)} / 间隔 {policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒 / {'打字开' if policy.get('typing_simulation', True) else '打字关'}</code>",
         ]
+        if content_type == "forward" and payload.get("forward_preview_error"):
+            lines.append(f"帖子预览：<code>抓取失败｜{html.escape(str(payload.get('forward_preview_error'))[:120], quote=False)}</code>")
         if task["last_error"]:
             lines.append(f"最近错误：<code>{html.escape(str(task['last_error']), quote=False)}</code>")
         if current:
