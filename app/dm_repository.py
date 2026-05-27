@@ -32,6 +32,8 @@ def ensure_dm_schema(conn: sqlite3.Connection) -> None:
             payload_json TEXT NOT NULL DEFAULT '{}',
             progress_chat_id INTEGER,
             progress_message_id INTEGER,
+            stop_requested INTEGER NOT NULL DEFAULT 0,
+            result_file_path TEXT,
             last_error TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             started_at TEXT,
@@ -116,6 +118,8 @@ def ensure_dm_schema(conn: sqlite3.Connection) -> None:
         "ALTER TABLE accounts ADD COLUMN restriction_reason TEXT",
         "ALTER TABLE accounts ADD COLUMN restriction_raw_reply TEXT",
         "ALTER TABLE accounts ADD COLUMN restriction_checked_at TEXT",
+        "ALTER TABLE dm_tasks ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE dm_tasks ADD COLUMN result_file_path TEXT",
     ):
         try:
             conn.execute(statement)
@@ -219,6 +223,50 @@ class DmRepository:
         with self.db.lock:
             return self.db.conn.execute("SELECT * FROM dm_tasks WHERE id=?", (task_id,)).fetchone()
 
+    def list_dm_tasks(self, *, limit: int = 10, offset: int = 0, history: bool = False) -> list[sqlite3.Row]:
+        with self.db.lock:
+            if history:
+                query = "SELECT * FROM dm_tasks ORDER BY id DESC LIMIT ? OFFSET ?"
+                return self.db.conn.execute(query, (limit, offset)).fetchall()
+            query = "SELECT * FROM dm_tasks WHERE status IN ('queued','running','paused','stopped','error','completed') ORDER BY id DESC LIMIT ? OFFSET ?"
+            return self.db.conn.execute(query, (limit, offset)).fetchall()
+
+    def count_dm_tasks(self, *, history: bool = False) -> int:
+        with self.db.lock:
+            if history:
+                return int(self.db.conn.execute("SELECT COUNT(*) FROM dm_tasks WHERE status IN ('completed','stopped','error')").fetchone()[0])
+            return int(self.db.conn.execute("SELECT COUNT(*) FROM dm_tasks WHERE status IN ('queued','running','paused','stopped','error','completed')").fetchone()[0])
+
+    def list_dm_task_accounts(self, task_id: int) -> list[sqlite3.Row]:
+        with self.db.lock:
+            return self.db.conn.execute(
+                """
+                SELECT ta.*, a.session_file, a.session_name, a.username, a.phone, a.display_name, a.status AS account_runtime_status,
+                       a.restriction_status, a.restriction_reason
+                FROM dm_task_accounts ta
+                JOIN accounts a ON a.id = ta.account_id
+                WHERE ta.task_id=?
+                ORDER BY ta.id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+
+    def list_dm_task_recipients(self, task_id: int, *, statuses: Sequence[str] | None = None, limit: int | None = None) -> list[sqlite3.Row]:
+        with self.db.lock:
+            where = ["tr.task_id=?"]
+            params: list[object] = [task_id]
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                where.append(f"tr.status IN ({placeholders})")
+                params.extend(statuses)
+            limit_sql = f" LIMIT {int(limit)}" if limit else ""
+            query = (
+                "SELECT tr.*, r.normalized_input, r.input_type, r.username, r.phone "
+                "FROM dm_task_recipients tr JOIN dm_recipients r ON r.id = tr.recipient_id "
+                f"WHERE {' AND '.join(where)} ORDER BY tr.id ASC{limit_sql}"
+            )
+            return self.db.conn.execute(query, params).fetchall()
+
     def create_or_get_recipients(self, targets: Iterable[ParsedTarget]) -> list[int]:
         recipient_ids: list[int] = []
         with self.db.lock:
@@ -252,6 +300,193 @@ class DmRepository:
             self.db.conn.execute(
                 "UPDATE dm_tasks SET total_targets=(SELECT COUNT(*) FROM dm_task_recipients WHERE task_id=?), updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (task_id, task_id),
+            )
+            self.db.conn.commit()
+
+    def mark_dm_task_status(self, task_id: int, status: str, *, last_error: str | None = None) -> None:
+        with self.db.lock:
+            started_expr = "COALESCE(started_at, CURRENT_TIMESTAMP)" if status == "running" else "started_at"
+            finished_expr = "CURRENT_TIMESTAMP" if status in {"completed", "error", "stopped"} else "finished_at"
+            self.db.conn.execute(
+                f"""
+                UPDATE dm_tasks SET
+                    status=?,
+                    last_error=?,
+                    started_at={started_expr},
+                    finished_at={finished_expr},
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (status, last_error, task_id),
+            )
+            self.db.conn.commit()
+
+    def set_dm_task_progress_message(self, task_id: int, chat_id: int, message_id: int) -> None:
+        with self.db.lock:
+            self.db.conn.execute(
+                "UPDATE dm_tasks SET progress_chat_id=?, progress_message_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (chat_id, message_id, task_id),
+            )
+            self.db.conn.commit()
+
+    def request_dm_task_stop(self, task_id: int) -> None:
+        with self.db.lock:
+            self.db.conn.execute(
+                "UPDATE dm_tasks SET stop_requested=1, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (task_id,),
+            )
+            self.db.conn.commit()
+
+    def should_stop_dm_task(self, task_id: int) -> bool:
+        with self.db.lock:
+            row = self.db.conn.execute("SELECT stop_requested FROM dm_tasks WHERE id=?", (task_id,)).fetchone()
+            return bool(row and int(row[0]))
+
+    def recover_interrupted_dm_tasks(self, *, reason: str) -> int:
+        with self.db.lock:
+            rows = self.db.conn.execute("SELECT id FROM dm_tasks WHERE status IN ('queued', 'running') ORDER BY id ASC").fetchall()
+            task_ids = [int(row["id"]) for row in rows]
+            if not task_ids:
+                return 0
+            placeholders = ",".join("?" for _ in task_ids)
+            self.db.conn.execute(
+                f"UPDATE dm_tasks SET status='stopped', stop_requested=1, last_error=?, finished_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+                [reason, *task_ids],
+            )
+            self.db.conn.execute(
+                f"UPDATE dm_task_accounts SET status='stopped', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE task_id IN ({placeholders}) AND status IN ('queued','running')",
+                [reason, *task_ids],
+            )
+            self.db.conn.execute(
+                f"UPDATE dm_task_recipients SET status='pending', updated_at=CURRENT_TIMESTAMP WHERE task_id IN ({placeholders}) AND status='sending'",
+                task_ids,
+            )
+            self.db.conn.commit()
+            return len(task_ids)
+
+    def update_dm_task_account(
+        self,
+        task_id: int,
+        account_id: int,
+        *,
+        status: str | None = None,
+        success_delta: int = 0,
+        fail_delta: int = 0,
+        frequent_delta: int = 0,
+        last_error: str | None = None,
+    ) -> None:
+        with self.db.lock:
+            fields = [
+                "sent_success_count=sent_success_count + ?",
+                "sent_fail_count=sent_fail_count + ?",
+                "frequent_error_count=frequent_error_count + ?",
+                "last_sent_at=CURRENT_TIMESTAMP",
+                "updated_at=CURRENT_TIMESTAMP",
+            ]
+            params: list[object] = [success_delta, fail_delta, frequent_delta]
+            if status is not None:
+                fields.insert(0, "status=?")
+                params.insert(0, status)
+            if last_error is not None:
+                fields.append("last_error=?")
+                params.append(last_error)
+            params.extend([task_id, account_id])
+            self.db.conn.execute(
+                f"UPDATE dm_task_accounts SET {', '.join(fields)} WHERE task_id=? AND account_id=?",
+                params,
+            )
+            self.db.conn.commit()
+
+    def mark_dm_recipient_sending(self, task_id: int, recipient_id: int, account_id: int) -> None:
+        with self.db.lock:
+            self.db.conn.execute(
+                """
+                UPDATE dm_task_recipients SET
+                    status='sending',
+                    assigned_account_id=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE task_id=? AND recipient_id=?
+                """,
+                (account_id, task_id, recipient_id),
+            )
+            self.db.conn.commit()
+
+    def mark_dm_recipient_result(
+        self,
+        task_id: int,
+        recipient_id: int,
+        *,
+        account_id: int | None,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        increment_retry: bool = False,
+    ) -> None:
+        with self.db.lock:
+            retry_expr = "retry_count + 1" if increment_retry else "retry_count"
+            sent_expr = "CURRENT_TIMESTAMP" if status == "success" else "sent_at"
+            self.db.conn.execute(
+                f"""
+                UPDATE dm_task_recipients SET
+                    status=?,
+                    assigned_account_id=?,
+                    error_code=?,
+                    error_message=?,
+                    retry_count={retry_expr},
+                    sent_at={sent_expr},
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE task_id=? AND recipient_id=?
+                """,
+                (status, account_id, error_code, error_message, task_id, recipient_id),
+            )
+            self.db.conn.commit()
+
+    def sync_dm_task_metrics(self, task_id: int) -> None:
+        with self.db.lock:
+            row = self.db.conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END), 0) AS success_count,
+                    COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+                    COALESCE(SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END), 0) AS skipped_count
+                FROM dm_task_recipients
+                WHERE task_id=?
+                """,
+                (task_id,),
+            ).fetchone()
+            active_accounts = self.db.conn.execute(
+                "SELECT COUNT(*) FROM dm_task_accounts WHERE task_id=? AND status='running'",
+                (task_id,),
+            ).fetchone()[0]
+            self.db.conn.execute(
+                """
+                UPDATE dm_tasks SET
+                    success_count=?,
+                    failed_count=?,
+                    skipped_count=?,
+                    active_accounts=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (
+                    int(row["success_count"]),
+                    int(row["failed_count"]),
+                    int(row["skipped_count"]),
+                    int(active_accounts),
+                    task_id,
+                ),
+            )
+            self.db.conn.commit()
+
+    def count_dm_pending_recipients(self, task_id: int) -> int:
+        with self.db.lock:
+            return int(self.db.conn.execute("SELECT COUNT(*) FROM dm_task_recipients WHERE task_id=? AND status IN ('pending','sending')", (task_id,)).fetchone()[0])
+
+    def set_dm_task_result_file(self, task_id: int, result_file_path: str) -> None:
+        with self.db.lock:
+            self.db.conn.execute(
+                "UPDATE dm_tasks SET result_file_path=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (result_file_path, task_id),
             )
             self.db.conn.commit()
 

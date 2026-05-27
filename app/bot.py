@@ -27,8 +27,10 @@ from .collector import CollectionManager
 from .config import Settings
 from .database import Database
 from .dm_account_checker import DmAccountChecker
+from .dm_policy import DMTaskPolicy
 from .dm_repository import DmRepository
 from .dm_sender import DmSenderManager
+from .dm_targets import ParsedTarget, parse_targets_text
 from .emoji import premium_button, restriction_badge, status_badge, tg_emoji
 from .version import __version__
 
@@ -47,10 +49,17 @@ class DmCollectorBot:
             on_complete=self._on_task_complete,
         )
         self.dm_account_checker = DmAccountChecker(self.dm_repository, self.collection_manager)
-        self.dm_sender = DmSenderManager(self.dm_repository)
+        self.dm_sender = DmSenderManager(
+            self.dm_repository,
+            self.db,
+            self.collection_manager,
+            on_progress=self._on_dm_task_progress,
+            on_complete=self._on_dm_task_complete,
+        )
         self.application = Application.builder().token(settings.bot_token).build()
         self.user_states: dict[int, dict] = {}
         self.task_runners: dict[int, asyncio.Task] = {}
+        self.dm_task_runners: dict[int, asyncio.Task] = {}
         self.task_watchers: dict[int, asyncio.Task] = {}
         self.progress_throttle: dict[int, float] = {}
         self.progress_snapshots: dict[int, dict[str, float | int]] = {}
@@ -59,6 +68,9 @@ class DmCollectorBot:
         recovered = self.db.recover_interrupted_tasks(reason="机器人重启，已停止上次未完成任务并释放账号")
         if recovered:
             logger.info("启动时已回收中断采集任务: %s", recovered)
+        recovered_dm = self.dm_repository.recover_interrupted_dm_tasks(reason="机器人重启，已停止上次未完成私信任务并重置发送进度")
+        if recovered_dm:
+            logger.info("启动时已回收中断私信任务: %s", recovered_dm)
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -127,6 +139,9 @@ class DmCollectorBot:
         if data == "menu:collect":
             await self._show_collect_menu(query)
             return
+        if data == "menu:dm":
+            await self._show_dm_menu(query)
+            return
         if data == "menu:history":
             await self._show_history(query, page=1)
             return
@@ -162,6 +177,38 @@ class DmCollectorBot:
             return
         if data == "collect:new":
             await self._show_collect_create_menu(query)
+            return
+        if data == "dm:new":
+            await self._start_dm_wizard(query, update.effective_user.id)
+            return
+        if data == "dm:tasks":
+            await self._show_dm_task_list(query, page=1)
+            return
+        if data.startswith("dm:tasks:"):
+            page = int(data.split(":")[-1])
+            await self._show_dm_task_list(query, page=page)
+            return
+        if data.startswith("dm:view:"):
+            parts = data.split(":")
+            task_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await self._show_dm_task_detail(query, task_id, page=page)
+            return
+        if data.startswith("dm:refresh:"):
+            parts = data.split(":")
+            task_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await self._show_dm_task_detail(query, task_id, page=page)
+            return
+        if data.startswith("dm:stop:"):
+            parts = data.split(":")
+            task_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await self._stop_dm_task(query, task_id, page=page)
+            return
+        if data.startswith("dm:export:"):
+            task_id = int(data.split(":")[-1])
+            await self._send_dm_task_result(update.effective_chat.id, task_id)
             return
         if data == "collect:new:channel":
             await self._start_collect_wizard(query, update.effective_user.id)
@@ -222,6 +269,23 @@ class DmCollectorBot:
         if data == "wizard:cancel":
             self._clear_state(update.effective_user.id)
             await self._safe_edit(query, self._build_welcome_text(update.effective_user.id), self._build_main_menu(update.effective_user.id))
+            return
+        if data == "dm:wizard:cancel":
+            self._clear_state(update.effective_user.id)
+            await self._safe_edit(query, self._build_welcome_text(update.effective_user.id), self._build_main_menu(update.effective_user.id))
+            return
+        if data == "dm:wizard:acc:auto":
+            await self._dm_wizard_auto_accounts(query, update.effective_user.id)
+            return
+        if data.startswith("dm:wizard:acc:toggle:"):
+            account_id = int(data.split(":")[-1])
+            await self._dm_wizard_toggle_account(query, update.effective_user.id, account_id)
+            return
+        if data == "dm:wizard:acc:done":
+            await self._dm_wizard_finish_accounts(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:start":
+            await self._dm_wizard_start_task(query, update.effective_user.id)
             return
         if data.startswith("wizard:gflt:toggle:"):
             key = data.split(":")[-1]
@@ -388,6 +452,35 @@ class DmCollectorBot:
 
     async def _handle_target_txt_upload(self, update: Update, document, state: dict) -> None:
         mode = state.get("mode")
+        if mode == "await_dm_targets":
+            await update.effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 已收到用户名单，正在读取并解析，请稍等……",
+                parse_mode=ParseMode.HTML,
+            )
+            await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+            tg_file = await document.get_file()
+            raw_bytes = await tg_file.download_as_bytearray()
+            try:
+                text = bytes(raw_bytes).decode("utf-8")
+            except UnicodeDecodeError:
+                text = bytes(raw_bytes).decode("utf-8-sig", errors="ignore")
+            targets, invalid = parse_targets_text(text)
+            if not targets:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} txt 里没识别到有效用户名 / 手机号，请检查后重传。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            draft = state.setdefault("draft", {})
+            draft["targets"] = [item.__dict__ for item in targets]
+            draft["invalid_targets"] = invalid
+            state["mode"] = "dm_select_accounts"
+            await update.effective_message.reply_text(
+                self._dm_select_accounts_text(draft),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._build_dm_account_selection_keyboard(draft.get("account_ids") or []),
+            )
+            return
         if mode not in {"await_channels", "await_group_targets"}:
             await update.effective_message.reply_text(
                 f"{tg_emoji(self.settings.emoji_idea_id, '💡')} 这个 txt 只在 <b>新建采集任务</b> 时使用。先点“新建采集任务”，再上传 txt。",
@@ -470,6 +563,42 @@ class DmCollectorBot:
                 self._select_days_text(channels, task_type=draft.get("task_type", "channel")),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._build_days_keyboard(),
+            )
+            return
+
+        if mode == "await_dm_targets":
+            targets, invalid = parse_targets_text(text)
+            if not targets:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 没识别到有效用户名 / 手机号，请按一行一个重新发送。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            draft = state.setdefault("draft", {})
+            draft["targets"] = [item.__dict__ for item in targets]
+            draft["invalid_targets"] = invalid
+            state["mode"] = "dm_select_accounts"
+            await update.effective_message.reply_text(
+                self._dm_select_accounts_text(draft),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._build_dm_account_selection_keyboard(draft.get("account_ids") or []),
+            )
+            return
+
+        if mode == "await_dm_message":
+            if not text:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请输入要发送的文本内容。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            draft = state.setdefault("draft", {})
+            draft["text"] = text
+            state["mode"] = "dm_confirm"
+            await update.effective_message.reply_text(
+                self._dm_confirm_text(draft),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._build_dm_confirm_keyboard(),
             )
             return
 
@@ -863,6 +992,170 @@ class DmCollectorBot:
             ],
         ]
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
+
+    async def _show_dm_menu(self, query) -> None:
+        text = (
+            f"{tg_emoji(self.settings.emoji_start_id, '🎊')} <b>私信任务</b>\n"
+            f"当前支持：文本私信、txt/手输用户名单、单号上限、自动切号、实时成功失败统计。"
+        )
+        keyboard = [
+            [
+                premium_button("新建私信任务", self.settings.emoji_idea_id, callback_data="dm:new"),
+                premium_button("任务列表", self.settings.emoji_history_id, callback_data="dm:tasks"),
+            ],
+            [
+                premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
+                premium_button("账号管理", self.settings.emoji_list_id, callback_data="menu:accounts"),
+            ],
+        ]
+        await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
+
+    async def _start_dm_wizard(self, query, user_id: int) -> None:
+        active_accounts = self.db.get_active_accounts()
+        if not active_accounts:
+            await self._safe_edit(
+                query,
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前没有可用账号，请先上传并验证 session。",
+                self._single_back_keyboard("menu:accounts"),
+            )
+            return
+        self.user_states[user_id] = {
+            "mode": "await_dm_targets",
+            "draft": {
+                "message_mode": "single",
+                "content_type": "text",
+                "account_ids": [],
+                "policy": {
+                    "per_account_success_limit": 40,
+                    "auto_switch_account": True,
+                    "auto_stop_when_accounts_exhausted": True,
+                    "typing_simulation": True,
+                },
+            },
+        }
+        await self._safe_edit(query, self._dm_targets_prompt_text(), self._single_back_keyboard("dm:wizard:cancel"))
+
+    async def _dm_wizard_auto_accounts(self, query, user_id: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        draft["account_ids"] = [int(row["id"]) for row in self.db.get_active_accounts()]
+        await self._safe_edit(query, self._dm_select_accounts_text(draft), self._build_dm_account_selection_keyboard(draft["account_ids"]))
+
+    async def _dm_wizard_toggle_account(self, query, user_id: int, account_id: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        selected_ids = list(draft.get("account_ids") or [])
+        if account_id in selected_ids:
+            selected_ids.remove(account_id)
+        else:
+            selected_ids.append(account_id)
+        draft["account_ids"] = selected_ids
+        await self._safe_edit(query, self._dm_select_accounts_text(draft), self._build_dm_account_selection_keyboard(selected_ids))
+
+    async def _dm_wizard_finish_accounts(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        if not draft.get("account_ids"):
+            await query.answer("至少选择一个账号", show_alert=True)
+            return
+        state["mode"] = "await_dm_message"
+        await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:cancel"))
+
+    async def _dm_wizard_start_task(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        raw_targets = draft.get("targets") or []
+        if not raw_targets or not draft.get("account_ids") or not (draft.get("text") or "").strip():
+            await query.answer("任务信息不完整", show_alert=True)
+            return
+
+        targets = [ParsedTarget(**item) for item in raw_targets]
+        recipient_ids = self.dm_repository.create_or_get_recipients(targets)
+        policy = draft.get("policy") or {}
+        worker_count = max(1, min(len(draft.get("account_ids") or []), 3))
+        task = self.dm_repository.create_dm_task(
+            requester_id=user_id,
+            account_ids=[int(item) for item in draft.get("account_ids") or []],
+            worker_count=worker_count,
+            message_mode="single",
+            content_type="text",
+            payload={"text": draft.get("text") or ""},
+            policy=policy,
+        )
+        self.dm_repository.attach_task_recipients(int(task["id"]), recipient_ids)
+        self._clear_state(user_id)
+        runner = asyncio.create_task(self.dm_sender.run_task(int(task["id"]), DMTaskPolicy()))
+        self.dm_task_runners[int(task["id"])] = runner
+
+        def _cleanup_dm_runner(_: asyncio.Task, task_id: int = int(task["id"])) -> None:
+            self.dm_task_runners.pop(task_id, None)
+
+        runner.add_done_callback(_cleanup_dm_runner)
+        sent = await self.application.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=self._format_dm_task_text(int(task["id"])),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=self._build_dm_task_keyboard(int(task["id"])),
+        )
+        self.dm_repository.set_dm_task_progress_message(int(task["id"]), sent.chat_id, sent.message_id)
+        if query.message:
+            await query.message.delete()
+
+    async def _show_dm_task_list(self, query, page: int = 1) -> None:
+        per_page = 6
+        total = self.dm_repository.count_dm_tasks()
+        total_pages = max(1, ceil(total / per_page))
+        page = max(1, min(page, total_pages))
+        tasks = self.dm_repository.list_dm_tasks(limit=per_page, offset=(page - 1) * per_page)
+        lines = [
+            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>私信任务列表</b>",
+            f"页码：<code>{page}/{total_pages}</code>",
+            f"任务总数：<code>{total}</code>",
+        ]
+        if not tasks:
+            lines.append("\n还没有私信任务。")
+        else:
+            for task in tasks:
+                lines.append(
+                    f"\n• 私信任务 #{task['id']} · {status_badge(task['status'])} · 成功 <code>{task['success_count']}</code> · 失败 <code>{task['failed_count']}</code> / 总 <code>{task['total_targets']}</code>"
+                )
+        keyboard = []
+        row_buffer = []
+        for task in tasks:
+            row_buffer.append(premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"dm:view:{task['id']}:{page}"))
+            if len(row_buffer) == 2:
+                keyboard.append(row_buffer)
+                row_buffer = []
+        if row_buffer:
+            keyboard.append(row_buffer)
+        nav = []
+        if page > 1:
+            nav.append(premium_button("上一页", self.settings.emoji_back_id, callback_data=f"dm:tasks:{page - 1}"))
+        if page < total_pages:
+            nav.append(premium_button("下一页", self.settings.emoji_next_id, callback_data=f"dm:tasks:{page + 1}"))
+        if nav:
+            keyboard.append(nav)
+        keyboard.append([
+            premium_button("返回私信任务", self.settings.emoji_back_id, callback_data="menu:dm"),
+            premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data=f"dm:tasks:{page}"),
+        ])
+        await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
+
+    async def _show_dm_task_detail(self, query, task_id: int, page: int = 1) -> None:
+        await self._safe_edit(query, self._format_dm_task_text(task_id), self._build_dm_task_keyboard(task_id, page=page))
+
+    async def _stop_dm_task(self, query, task_id: int, page: int = 1) -> None:
+        self.dm_repository.request_dm_task_stop(task_id)
+        runner = self.dm_task_runners.get(task_id)
+        if runner and not runner.done():
+            runner.cancel()
+            try:
+                await runner
+            except asyncio.CancelledError:
+                pass
+        self.dm_repository.mark_dm_task_status(task_id, "stopped", last_error="管理员手动停止任务")
+        await self._show_dm_task_detail(query, task_id, page=page)
 
     async def _show_task_list(self, query, page: int = 1) -> None:
         per_page = 6
@@ -1261,6 +1554,30 @@ class DmCollectorBot:
             return
         await self._send_task_result(task["requester_id"], task_id, announce=True)
 
+    async def _on_dm_task_progress(self, task_id: int) -> None:
+        task = self.dm_repository.get_dm_task(task_id)
+        if not task or not task["progress_chat_id"] or not task["progress_message_id"]:
+            return
+        try:
+            await self.application.bot.edit_message_text(
+                chat_id=task["progress_chat_id"],
+                message_id=task["progress_message_id"],
+                text=self._format_dm_task_text(task_id),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=self._build_dm_task_keyboard(task_id),
+            )
+        except BadRequest as exc:
+            if "Message is not modified" not in str(exc):
+                logger.exception("刷新私信任务进度失败: task_id=%s", task_id)
+
+    async def _on_dm_task_complete(self, task_id: int) -> None:
+        await self._on_dm_task_progress(task_id)
+        task = self.dm_repository.get_dm_task(task_id)
+        if not task:
+            return
+        await self._send_dm_task_result(task["requester_id"], task_id)
+
     async def _task_progress_heartbeat(self, task_id: int) -> None:
         try:
             while True:
@@ -1419,6 +1736,89 @@ class DmCollectorBot:
             f"收到后会自动：\n"
             f"1. 保存/解压文件\n2. 验证是否已登录\n3. 写入账号列表"
         )
+
+    def _dm_targets_prompt_text(self) -> str:
+        return (
+            f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>新建私信任务</b>\n"
+            f"请直接发送用户名单，或上传 <code>.txt</code> 文件。\n\n"
+            f"支持格式：\n"
+            f"<code>@username</code>\n<code>username</code>\n<code>https://t.me/username</code>\n<code>+1649494646</code>"
+        )
+
+    def _dm_select_accounts_text(self, draft: dict) -> str:
+        targets = draft.get("targets") or []
+        invalid = draft.get("invalid_targets") or []
+        lines = [
+            f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>选择私信账号</b>",
+            f"目标数：<code>{len(targets)}</code> · 无效行：<code>{len(invalid)}</code>",
+            f"已选账号：<code>{len(draft.get('account_ids') or [])}</code>",
+            "",
+        ]
+        for row in self.db.get_active_accounts():
+            mark = "已选" if int(row["id"]) in (draft.get("account_ids") or []) else "未选"
+            label = row["username"] or row["phone"] or row["session_name"]
+            lines.append(
+                f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {mark} · {restriction_badge(row['restriction_status'])}"
+            )
+        return "\n".join(lines)
+
+    def _dm_message_prompt_text(self, draft: dict) -> str:
+        return (
+            f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>发送文本内容</b>\n"
+            f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+            f"请直接发送要私信的文本内容。"
+        )
+
+    def _dm_confirm_text(self, draft: dict) -> str:
+        preview = html.escape(str((draft.get("text") or "")[:200]), quote=False)
+        return (
+            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>确认启动私信任务</b>\n"
+            f"模式：<code>单条文本私信</code>\n"
+            f"目标数：<code>{len(draft.get('targets') or [])}</code>\n"
+            f"账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+            f"单号上限：<code>{(draft.get('policy') or {}).get('per_account_success_limit', 40)}</code>\n\n"
+            f"文案预览：\n<code>{preview}</code>"
+        )
+
+    def _format_dm_task_text(self, task_id: int) -> str:
+        task = self.dm_repository.get_dm_task(task_id)
+        if not task:
+            return self._not_found_text("私信任务不存在或已被删除。")
+        accounts = self.dm_repository.list_dm_task_accounts(task_id)
+        failed = self.dm_repository.list_dm_task_recipients(task_id, statuses=("failed",), limit=8)
+        payload = json.loads(str(task["payload_json"] or "{}"))
+        body = str(payload.get("text") or "")
+        lines = [
+            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>私信任务 #{task['id']}</b> <code>v{__version__}</code>",
+            f"状态：{status_badge(task['status'])}",
+            f"总目标：<code>{task['total_targets']}</code>",
+            f"成功：<code>{task['success_count']}</code>",
+            f"失败：<code>{task['failed_count']}</code>",
+            f"跳过：<code>{task['skipped_count']}</code>",
+            f"运行账号：<code>{task['active_accounts']}</code>",
+            f"创建时间：<code>{task['created_at'] or '-'}</code>",
+            f"开始时间：<code>{task['started_at'] or '-'}</code>",
+        ]
+        if task["last_error"]:
+            lines.append(f"最近错误：<code>{html.escape(str(task['last_error']), quote=False)}</code>")
+        lines.append("")
+        lines.append(f"文案：<code>{html.escape(body[:240], quote=False)}</code>")
+        if accounts:
+            lines.append("")
+            lines.append("<b>账号进度</b>")
+            for row in accounts[:6]:
+                label = row["username"] or row["phone"] or row["session_name"]
+                lines.append(
+                    f"• #{self._account_display_code(row['account_id'])} {html.escape(str(label), quote=False)} · 成功 <code>{row['sent_success_count']}</code> · 失败 <code>{row['sent_fail_count']}</code> · {status_badge(row['status'])}"
+                )
+        if failed:
+            lines.append("")
+            lines.append("<b>最近失败</b>")
+            for row in failed:
+                lines.append(
+                    f"• {html.escape(str(row['normalized_input']), quote=False)} · <code>{html.escape(str(row['error_message'] or row['error_code'] or '-'), quote=False)}</code>"
+                )
+        return "\n".join(lines)
 
     def _channels_prompt_text(self) -> str:
         return (
@@ -1582,7 +1982,10 @@ class DmCollectorBot:
                 premium_button("采集用户", self.settings.emoji_progress_id, callback_data="menu:collect"),
             ],
             [
+                premium_button("私信任务", self.settings.emoji_start_id, callback_data="menu:dm"),
                 premium_button("统计", self.settings.emoji_stats_id, callback_data="menu:stats"),
+            ],
+            [
                 premium_button("历史结果", self.settings.emoji_history_id, callback_data="menu:history"),
             ],
         ]
@@ -1664,6 +2067,31 @@ class DmCollectorBot:
         ])
         return InlineKeyboardMarkup(keyboard)
 
+    def _build_dm_account_selection_keyboard(self, selected_ids: list[int]) -> InlineKeyboardMarkup:
+        keyboard = []
+        row_buffer = []
+        for row in self.db.get_active_accounts():
+            is_selected = int(row["id"]) in selected_ids
+            icon = self.settings.emoji_ok_id if is_selected else self.settings.emoji_error_id
+            title = row["username"] or row["phone"] or row["session_name"]
+            row_buffer.append(
+                premium_button(f"#{self._account_display_code(row)} {str(title)[:28]}", icon, callback_data=f"dm:wizard:acc:toggle:{row['id']}")
+            )
+            if len(row_buffer) == 2:
+                keyboard.append(row_buffer)
+                row_buffer = []
+        if row_buffer:
+            keyboard.append(row_buffer)
+        keyboard.append([
+            premium_button("使用全部可用账号", self.settings.emoji_all_id, callback_data="dm:wizard:acc:auto"),
+            premium_button("完成选择", self.settings.emoji_ok_id, callback_data="dm:wizard:acc:done"),
+        ])
+        keyboard.append([
+            premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
+            premium_button("返回私信任务", self.settings.emoji_back_id, callback_data="menu:dm"),
+        ])
+        return InlineKeyboardMarkup(keyboard)
+
     def _build_workers_keyboard(self, draft: dict) -> InlineKeyboardMarkup:
         max_workers = self._max_worker_count(draft)
         presets = [1, 2, 3, 5, 10, 20, 30, 50]
@@ -1734,6 +2162,38 @@ class DmCollectorBot:
             ])
         return InlineKeyboardMarkup(keyboard)
 
+    def _build_dm_confirm_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                premium_button("开始私信", self.settings.emoji_start_id, callback_data="dm:wizard:start"),
+                premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
+            ]
+        ])
+
+    def _build_dm_task_keyboard(self, task_id: int, *, page: int = 1) -> InlineKeyboardMarkup:
+        task = self.dm_repository.get_dm_task(task_id)
+        keyboard = [
+            [
+                premium_button("成功", self.settings.emoji_success_id, callback_data=f"dm:refresh:{task_id}:{page}"),
+                premium_button(str(task["success_count"] if task else 0), self.settings.emoji_success_id, callback_data=f"dm:refresh:{task_id}:{page}"),
+            ],
+            [
+                premium_button("失败", self.settings.emoji_error_id, callback_data=f"dm:refresh:{task_id}:{page}"),
+                premium_button(str(task["failed_count"] if task else 0), self.settings.emoji_error_id, callback_data=f"dm:refresh:{task_id}:{page}"),
+            ],
+            [
+                premium_button("导出结果", self.settings.emoji_export_id, callback_data=f"dm:export:{task_id}"),
+                premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"dm:refresh:{task_id}:{page}"),
+            ],
+            [
+                premium_button("返回任务列表", self.settings.emoji_back_id, callback_data=f"dm:tasks:{page}"),
+                premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
+            ],
+        ]
+        if task and task["status"] in {"queued", "running"}:
+            keyboard.insert(2, [premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"dm:stop:{task_id}:{page}")])
+        return InlineKeyboardMarkup(keyboard)
+
     def _single_back_keyboard(self, callback_data: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[premium_button("返回", self.settings.emoji_back_id, callback_data=callback_data)]])
 
@@ -1778,6 +2238,29 @@ class DmCollectorBot:
                 caption=f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>消息导出</b>",
                 parse_mode=ParseMode.HTML,
             )
+
+    async def _send_dm_task_result(self, chat_id: int, task_id: int) -> None:
+        task = self.dm_repository.get_dm_task(task_id)
+        if not task:
+            return
+        paths = self.dm_repository.export_task_results(task_id, self.settings.export_dir)
+        captions = [
+            (paths.success_txt, f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信成功名单</b>\n成功：<code>{task['success_count']}</code>"),
+            (paths.failed_txt, f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信失败名单</b>\n失败：<code>{task['failed_count']}</code>"),
+            (paths.failed_csv, f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信失败详情</b>"),
+        ]
+        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+        for path, caption in captions:
+            if not path.exists():
+                continue
+            with path.open("rb") as fp:
+                await self.application.bot.send_document(
+                    chat_id=chat_id,
+                    document=fp,
+                    filename=path.name,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                )
 
     async def _send_task_result(self, chat_id: int, task_id: int, announce: bool = False) -> None:
         task = self.db.get_collect_task(task_id)
