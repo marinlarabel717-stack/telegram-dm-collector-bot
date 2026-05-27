@@ -230,7 +230,7 @@ class DmCollectorBot:
             return
 
         imported_accounts = []
-        failed_sessions = []
+        warning_sessions = []
         for session_file in session_files:
             try:
                 result = await self.collection_manager.verify_session_file(session_file)
@@ -246,19 +246,23 @@ class DmCollectorBot:
                 )
                 imported_accounts.append(account)
             except Exception as exc:  # noqa: BLE001
-                logger.exception("导入 session 失败: %s", session_file)
-                failed_sessions.append((session_file.name, str(exc) or exc.__class__.__name__))
+                logger.exception("导入 session 失败，改为异常入库: %s", session_file)
+                error_text = str(exc) or exc.__class__.__name__
+                account = self.db.upsert_account(
+                    session_name=session_file.stem,
+                    session_file=str(session_file),
+                    tg_user_id=None,
+                    phone=None,
+                    username=None,
+                    display_name=session_file.stem,
+                    status="error",
+                    last_error=error_text,
+                )
+                imported_accounts.append(account)
+                warning_sessions.append((session_file.name, error_text))
 
         self._clear_state(update.effective_user.id)
-        if not imported_accounts and failed_sessions:
-            failed_name, failed_error = failed_sessions[0]
-            await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 导入失败：<code>{html.escape(failed_name, quote=False)}</code>\n<code>{html.escape(failed_error, quote=False)[:300]}</code>",
-                parse_mode=ParseMode.HTML,
-            )
-            return
-
-        if len(imported_accounts) == 1 and not failed_sessions:
+        if len(imported_accounts) == 1 and not warning_sessions:
             await update.effective_message.reply_text(
                 self._format_account_text(imported_accounts[0]),
                 parse_mode=ParseMode.HTML,
@@ -270,15 +274,15 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>导入处理完成</b>",
             f"成功导入：<code>{len(imported_accounts)}</code>",
-            f"失败数量：<code>{len(failed_sessions)}</code>",
+            f"异常数量：<code>{len(warning_sessions)}</code>",
             "",
         ]
         for account in imported_accounts[:10]:
             label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
             lines.append(f"• #{account['id']} {html.escape(str(label), quote=False)} · {status_badge(account['status'])}")
-        if failed_sessions:
+        if warning_sessions:
             lines.append("")
-            for failed_name, failed_error in failed_sessions[:3]:
+            for failed_name, failed_error in warning_sessions[:3]:
                 lines.append(f"× <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
         await update.effective_message.reply_text(
             "\n".join(lines),
