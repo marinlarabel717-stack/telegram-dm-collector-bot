@@ -40,6 +40,13 @@ class Settings:
     emoji_timeout_id: str
     emoji_progress_id: str
     emoji_idea_id: str
+    emoji_back_id: str
+    emoji_home_id: str
+    emoji_next_id: str
+    emoji_list_id: str
+    emoji_start_id: str
+    emoji_history_id: str
+    emoji_all_id: str
 
 
 
@@ -121,4 +128,11 @@ def get_settings() -> Settings:
         emoji_timeout_id=os.getenv("EMOJI_TIMEOUT_ID", DEFAULT_EMOJI_IDS["timeout"]),
         emoji_progress_id=os.getenv("EMOJI_PROGRESS_ID", DEFAULT_EMOJI_IDS["progress"]),
         emoji_idea_id=os.getenv("EMOJI_IDEA_ID", DEFAULT_EMOJI_IDS["idea"]),
+        emoji_back_id=os.getenv("EMOJI_BACK_ID", DEFAULT_EMOJI_IDS["back"]),
+        emoji_home_id=os.getenv("EMOJI_HOME_ID", DEFAULT_EMOJI_IDS["home"]),
+        emoji_next_id=os.getenv("EMOJI_NEXT_ID", DEFAULT_EMOJI_IDS["next"]),
+        emoji_list_id=os.getenv("EMOJI_LIST_ID", DEFAULT_EMOJI_IDS["list"]),
+        emoji_start_id=os.getenv("EMOJI_START_ID", DEFAULT_EMOJI_IDS["start"]),
+        emoji_history_id=os.getenv("EMOJI_HISTORY_ID", DEFAULT_EMOJI_IDS["history"]),
+        emoji_all_id=os.getenv("EMOJI_ALL_ID", DEFAULT_EMOJI_IDS["all"]),
     )

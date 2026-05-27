@@ -377,9 +377,9 @@ class DmCollectorBot:
             f"上传 .session 后会立即做一次登录验证，并在账号列表里显示状态。"
         )
         keyboard = [
-            [premium_button("上传 session", self.settings.emoji_upload_id, callback_data="account:upload")],
-            [premium_button("账号列表", self.settings.emoji_inbox_id, callback_data=f"account:list:{page}")],
-            [premium_button("返回首页", self.settings.emoji_success_id, callback_data="menu:main")],
+            [premium_button("📷 上传 session", self.settings.emoji_upload_id, callback_data="account:upload")],
+            [premium_button("🧩 账号列表", self.settings.emoji_list_id, callback_data=f"account:list:{page}")],
+            [premium_button("🏠 返回首页", self.settings.emoji_home_id, callback_data="menu:main")],
         ]
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
 
@@ -405,16 +405,16 @@ class DmCollectorBot:
         for row in rows:
             label = row["username"] or row["phone"] or row["session_name"]
             keyboard.append([
-                premium_button(f"#{row['id']} {str(label)[:28]}", self.settings.emoji_inbox_id, callback_data=f"account:view:{row['id']}")
+                premium_button(f"👤 #{row['id']} {str(label)[:28]}", self.settings.emoji_inbox_id, callback_data=f"account:view:{row['id']}")
             ])
         nav = []
         if page > 1:
-            nav.append(premium_button("上一页", self.settings.emoji_waiting_id, callback_data=f"account:list:{page - 1}"))
+            nav.append(premium_button("⬅️ 上一页", self.settings.emoji_back_id, callback_data=f"account:list:{page - 1}"))
         if page < total_pages:
-            nav.append(premium_button("下一页", self.settings.emoji_waiting_id, callback_data=f"account:list:{page + 1}"))
+            nav.append(premium_button("➡️ 下一页", self.settings.emoji_next_id, callback_data=f"account:list:{page + 1}"))
         if nav:
             keyboard.append(nav)
-        keyboard.append([premium_button("返回账号管理", self.settings.emoji_success_id, callback_data="menu:accounts")])
+        keyboard.append([premium_button("⬅️ 返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts")])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
     async def _show_account_detail(self, query, account_id: int) -> None:
@@ -449,10 +449,10 @@ class DmCollectorBot:
             f"第一版支持：多频道、可选几天前消息、多账号并发、去重导出 txt。"
         )
         keyboard = [
-            [premium_button("新建采集任务", self.settings.emoji_idea_id, callback_data="collect:new")],
-            [premium_button("任务列表", self.settings.emoji_progress_id, callback_data="collect:tasks")],
-            [premium_button("历史结果", self.settings.emoji_export_id, callback_data="menu:history")],
-            [premium_button("返回首页", self.settings.emoji_success_id, callback_data="menu:main")],
+            [premium_button("💡 新建采集任务", self.settings.emoji_idea_id, callback_data="collect:new")],
+            [premium_button("🎚️ 任务列表", self.settings.emoji_progress_id, callback_data="collect:tasks")],
+            [premium_button("🌟 历史结果", self.settings.emoji_history_id, callback_data="menu:history")],
+            [premium_button("🏠 返回首页", self.settings.emoji_home_id, callback_data="menu:main")],
         ]
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
 
@@ -469,10 +469,10 @@ class DmCollectorBot:
         keyboard = []
         for task in tasks:
             keyboard.append([
-                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_inbox_id, callback_data=f"task:view:{task['id']}")
+                premium_button(f"📌 查看任务 #{task['id']}", self.settings.emoji_inbox_id, callback_data=f"task:view:{task['id']}")
             ])
         keyboard.append([
-            premium_button("返回采集中心", self.settings.emoji_success_id, callback_data="menu:collect")
+            premium_button("⬅️ 返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect")
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
@@ -494,10 +494,10 @@ class DmCollectorBot:
         keyboard = []
         for task in tasks[:8]:
             keyboard.append([
-                premium_button(f"导出任务 #{task['id']}", self.settings.emoji_export_id, callback_data=f"task:export:{task['id']}")
+                premium_button(f"🖥 导出任务 #{task['id']}", self.settings.emoji_export_id, callback_data=f"task:export:{task['id']}")
             ])
         keyboard.append([
-            premium_button("返回采集中心", self.settings.emoji_success_id, callback_data="menu:collect")
+            premium_button("⬅️ 返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect")
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
@@ -768,12 +768,12 @@ class DmCollectorBot:
             return None
         keyboard = [
             [
-                premium_button("账号管理", self.settings.emoji_upload_id, callback_data="menu:accounts"),
-                premium_button("采集中心", self.settings.emoji_progress_id, callback_data="menu:collect"),
+                premium_button("📷 账号管理", self.settings.emoji_upload_id, callback_data="menu:accounts"),
+                premium_button("🎚️ 采集中心", self.settings.emoji_progress_id, callback_data="menu:collect"),
             ],
             [
-                premium_button("统计", self.settings.emoji_stats_id, callback_data="menu:stats"),
-                premium_button("历史结果", self.settings.emoji_export_id, callback_data="menu:history"),
+                premium_button("🧠 统计", self.settings.emoji_stats_id, callback_data="menu:stats"),
+                premium_button("🌟 历史结果", self.settings.emoji_history_id, callback_data="menu:history"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -781,25 +781,25 @@ class DmCollectorBot:
     def _build_account_detail_keyboard(self, account_id: int) -> InlineKeyboardMarkup:
         keyboard = [
             [
-                premium_button("检测状态", self.settings.emoji_stats_id, callback_data=f"account:check:{account_id}"),
-                premium_button("删除账号", self.settings.emoji_error_id, callback_data=f"account:delete:{account_id}"),
+                premium_button("🧠 检测状态", self.settings.emoji_stats_id, callback_data=f"account:check:{account_id}"),
+                premium_button("🗑 删除账号", self.settings.emoji_error_id, callback_data=f"account:delete:{account_id}"),
             ],
-            [premium_button("返回账号列表", self.settings.emoji_success_id, callback_data="account:list:1")],
+            [premium_button("⬅️ 返回账号列表", self.settings.emoji_back_id, callback_data="account:list:1")],
         ]
         return InlineKeyboardMarkup(keyboard)
 
     def _build_days_keyboard(self) -> InlineKeyboardMarkup:
         keyboard = [
             [
-                premium_button("1 天", self.settings.emoji_waiting_id, callback_data="wizard:days:1"),
-                premium_button("3 天", self.settings.emoji_waiting_id, callback_data="wizard:days:3"),
-                premium_button("7 天", self.settings.emoji_waiting_id, callback_data="wizard:days:7"),
+                premium_button("🕜 1 天", self.settings.emoji_waiting_id, callback_data="wizard:days:1"),
+                premium_button("🕜 3 天", self.settings.emoji_waiting_id, callback_data="wizard:days:3"),
+                premium_button("🕜 7 天", self.settings.emoji_waiting_id, callback_data="wizard:days:7"),
             ],
             [
-                premium_button("15 天", self.settings.emoji_waiting_id, callback_data="wizard:days:15"),
-                premium_button("自定义", self.settings.emoji_idea_id, callback_data="wizard:days_custom"),
+                premium_button("🕜 15 天", self.settings.emoji_waiting_id, callback_data="wizard:days:15"),
+                premium_button("💡 自定义", self.settings.emoji_idea_id, callback_data="wizard:days_custom"),
             ],
-            [premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel")],
+            [premium_button("✖️ 取消", self.settings.emoji_error_id, callback_data="wizard:cancel")],
         ]
         return InlineKeyboardMarkup(keyboard)
 
@@ -813,24 +813,24 @@ class DmCollectorBot:
                 premium_button(f"#{row['id']} {str(title)[:28]}", icon, callback_data=f"wizard:acc:toggle:{row['id']}")
             ])
         keyboard.append([
-            premium_button("使用全部可用账号", self.settings.emoji_success_id, callback_data="wizard:acc:auto")
+            premium_button("🍀 使用全部可用账号", self.settings.emoji_all_id, callback_data="wizard:acc:auto")
         ])
         keyboard.append([
-            premium_button("完成选择", self.settings.emoji_progress_id, callback_data="wizard:acc:done"),
-            premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+            premium_button("✅ 完成选择", self.settings.emoji_ok_id, callback_data="wizard:acc:done"),
+            premium_button("✖️ 取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
         ])
         return InlineKeyboardMarkup(keyboard)
 
     def _build_workers_keyboard(self) -> InlineKeyboardMarkup:
         keyboard = [
             [
-                premium_button("1", self.settings.emoji_progress_id, callback_data="wizard:wrk:1"),
-                premium_button("2", self.settings.emoji_progress_id, callback_data="wizard:wrk:2"),
-                premium_button("3", self.settings.emoji_progress_id, callback_data="wizard:wrk:3"),
+                premium_button("1 线程", self.settings.emoji_progress_id, callback_data="wizard:wrk:1"),
+                premium_button("2 线程", self.settings.emoji_progress_id, callback_data="wizard:wrk:2"),
+                premium_button("3 线程", self.settings.emoji_progress_id, callback_data="wizard:wrk:3"),
             ],
             [
-                premium_button("5", self.settings.emoji_progress_id, callback_data="wizard:wrk:5"),
-                premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+                premium_button("5 线程", self.settings.emoji_next_id, callback_data="wizard:wrk:5"),
+                premium_button("✖️ 取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -838,8 +838,8 @@ class DmCollectorBot:
     def _build_confirm_keyboard(self) -> InlineKeyboardMarkup:
         keyboard = [
             [
-                premium_button("开始采集", self.settings.emoji_success_id, callback_data="wizard:start"),
-                premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+                premium_button("🚀 开始采集", self.settings.emoji_start_id, callback_data="wizard:start"),
+                premium_button("✖️ 取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
             ]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -848,21 +848,21 @@ class DmCollectorBot:
         task = self.db.get_collect_task(task_id)
         keyboard = [
             [
-                premium_button("刷新进度", self.settings.emoji_progress_id, callback_data=f"task:refresh:{task_id}"),
-                premium_button("导出结果", self.settings.emoji_export_id, callback_data=f"task:export:{task_id}"),
+                premium_button("🔄 刷新进度", self.settings.emoji_progress_id, callback_data=f"task:refresh:{task_id}"),
+                premium_button("🖥 导出结果", self.settings.emoji_export_id, callback_data=f"task:export:{task_id}"),
             ],
         ]
         if task and task["status"] in {"queued", "running"}:
             keyboard.append([
-                premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"task:stop:{task_id}")
+                premium_button("⏹ 停止任务", self.settings.emoji_timeout_id, callback_data=f"task:stop:{task_id}")
             ])
         keyboard.append([
-            premium_button("返回任务列表", self.settings.emoji_success_id, callback_data="collect:tasks")
+            premium_button("⬅️ 返回任务列表", self.settings.emoji_back_id, callback_data="collect:tasks")
         ])
         return InlineKeyboardMarkup(keyboard)
 
     def _single_back_keyboard(self, callback_data: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[premium_button("返回", self.settings.emoji_success_id, callback_data=callback_data)]])
+        return InlineKeyboardMarkup([[premium_button("⬅️ 返回", self.settings.emoji_back_id, callback_data=callback_data)]])
 
     # ---------- helpers ----------
     async def _send_dm_exports(self, chat_id: int) -> None:
