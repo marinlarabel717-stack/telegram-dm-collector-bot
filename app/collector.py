@@ -320,7 +320,12 @@ class CollectionManager:
     def _extract_usernames(text: str) -> list[str]:
         if not text:
             return []
-        return sorted({f"@{match.group(1)}" for match in USERNAME_RE.finditer(text)})
+        usernames = {
+            f"@{match.group(1)}"
+            for match in USERNAME_RE.finditer(text)
+            if not match.group(1).lower().endswith("bot")
+        }
+        return sorted(usernames)
 
     @staticmethod
     def _parse_json_ids(raw: str) -> list[int]:
