@@ -291,10 +291,22 @@ class DmCollectorBot:
             return
         if data == "dm:wizard:cancel":
             self._clear_state(update.effective_user.id)
-            await self._safe_edit(query, self._build_welcome_text(update.effective_user.id), self._build_main_menu(update.effective_user.id))
+            await self._show_dm_menu(query)
+            return
+        if data == "dm:wizard:back:targets":
+            state = self.user_states.get(update.effective_user.id) or {}
+            state["mode"] = "await_dm_targets"
+            await self._safe_edit(query, self._dm_targets_prompt_text(), self._single_back_keyboard("dm:wizard:cancel"))
             return
         if data == "dm:wizard:acc:auto":
             await self._dm_wizard_auto_accounts(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:acc:page_all":
+            await self._dm_wizard_select_current_page(query, update.effective_user.id)
+            return
+        if data.startswith("dm:wizard:acc:page:"):
+            page = int(data.split(":")[-1])
+            await self._dm_wizard_change_account_page(query, update.effective_user.id, page)
             return
         if data.startswith("dm:wizard:acc:toggle:"):
             account_id = int(data.split(":")[-1])
@@ -306,11 +318,32 @@ class DmCollectorBot:
         if data == "dm:wizard:cfg:done":
             await self._dm_wizard_finish_config(query, update.effective_user.id)
             return
+        if data == "dm:wizard:back:config":
+            state = self.user_states.get(update.effective_user.id) or {}
+            draft = state.get("draft") or {}
+            state["mode"] = "dm_config"
+            await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+            return
         if data == "dm:wizard:back_accounts":
             state = self.user_states.get(update.effective_user.id) or {}
             draft = state.get("draft") or {}
             state["mode"] = "dm_select_accounts"
-            await self._safe_edit(query, self._dm_select_accounts_text(draft), self._build_dm_account_selection_keyboard(draft.get("account_ids") or []))
+            await self._render_dm_account_selection(query, draft)
+            return
+        if data == "dm:wizard:back:greeting":
+            state = self.user_states.get(update.effective_user.id) or {}
+            draft = state.get("draft") or {}
+            state["mode"] = "await_dm_greeting"
+            await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
+            return
+        if data == "dm:wizard:back:body":
+            state = self.user_states.get(update.effective_user.id) or {}
+            draft = state.get("draft") or {}
+            state["mode"] = "await_dm_body"
+            await self._safe_edit(query, self._dm_body_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:greeting"))
+            return
+        if data == "dm:wizard:back:input":
+            await self._dm_wizard_back_to_input(query, update.effective_user.id)
             return
         if data == "dm:wizard:mode:toggle":
             await self._dm_wizard_toggle_mode(query, update.effective_user.id)
@@ -523,11 +556,12 @@ class DmCollectorBot:
             draft = state.setdefault("draft", {})
             draft["targets"] = [asdict(item) for item in targets]
             draft["invalid_targets"] = invalid
+            draft["account_page"] = 1
             state["mode"] = "dm_select_accounts"
             await update.effective_message.reply_text(
                 self._dm_select_accounts_text(draft),
                 parse_mode=ParseMode.HTML,
-                reply_markup=self._build_dm_account_selection_keyboard(draft.get("account_ids") or []),
+                reply_markup=self._build_dm_account_selection_keyboard(draft),
             )
             return
         if mode not in {"await_channels", "await_group_targets"}:
@@ -597,7 +631,7 @@ class DmCollectorBot:
         await message.reply_text(
             self._dm_confirm_text(draft),
             parse_mode=ParseMode.HTML,
-            reply_markup=self._build_dm_confirm_keyboard(),
+            reply_markup=self._build_dm_confirm_keyboard("dm:wizard:back:input"),
         )
 
     async def _handle_dm_forward_input(self, update: Update, state: dict) -> None:
@@ -626,7 +660,7 @@ class DmCollectorBot:
             self._dm_confirm_text(draft),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
-            reply_markup=self._build_dm_confirm_keyboard(),
+            reply_markup=self._build_dm_confirm_keyboard("dm:wizard:back:input"),
         )
 
     async def _fetch_channel_post_preview(self, link: str, state: dict) -> tuple[str | None, str | None]:
@@ -774,11 +808,12 @@ class DmCollectorBot:
             draft = state.setdefault("draft", {})
             draft["targets"] = [asdict(item) for item in targets]
             draft["invalid_targets"] = invalid
+            draft["account_page"] = 1
             state["mode"] = "dm_select_accounts"
             await update.effective_message.reply_text(
                 self._dm_select_accounts_text(draft),
                 parse_mode=ParseMode.HTML,
-                reply_markup=self._build_dm_account_selection_keyboard(draft.get("account_ids") or []),
+                reply_markup=self._build_dm_account_selection_keyboard(draft),
             )
             return
 
@@ -795,7 +830,7 @@ class DmCollectorBot:
             await update.effective_message.reply_text(
                 self._dm_confirm_text(draft),
                 parse_mode=ParseMode.HTML,
-                reply_markup=self._build_dm_confirm_keyboard(),
+                reply_markup=self._build_dm_confirm_keyboard("dm:wizard:back:input"),
             )
             return
 
@@ -806,7 +841,7 @@ class DmCollectorBot:
             await update.effective_message.reply_text(
                 self._dm_body_prompt_text(draft),
                 parse_mode=ParseMode.HTML,
-                reply_markup=self._single_back_keyboard("dm:wizard:cancel"),
+                reply_markup=self._single_back_keyboard("dm:wizard:back:greeting"),
             )
             return
 
@@ -823,7 +858,7 @@ class DmCollectorBot:
             await update.effective_message.reply_text(
                 self._dm_closing_prompt_text(draft),
                 parse_mode=ParseMode.HTML,
-                reply_markup=self._single_back_keyboard("dm:wizard:cancel"),
+                reply_markup=self._single_back_keyboard("dm:wizard:back:body"),
             )
             return
 
@@ -834,7 +869,7 @@ class DmCollectorBot:
             await update.effective_message.reply_text(
                 self._dm_confirm_text(draft),
                 parse_mode=ParseMode.HTML,
-                reply_markup=self._build_dm_confirm_keyboard(),
+                reply_markup=self._build_dm_confirm_keyboard("dm:wizard:back:input"),
             )
             return
 
@@ -1278,6 +1313,7 @@ class DmCollectorBot:
                 "message_mode": "single",
                 "content_type": "text",
                 "account_ids": [],
+                "account_page": 1,
                 "policy": {
                     "per_account_success_limit": 40,
                     "delay_min": 8,
@@ -1296,7 +1332,23 @@ class DmCollectorBot:
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
         draft["account_ids"] = [int(row["id"]) for row in self.db.get_active_accounts()]
-        await self._safe_edit(query, self._dm_select_accounts_text(draft), self._build_dm_account_selection_keyboard(draft["account_ids"]))
+        await self._render_dm_account_selection(query, draft)
+
+    async def _dm_wizard_change_account_page(self, query, user_id: int, page: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        draft["account_page"] = max(1, page)
+        await self._render_dm_account_selection(query, draft)
+
+    async def _dm_wizard_select_current_page(self, query, user_id: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        selected_ids = set(int(item) for item in (draft.get("account_ids") or []))
+        rows, _, _ = self._get_dm_account_page_rows(draft)
+        for row in rows:
+            selected_ids.add(int(row["id"]))
+        draft["account_ids"] = sorted(selected_ids)
+        await self._render_dm_account_selection(query, draft)
 
     async def _dm_wizard_toggle_account(self, query, user_id: int, account_id: int) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
@@ -1307,7 +1359,7 @@ class DmCollectorBot:
         else:
             selected_ids.append(account_id)
         draft["account_ids"] = selected_ids
-        await self._safe_edit(query, self._dm_select_accounts_text(draft), self._build_dm_account_selection_keyboard(selected_ids))
+        await self._render_dm_account_selection(query, draft)
 
     async def _dm_wizard_finish_accounts(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
@@ -1317,6 +1369,25 @@ class DmCollectorBot:
             return
         state["mode"] = "dm_config"
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
+    async def _dm_wizard_back_to_input(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        content_type = draft.get("content_type") or "text"
+        if content_type == "media":
+            state["mode"] = "await_dm_media"
+            await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
+            return
+        if content_type == "forward":
+            state["mode"] = "await_dm_forward"
+            await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
+            return
+        if draft.get("message_mode") == "three_stage":
+            state["mode"] = "await_dm_closing"
+            await self._safe_edit(query, self._dm_closing_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:body"))
+            return
+        state["mode"] = "await_dm_message"
+        await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
 
     async def _dm_wizard_toggle_mode(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
@@ -1391,7 +1462,8 @@ class DmCollectorBot:
             state["mode"] = "await_dm_greeting"
         else:
             state["mode"] = "await_dm_message"
-        await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:cancel"))
+        back_callback = "dm:wizard:back:config"
+        await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard(back_callback))
 
     async def _dm_wizard_start_task(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
@@ -1454,14 +1526,6 @@ class DmCollectorBot:
             policy=policy,
         )
         self.dm_repository.attach_task_recipients(int(task["id"]), recipient_ids)
-        self._clear_state(user_id)
-        runner = asyncio.create_task(self.dm_sender.run_task(int(task["id"])))
-        self.dm_task_runners[int(task["id"])] = runner
-
-        def _cleanup_dm_runner(_: asyncio.Task, task_id: int = int(task["id"])) -> None:
-            self.dm_task_runners.pop(task_id, None)
-
-        runner.add_done_callback(_cleanup_dm_runner)
         sent = await self.application.bot.send_message(
             chat_id=query.message.chat_id,
             text=self._format_dm_task_text(int(task["id"])),
@@ -1470,6 +1534,14 @@ class DmCollectorBot:
             reply_markup=self._build_dm_task_keyboard(int(task["id"])),
         )
         self.dm_repository.set_dm_task_progress_message(int(task["id"]), sent.chat_id, sent.message_id)
+        self._clear_state(user_id)
+        runner = asyncio.create_task(self.dm_sender.run_task(int(task["id"])))
+        self.dm_task_runners[int(task["id"])] = runner
+
+        def _cleanup_dm_runner(_: asyncio.Task, task_id: int = int(task["id"])) -> None:
+            self.dm_task_runners.pop(task_id, None)
+
+        runner.add_done_callback(_cleanup_dm_runner)
         if query.message:
             await query.message.delete()
 
@@ -1515,6 +1587,9 @@ class DmCollectorBot:
 
     async def _show_dm_task_detail(self, query, task_id: int, page: int = 1) -> None:
         await self._safe_edit(query, self._format_dm_task_text(task_id), self._build_dm_task_keyboard(task_id, page=page))
+
+    async def _render_dm_account_selection(self, query, draft: dict) -> None:
+        await self._safe_edit(query, self._dm_select_accounts_text(draft), self._build_dm_account_selection_keyboard(draft))
 
     async def _stop_dm_task(self, query, task_id: int, page: int = 1) -> None:
         self.dm_repository.request_dm_task_stop(task_id)
@@ -2126,21 +2201,33 @@ class DmCollectorBot:
         )
 
     def _dm_select_accounts_text(self, draft: dict) -> str:
+        rows, page, total_pages = self._get_dm_account_page_rows(draft)
         targets = draft.get("targets") or []
         invalid = draft.get("invalid_targets") or []
         lines = [
             f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>选择私信账号</b>",
             f"目标数：<code>{len(targets)}</code> · 无效行：<code>{len(invalid)}</code>",
             f"已选账号：<code>{len(draft.get('account_ids') or [])}</code>",
+            f"页码：<code>{page}/{total_pages}</code> · 本页：<code>{len(rows)}</code>",
             "",
         ]
-        for row in self.db.get_active_accounts():
+        for row in rows:
             mark = "已选" if int(row["id"]) in (draft.get("account_ids") or []) else "未选"
             label = row["username"] or row["phone"] or row["session_name"]
             lines.append(
                 f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {mark} · {restriction_badge(row['restriction_status'])}"
             )
         return "\n".join(lines)
+
+    def _get_dm_account_page_rows(self, draft: dict) -> tuple[list, int, int]:
+        all_rows = self.db.get_active_accounts()
+        per_page = 20
+        total_pages = max(1, ceil(len(all_rows) / per_page))
+        page = max(1, min(int(draft.get("account_page") or 1), total_pages))
+        draft["account_page"] = page
+        start = (page - 1) * per_page
+        end = start + per_page
+        return list(all_rows[start:end]), page, total_pages
 
     def _dm_message_prompt_text(self, draft: dict) -> str:
         content_type = draft.get("content_type") or "text"
@@ -2586,10 +2673,12 @@ class DmCollectorBot:
         ])
         return InlineKeyboardMarkup(keyboard)
 
-    def _build_dm_account_selection_keyboard(self, selected_ids: list[int]) -> InlineKeyboardMarkup:
+    def _build_dm_account_selection_keyboard(self, draft: dict) -> InlineKeyboardMarkup:
+        selected_ids = [int(item) for item in (draft.get("account_ids") or [])]
+        rows, page, total_pages = self._get_dm_account_page_rows(draft)
         keyboard = []
         row_buffer = []
-        for row in self.db.get_active_accounts():
+        for row in rows:
             is_selected = int(row["id"]) in selected_ids
             icon = self.settings.emoji_ok_id if is_selected else self.settings.emoji_error_id
             title = row["username"] or row["phone"] or row["session_name"]
@@ -2602,12 +2691,19 @@ class DmCollectorBot:
         if row_buffer:
             keyboard.append(row_buffer)
         keyboard.append([
-            premium_button("使用全部可用账号", self.settings.emoji_all_id, callback_data="dm:wizard:acc:auto"),
+            premium_button("全选本页", self.settings.emoji_all_id, callback_data="dm:wizard:acc:page_all"),
             premium_button("完成选择", self.settings.emoji_ok_id, callback_data="dm:wizard:acc:done"),
         ])
+        nav = []
+        if page > 1:
+            nav.append(premium_button("上一页", self.settings.emoji_back_id, callback_data=f"dm:wizard:acc:page:{page - 1}"))
+        if page < total_pages:
+            nav.append(premium_button("下一页", self.settings.emoji_next_id, callback_data=f"dm:wizard:acc:page:{page + 1}"))
+        if nav:
+            keyboard.append(nav)
         keyboard.append([
-            premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
-            premium_button("返回私信任务", self.settings.emoji_back_id, callback_data="menu:dm"),
+            premium_button("全选全部", self.settings.emoji_success_id, callback_data="dm:wizard:acc:auto"),
+            premium_button("返回上一步", self.settings.emoji_back_id, callback_data="dm:wizard:back:targets"),
         ])
         return InlineKeyboardMarkup(keyboard)
 
@@ -2709,12 +2805,15 @@ class DmCollectorBot:
             ])
         return InlineKeyboardMarkup(keyboard)
 
-    def _build_dm_confirm_keyboard(self) -> InlineKeyboardMarkup:
+    def _build_dm_confirm_keyboard(self, back_callback: str = "dm:wizard:back:input") -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
             [
                 premium_button("开始私信", self.settings.emoji_start_id, callback_data="dm:wizard:start"),
+                premium_button("返回上一步", self.settings.emoji_back_id, callback_data=back_callback),
+            ],
+            [
                 premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
-            ]
+            ],
         ])
 
     def _build_dm_task_keyboard(self, task_id: int, *, page: int = 1) -> InlineKeyboardMarkup:
