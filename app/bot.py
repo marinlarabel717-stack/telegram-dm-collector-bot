@@ -1700,18 +1700,36 @@ class DmCollectorBot:
                 "ids": f"任务 #{display_code} 结果导出 · ID",
                 "failed": f"任务 #{display_code} 结果导出 · 失败群",
             }
+            labels = {
+                "usernames": "用户名数量",
+                "ids": "ID 数量",
+                "failed": "失败群数量",
+            }
+            sent_any = False
             for key in ["usernames", "ids", "failed"]:
-                with outputs[key].open("rb") as fp:
+                info = outputs[key]
+                path = info.get("path")
+                count = int(info.get("count") or 0)
+                if count <= 0 or not path or not Path(path).exists():
+                    continue
+                sent_any = True
+                with Path(path).open("rb") as fp:
                     await self.application.bot.send_document(
                         chat_id=chat_id,
                         document=fp,
-                        filename=outputs[key].name,
+                        filename=Path(path).name,
                         caption=(
                             f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>{captions[key]}</b>\n"
-                            f"去重数量：<code>{task['unique_hits']}</code>"
+                            f"{labels[key]}：<code>{count}</code>"
                         ),
                         parse_mode=ParseMode.HTML,
                     )
+            if not sent_any:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前没有可导出的用户名、ID 或失败群结果。",
+                    parse_mode=ParseMode.HTML,
+                )
             return
 
         path = task["result_file_path"]

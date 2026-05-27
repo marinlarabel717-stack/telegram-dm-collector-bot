@@ -969,7 +969,7 @@ class Database:
         self.set_task_result_file(task_id, str(output))
         return output
 
-    def export_group_task_files(self, task_id: int, export_dir: Path) -> dict[str, Path]:
+    def export_group_task_files(self, task_id: int, export_dir: Path) -> dict[str, dict[str, Any]]:
         export_dir.mkdir(parents=True, exist_ok=True)
         usernames_path = export_dir / f"task_{task_id}_usernames.txt"
         ids_path = export_dir / f"task_{task_id}_ids.txt"
@@ -994,26 +994,38 @@ class Database:
                 (task_id,),
             ).fetchall()
 
-        usernames_lines = ["# 群组发言用户名结果", ""]
-        usernames_lines.extend(row["username"] for row in members if row["username"])
-        if len(usernames_lines) == 2:
-            usernames_lines.append("# 空")
+        username_rows = [row["username"] for row in members if row["username"]]
+        id_rows = [str(row["user_id"]) for row in members if not row["username"]]
+        failed_rows = [
+            f"{row['channel']} | {row['last_error'] or ('任务已停止' if row['status'] == 'stopped' else '未知原因')}"
+            for row in failed_channels
+        ]
 
-        ids_lines = ["# 群组发言用户 ID 结果（无用户名）", ""]
-        ids_lines.extend(str(row["user_id"]) for row in members if not row["username"])
-        if len(ids_lines) == 2:
-            ids_lines.append("# 空")
+        results: dict[str, dict[str, Any]] = {
+            "usernames": {"path": usernames_path, "count": len(username_rows)},
+            "ids": {"path": ids_path, "count": len(id_rows)},
+            "failed": {"path": failed_path, "count": len(failed_rows)},
+        }
 
-        failed_lines = ["# 无法采集的群组", ""]
-        if failed_channels:
-            for row in failed_channels:
-                reason = row["last_error"] or ("任务已停止" if row["status"] == "stopped" else "未知原因")
-                failed_lines.append(f"{row['channel']} | {reason}")
+        if username_rows:
+            usernames_lines = ["# 群组发言用户名结果", "", *username_rows]
+            usernames_path.write_text("\n".join(usernames_lines).strip() + "\n", encoding="utf-8")
         else:
-            failed_lines.append("# 无失败群组")
+            usernames_path.unlink(missing_ok=True)
 
-        usernames_path.write_text("\n".join(usernames_lines).strip() + "\n", encoding="utf-8")
-        ids_path.write_text("\n".join(ids_lines).strip() + "\n", encoding="utf-8")
-        failed_path.write_text("\n".join(failed_lines).strip() + "\n", encoding="utf-8")
-        self.set_task_result_file(task_id, str(usernames_path))
-        return {"usernames": usernames_path, "ids": ids_path, "failed": failed_path}
+        if id_rows:
+            ids_lines = ["# 群组发言用户 ID 结果（无用户名）", "", *id_rows]
+            ids_path.write_text("\n".join(ids_lines).strip() + "\n", encoding="utf-8")
+        else:
+            ids_path.unlink(missing_ok=True)
+
+        if failed_rows:
+            failed_lines = ["# 无法采集的群组", "", *failed_rows]
+            failed_path.write_text("\n".join(failed_lines).strip() + "\n", encoding="utf-8")
+        else:
+            failed_path.unlink(missing_ok=True)
+
+        preferred_path = usernames_path if username_rows else ids_path if id_rows else failed_path if failed_rows else None
+        if preferred_path is not None:
+            self.set_task_result_file(task_id, str(preferred_path))
+        return results
