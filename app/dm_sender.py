@@ -82,8 +82,10 @@ class DmSenderManager:
         client = None
         success_count = int(account_row["sent_success_count"] or 0)
         frequent_errors = int(account_row["frequent_error_count"] or 0)
-        payload = json.loads(str(self.repository.get_dm_task(task_id)["payload_json"] or "{}"))
-        message_parts = self._build_message_parts(payload)
+        task = self.repository.get_dm_task(task_id)
+        payload = json.loads(str(task["payload_json"] or "{}")) if task else {}
+        content_type = str((task["content_type"] if task else None) or payload.get("content_type") or "text")
+        message_parts = self._build_message_parts(payload) if content_type == "text" else []
         self.repository.update_dm_task_account(task_id, account_id, status="running", last_error=None)
         try:
             client = self.collection_manager._build_client(session_file)
@@ -113,7 +115,7 @@ class DmSenderManager:
                 self.repository.mark_dm_recipient_sending(task_id, recipient_id, account_id)
                 try:
                     entity = await client.get_input_entity(target)
-                    await self._send_message_parts(client, entity, message_parts, policy)
+                    await self._dispatch_payload(client, entity, payload, content_type, message_parts, policy)
                     success_count += 1
                     self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
                     self.repository.update_dm_task_account(task_id, account_id, success_delta=1, last_error=None)
@@ -233,6 +235,24 @@ class DmSenderManager:
             await client.send_message(entity, part)
             if index < len(parts) - 1:
                 await asyncio.sleep(min(3.0, max(0.8, policy.delay_window.next_delay() / 4)))
+
+    async def _dispatch_payload(self, client, entity, payload: dict, content_type: str, message_parts: list[str], policy: DMTaskPolicy) -> None:
+        if content_type == "media":
+            media_path = Path(str(payload.get("media_path") or "")).expanduser()
+            if not media_path.exists():
+                raise FileNotFoundError(f"媒体文件不存在: {media_path}")
+            caption = str(payload.get("caption") or "").strip() or None
+            await client.send_file(entity, file=str(media_path), caption=caption)
+            return
+        if content_type == "forward":
+            source_chat_id = payload.get("source_chat_id")
+            source_message_id = payload.get("source_message_id")
+            if not source_chat_id or not source_message_id:
+                raise ValueError("转发源消息信息不完整")
+            from_peer = await client.get_input_entity(int(source_chat_id))
+            await client.forward_messages(entity, messages=int(source_message_id), from_peer=from_peer)
+            return
+        await self._send_message_parts(client, entity, message_parts, policy)
 
     @staticmethod
     def _build_message_parts(payload: dict) -> list[str]:
