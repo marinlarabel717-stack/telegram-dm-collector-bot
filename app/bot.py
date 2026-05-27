@@ -186,6 +186,10 @@ class DmCollectorBot:
         if data == "account:purge_invalid":
             await self._purge_invalid_accounts(query)
             return
+        if data.startswith("account:export:"):
+            bucket = data.split(":")[-1]
+            await self._export_accounts_by_bucket(query, update.effective_chat.id, bucket)
+            return
         if data.startswith("account:check:"):
             account_id = int(data.split(":")[-1])
             await self._check_account(query, account_id)
@@ -339,7 +343,8 @@ class DmCollectorBot:
         if data == "dm:wizard:back:body":
             state = self.user_states.get(update.effective_user.id) or {}
             draft = state.get("draft") or {}
-            state["mode"] = "await_dm_body"
+            content_type = draft.get("content_type") or "text"
+            state["mode"] = "await_dm_body" if content_type == "text" else ("await_dm_media" if content_type == "media" else "await_dm_forward")
             await self._safe_edit(query, self._dm_body_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:greeting"))
             return
         if data == "dm:wizard:back:input":
@@ -356,6 +361,21 @@ class DmCollectorBot:
             return
         if data == "dm:wizard:delay:cycle":
             await self._dm_wizard_cycle_delay(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:stage1:cycle":
+            await self._dm_wizard_cycle_stage1_delay(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:stage2:cycle":
+            await self._dm_wizard_cycle_stage2_delay(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:pin:toggle":
+            await self._dm_wizard_toggle_pin(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:pin_delay:cycle":
+            await self._dm_wizard_cycle_pin_delay(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:preview":
+            await self._dm_wizard_preview(query, update.effective_user.id)
             return
         if data == "dm:wizard:typing:toggle":
             await self._dm_wizard_toggle_typing(query, update.effective_user.id)
@@ -610,7 +630,7 @@ class DmCollectorBot:
         except Exception as exc:  # noqa: BLE001
             logger.exception("保存私信媒体失败")
             await message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 保存媒体失败：<code>{html.escape(str(exc) or exc.__class__.__name__, quote=False)[:200]}</code>",
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 保存媒体失败：<code>{html.escape(self._humanize_dm_error(None, str(exc) or exc.__class__.__name__), quote=False)[:200]}</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -622,11 +642,18 @@ class DmCollectorBot:
             return
         draft = state.setdefault("draft", {})
         draft["content_type"] = "media"
-        draft["message_mode"] = "single"
         draft["media_kind"] = payload["media_kind"]
         draft["media_path"] = payload["media_path"]
         draft["media_file_name"] = payload["file_name"]
         draft["media_caption"] = payload.get("caption") or ""
+        if draft.get("message_mode") == "three_stage":
+            state["mode"] = "await_dm_closing"
+            await message.reply_text(
+                self._dm_closing_prompt_text(draft),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._single_back_keyboard("dm:wizard:back:body"),
+            )
+            return
         state["mode"] = "dm_confirm"
         await message.reply_text(
             self._dm_confirm_text(draft),
@@ -650,11 +677,19 @@ class DmCollectorBot:
         preview_text, preview_error = await self._fetch_channel_post_preview(link, state)
         draft = state.setdefault("draft", {})
         draft["content_type"] = "forward"
-        draft["message_mode"] = "single"
         draft["forward_link"] = link
         draft["forward_preview"] = link
         draft["forward_message_preview"] = preview_text or ""
         draft["forward_preview_error"] = preview_error or ""
+        if draft.get("message_mode") == "three_stage":
+            state["mode"] = "await_dm_closing"
+            await message.reply_text(
+                self._dm_closing_prompt_text(draft),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=self._single_back_keyboard("dm:wizard:back:body"),
+            )
+            return
         state["mode"] = "dm_confirm"
         await message.reply_text(
             self._dm_confirm_text(draft),
@@ -707,7 +742,7 @@ class DmCollectorBot:
             return summary[:180], None
         except Exception as exc:  # noqa: BLE001
             logger.warning("抓取频道帖子预览失败: %s", self.collection_manager._short_error(exc))
-            return None, self.collection_manager._short_error(exc)
+            return None, self._humanize_dm_error(None, self.collection_manager._short_error(exc))
         finally:
             if client is not None:
                 await client.disconnect()
@@ -837,7 +872,8 @@ class DmCollectorBot:
         if mode == "await_dm_greeting":
             draft = state.setdefault("draft", {})
             draft["greeting"] = text
-            state["mode"] = "await_dm_body"
+            content_type = draft.get("content_type") or "text"
+            state["mode"] = "await_dm_body" if content_type == "text" else ("await_dm_media" if content_type == "media" else "await_dm_forward")
             await update.effective_message.reply_text(
                 self._dm_body_prompt_text(draft),
                 parse_mode=ParseMode.HTML,
@@ -968,7 +1004,7 @@ class DmCollectorBot:
             f"运行中：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n"
             f"状态：无限制 <code>{restriction_stats['unrestricted']}</code> · 受限 <code>{restriction_stats['limited']}</code> · 冻结 <code>{restriction_stats['frozen']}</code> · 待检测 <code>{restriction_stats['unknown']}</code>\n"
             f"待清理无效：<code>{stats['invalid']}</code>\n\n"
-            f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。"
+            f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。现在也支持按状态导出原始 session/zip。"
         )
         keyboard = [
             [
@@ -978,6 +1014,14 @@ class DmCollectorBot:
             [
                 premium_button("一键检查状态", self.settings.emoji_stats_id, callback_data="account:check_all"),
                 premium_button("一键清理无效", self.settings.emoji_error_id, callback_data="account:purge_invalid"),
+            ],
+            [
+                premium_button("导出无限制", self.settings.emoji_success_id, callback_data="account:export:unrestricted"),
+                premium_button("导出受限", self.settings.emoji_timeout_id, callback_data="account:export:limited"),
+            ],
+            [
+                premium_button("导出失效/封禁", self.settings.emoji_error_id, callback_data="account:export:invalid"),
+                premium_button("导出冻结", self.settings.emoji_history_id, callback_data="account:export:frozen"),
             ],
             [
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
@@ -1010,7 +1054,11 @@ class DmCollectorBot:
             [
                 premium_button("一键检查状态", self.settings.emoji_stats_id, callback_data="account:check_all"),
                 premium_button("一键清理无效", self.settings.emoji_error_id, callback_data="account:purge_invalid"),
-            ]
+            ],
+            [
+                premium_button("导出无限制", self.settings.emoji_success_id, callback_data="account:export:unrestricted"),
+                premium_button("导出受限", self.settings.emoji_timeout_id, callback_data="account:export:limited"),
+            ],
         ]
         row_buffer = []
         for row in rows:
@@ -1057,14 +1105,15 @@ class DmCollectorBot:
             await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
             return
         issue_text = result.summary
-        if result.restriction_status == "session_invalid":
+        if result.restriction_status in {"session_invalid", "frozen"}:
             label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
-            self._purge_account_files(account)
-            self.db.delete_account(account_id)
+            bucket = "invalid" if result.restriction_status == "session_invalid" else "frozen"
+            await self._send_account_export(query.message.chat_id, [account], bucket, auto_delete=True)
             text = (
                 f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>账号已自动删除</b>\n"
                 f"名称：<code>{html.escape(str(label), quote=False)}</code>\n"
-                f"原因：<code>{html.escape(issue_text, quote=False)}</code>"
+                f"原因：<code>{html.escape(issue_text, quote=False)}</code>\n"
+                f"备份：<code>已自动导出原始文件</code>"
             )
             await self._safe_edit(query, text, self._single_back_keyboard("account:list:1"))
             return
@@ -1082,6 +1131,9 @@ class DmCollectorBot:
         unknown = 0
         deleted_broken: list[str] = []
         deleted_banned: list[str] = []
+        deleted_frozen: list[str] = []
+        removed_invalid_rows: list = []
+        removed_frozen_rows: list = []
         kept_other_errors: list[str] = []
         total_checked = len(rows)
         processed = 0
@@ -1131,13 +1183,17 @@ class DmCollectorBot:
                 limited += 1
             elif result.restriction_status == "frozen":
                 frozen += 1
+                deleted_frozen.append(str(label))
+                if refreshed:
+                    removed_frozen_rows.append(refreshed)
+                    self.db.delete_account(refreshed["id"])
             elif result.restriction_status == "session_invalid":
                 if "损坏" in issue_text:
                     deleted_broken.append(str(label))
                 else:
                     deleted_banned.append(str(label))
                 if refreshed:
-                    self._purge_account_files(refreshed)
+                    removed_invalid_rows.append(refreshed)
                     self.db.delete_account(refreshed["id"])
             else:
                 unknown += 1
@@ -1154,7 +1210,7 @@ class DmCollectorBot:
                     frozen=frozen,
                     unknown=unknown,
                     deleted_broken=len(deleted_broken),
-                    deleted_banned=len(deleted_banned),
+                    deleted_banned=len(deleted_banned) + len(deleted_frozen),
                     kept_other_errors=len(kept_other_errors),
                     parallel=parallel,
                 ),
@@ -1166,6 +1222,11 @@ class DmCollectorBot:
                 ]),
             )
 
+        if removed_invalid_rows:
+            await self._send_account_export(query.message.chat_id, removed_invalid_rows, "invalid", auto_delete=True)
+        if removed_frozen_rows:
+            await self._send_account_export(query.message.chat_id, removed_frozen_rows, "frozen", auto_delete=True)
+
         total_alive = self.db.count_accounts()
         lines = [
             f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检查状态完成</b>",
@@ -1176,6 +1237,7 @@ class DmCollectorBot:
             f"待人工确认：<code>{unknown}</code>",
             f"自动删除损坏 session：<code>{len(deleted_broken)}</code>",
             f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
+            f"自动删除冻结：<code>{len(deleted_frozen)}</code>",
             f"当前列表保留：<code>{total_alive}</code>",
         ]
         if total_alive == 0:
@@ -1189,6 +1251,11 @@ class DmCollectorBot:
             lines.append("")
             lines.append("<b>已删除：封禁 / 失效</b>")
             for item in deleted_banned[:8]:
+                lines.append(f"• {html.escape(item, quote=False)}")
+        if deleted_frozen:
+            lines.append("")
+            lines.append("<b>已删除：冻结</b>")
+            for item in deleted_frozen[:8]:
                 lines.append(f"• {html.escape(item, quote=False)}")
         if kept_other_errors:
             lines.append("")
@@ -1318,6 +1385,10 @@ class DmCollectorBot:
                     "per_account_success_limit": 40,
                     "delay_min": 8,
                     "delay_max": 15,
+                    "stage1_delay_seconds": 5,
+                    "stage2_delay_seconds": 3,
+                    "pin_after_send": False,
+                    "pin_delay_seconds": 3,
                     "auto_switch_account": True,
                     "auto_stop_when_accounts_exhausted": True,
                     "typing_simulation": True,
@@ -1373,29 +1444,22 @@ class DmCollectorBot:
     async def _dm_wizard_back_to_input(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
-        content_type = draft.get("content_type") or "text"
-        if content_type == "media":
-            state["mode"] = "await_dm_media"
-            await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
-            return
-        if content_type == "forward":
-            state["mode"] = "await_dm_forward"
-            await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
-            return
         if draft.get("message_mode") == "three_stage":
             state["mode"] = "await_dm_closing"
             await self._safe_edit(query, self._dm_closing_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:body"))
             return
-        state["mode"] = "await_dm_message"
+        content_type = draft.get("content_type") or "text"
+        if content_type == "media":
+            state["mode"] = "await_dm_media"
+        elif content_type == "forward":
+            state["mode"] = "await_dm_forward"
+        else:
+            state["mode"] = "await_dm_message"
         await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
 
     async def _dm_wizard_toggle_mode(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
-        if draft.get("content_type") != "text":
-            draft["message_mode"] = "single"
-            await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
-            return
         draft["message_mode"] = "three_stage" if draft.get("message_mode") == "single" else "single"
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
@@ -1406,11 +1470,7 @@ class DmCollectorBot:
         current = str(draft.get("content_type") or "text")
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else "text"
         draft["content_type"] = next_value
-        if next_value != "text":
-            draft["message_mode"] = "single"
-            for key in ("text", "greeting", "body", "closing"):
-                draft.pop(key, None)
-        for key in ("media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview", "forward_message_preview", "forward_preview_error"):
+        for key in ("text", "body", "media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview", "forward_message_preview", "forward_preview_error"):
             draft.pop(key, None)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
@@ -1434,6 +1494,43 @@ class DmCollectorBot:
         policy["delay_min"], policy["delay_max"] = next_value
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
+    async def _dm_wizard_cycle_stage1_delay(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        policy = draft.setdefault("policy", {})
+        options = [0, 3, 5, 8, 10]
+        current = int(policy.get("stage1_delay_seconds") or 5)
+        next_value = options[(options.index(current) + 1) % len(options)] if current in options else 5
+        policy["stage1_delay_seconds"] = next_value
+        await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
+    async def _dm_wizard_cycle_stage2_delay(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        policy = draft.setdefault("policy", {})
+        options = [0, 3, 5, 8, 10]
+        current = int(policy.get("stage2_delay_seconds") or 3)
+        next_value = options[(options.index(current) + 1) % len(options)] if current in options else 3
+        policy["stage2_delay_seconds"] = next_value
+        await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
+    async def _dm_wizard_toggle_pin(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        policy = draft.setdefault("policy", {})
+        policy["pin_after_send"] = not bool(policy.get("pin_after_send", False))
+        await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
+    async def _dm_wizard_cycle_pin_delay(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        policy = draft.setdefault("policy", {})
+        options = [0, 3, 5, 8, 10]
+        current = int(policy.get("pin_delay_seconds") or 3)
+        next_value = options[(options.index(current) + 1) % len(options)] if current in options else 3
+        policy["pin_delay_seconds"] = next_value
+        await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
     async def _dm_wizard_toggle_typing(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
@@ -1453,17 +1550,18 @@ class DmCollectorBot:
     async def _dm_wizard_finish_config(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
+        if draft.get("message_mode") == "three_stage":
+            state["mode"] = "await_dm_greeting"
+            await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
+            return
         content_type = draft.get("content_type") or "text"
         if content_type == "media":
             state["mode"] = "await_dm_media"
         elif content_type == "forward":
             state["mode"] = "await_dm_forward"
-        elif draft.get("message_mode") == "three_stage":
-            state["mode"] = "await_dm_greeting"
         else:
             state["mode"] = "await_dm_message"
-        back_callback = "dm:wizard:back:config"
-        await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard(back_callback))
+        await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
 
     async def _dm_wizard_start_task(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
@@ -1485,37 +1583,7 @@ class DmCollectorBot:
         recipient_ids = self.dm_repository.create_or_get_recipients(targets)
         policy = draft.get("policy") or {}
         worker_count = max(1, min(len(draft.get("account_ids") or []), 3))
-        payload = {"mode": mode, "content_type": content_type}
-        if content_type == "media":
-            payload.update(
-                {
-                    "media_kind": draft.get("media_kind") or "file",
-                    "media_path": draft.get("media_path") or "",
-                    "file_name": draft.get("media_file_name") or "",
-                    "caption": draft.get("media_caption") or "",
-                }
-            )
-            mode = "single"
-        elif content_type == "forward":
-            payload.update(
-                {
-                    "forward_link": draft.get("forward_link") or "",
-                    "forward_preview": draft.get("forward_preview") or "",
-                    "forward_message_preview": draft.get("forward_message_preview") or "",
-                    "forward_preview_error": draft.get("forward_preview_error") or "",
-                }
-            )
-            mode = "single"
-        elif mode == "three_stage":
-            payload.update(
-                {
-                    "greeting": draft.get("greeting") or "",
-                    "body": draft.get("body") or "",
-                    "closing": draft.get("closing") or "",
-                }
-            )
-        else:
-            payload["text"] = draft.get("text") or ""
+        payload = self._build_dm_payload_from_draft(draft)
         task = self.dm_repository.create_dm_task(
             requester_id=user_id,
             account_ids=[int(item) for item in draft.get("account_ids") or []],
@@ -1544,6 +1612,72 @@ class DmCollectorBot:
         runner.add_done_callback(_cleanup_dm_runner)
         if query.message:
             await query.message.delete()
+
+    def _build_dm_payload_from_draft(self, draft: dict) -> dict:
+        mode = str(draft.get("message_mode") or "single")
+        content_type = str(draft.get("content_type") or "text")
+        payload = {"mode": mode, "content_type": content_type}
+        if mode == "three_stage":
+            payload["greeting"] = draft.get("greeting") or ""
+            payload["closing"] = draft.get("closing") or ""
+        if content_type == "media":
+            payload.update({
+                "media_kind": draft.get("media_kind") or "file",
+                "media_path": draft.get("media_path") or "",
+                "file_name": draft.get("media_file_name") or "",
+                "caption": draft.get("media_caption") or "",
+            })
+        elif content_type == "forward":
+            payload.update({
+                "forward_link": draft.get("forward_link") or "",
+                "forward_preview": draft.get("forward_preview") or "",
+                "forward_message_preview": draft.get("forward_message_preview") or "",
+                "forward_preview_error": draft.get("forward_preview_error") or "",
+            })
+        elif mode == "three_stage":
+            payload["body"] = draft.get("body") or ""
+        else:
+            payload["text"] = draft.get("text") or ""
+        return payload
+
+    async def _dm_wizard_preview(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        payload = self._build_dm_payload_from_draft(draft)
+        chat_id = query.message.chat_id if query.message else None
+        if not chat_id:
+            return
+        await self._send_dm_preview(chat_id, payload, draft.get("content_type") or "text")
+
+    async def _send_dm_preview(self, chat_id: int, payload: dict, content_type: str) -> None:
+        mode = str(payload.get("mode") or "single")
+        if mode == "three_stage" and str(payload.get("greeting") or "").strip():
+            await self.application.bot.send_message(chat_id=chat_id, text=str(payload.get("greeting") or ""))
+        if content_type == "media":
+            media_path = Path(str(payload.get("media_path") or ""))
+            if media_path.exists():
+                with media_path.open("rb") as fp:
+                    await self.application.bot.send_document(
+                        chat_id=chat_id,
+                        document=fp,
+                        filename=media_path.name,
+                        caption=str(payload.get("caption") or "") or None,
+                    )
+            else:
+                await self.application.bot.send_message(chat_id=chat_id, text="【预览失败】媒体文件不存在")
+        elif content_type == "forward":
+            preview_text = str(payload.get("forward_message_preview") or "").strip() or str(payload.get("forward_preview") or "").strip() or "暂时无法抓到帖子摘要"
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"【频道帖子预览】\n{preview_text}",
+                disable_web_page_preview=True,
+            )
+        else:
+            main_text = str(payload.get("body") or payload.get("text") or "").strip()
+            if main_text:
+                await self.application.bot.send_message(chat_id=chat_id, text=main_text)
+        if mode == "three_stage" and str(payload.get("closing") or "").strip():
+            await self.application.bot.send_message(chat_id=chat_id, text=str(payload.get("closing") or ""))
 
     async def _show_dm_task_list(self, query, page: int = 1) -> None:
         per_page = 6
@@ -2231,6 +2365,12 @@ class DmCollectorBot:
 
     def _dm_message_prompt_text(self, draft: dict) -> str:
         content_type = draft.get("content_type") or "text"
+        if draft.get("message_mode") == "three_stage":
+            return (
+                f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>输入第 1 段问候语</b>\n"
+                f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+                f"三段式会按顺序发送：第 1 段问候 → 第 2 段主内容 → 第 3 段结束语。"
+            )
         if content_type == "media":
             return (
                 f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送媒体内容</b>\n"
@@ -2243,12 +2383,6 @@ class DmCollectorBot:
                 f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
                 f"请直接发送频道帖子链接，例如：<code>https://t.me/channelname/123</code>\n我会用这个链接定位原帖，并由私信账号把原帖内容转发出去。"
             )
-        if draft.get("message_mode") == "three_stage":
-            return (
-                f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>输入问候语</b>\n"
-                f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-                f"请发送第一段问候语，例如：你好 / 在吗 / 方便聊聊吗。"
-            )
         return (
             f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>发送文本内容</b>\n"
             f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
@@ -2257,14 +2391,27 @@ class DmCollectorBot:
 
     def _dm_closing_prompt_text(self, draft: dict) -> str:
         return (
-            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>输入结束语</b>\n"
+            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>输入第 3 段结束语</b>\n"
             f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-            f"请发送第三段结束语。"
+            f"这段会在主内容发送后按配置延迟补发。"
         )
 
     def _dm_body_prompt_text(self, draft: dict) -> str:
+        content_type = draft.get("content_type") or "text"
+        if content_type == "media":
+            return (
+                f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送第 2 段主内容（媒体）</b>\n"
+                f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+                f"请直接发送图片 / 视频 / 文件，可附带 caption。"
+            )
+        if content_type == "forward":
+            return (
+                f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>发送第 2 段主内容（频道帖子）</b>\n"
+                f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+                f"请发送频道帖子链接，例如：<code>https://t.me/channelname/123</code>。"
+            )
         return (
-            f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>输入主消息</b>\n"
+            f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>输入第 2 段主消息</b>\n"
             f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
             f"请发送第二段主消息内容。"
         )
@@ -2276,7 +2423,11 @@ class DmCollectorBot:
         switch_label = "自动切号" if policy.get("auto_switch_account", True) else "单号用完即停"
         typing_label = "开启" if policy.get("typing_simulation", True) else "关闭"
         delay_label = f"{int(policy.get('delay_min', 8))}-{int(policy.get('delay_max', 15))}秒"
-        return "\n".join([
+        stage1_label = f"{int(policy.get('stage1_delay_seconds', 5))}秒"
+        stage2_label = f"{int(policy.get('stage2_delay_seconds', 3))}秒"
+        pin_label = "开启" if policy.get("pin_after_send", False) else "关闭"
+        pin_delay_label = f"{int(policy.get('pin_delay_seconds', 3))}秒"
+        lines = [
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>发送配置</b>",
             f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>",
             f"内容类型：<code>{content_label}</code>",
@@ -2285,75 +2436,46 @@ class DmCollectorBot:
             f"随机间隔：<code>{delay_label}</code>",
             f"打字状态：<code>{typing_label}</code>",
             f"账号策略：<code>{switch_label}</code>",
-            "",
-            "先把这页配置好，再进入文案输入。",
-        ])
+            f"自动置顶：<code>{pin_label}</code> · 延迟：<code>{pin_delay_label}</code>",
+        ]
+        if draft.get("message_mode") == "three_stage":
+            lines.append(f"三段间隔：<code>第1段后 {stage1_label} / 第2段后 {stage2_label}</code>")
+        lines.extend(["", "配置页只改参数，不会自动发送预览；想看效果请点下面的【预览文案】。"])
+        return "\n".join(lines)
 
     def _dm_confirm_text(self, draft: dict) -> str:
         policy = draft.get("policy") or {}
         content_type = draft.get("content_type") or "text"
-        if content_type == "media":
-            preview = payload_preview(
-                {
-                    "media_kind": draft.get("media_kind"),
-                    "file_name": draft.get("media_file_name"),
-                    "caption": draft.get("media_caption"),
-                },
-                content_type="media",
-                max_len=200,
-            )
-            mode_label = "媒体私信"
-        elif content_type == "forward":
-            preview = payload_preview(
-                {
-                    "forward_link": draft.get("forward_link"),
-                    "forward_preview": draft.get("forward_preview"),
-                    "forward_message_preview": draft.get("forward_message_preview"),
-                },
-                content_type="forward",
-                max_len=200,
-            )
-            preview_error = str(draft.get("forward_preview_error") or "").strip()
-            mode_label = "频道帖子链接"
-        elif draft.get("message_mode") == "three_stage":
-            preview = payload_preview(
-                {
-                    "mode": "three_stage",
-                    "greeting": draft.get("greeting"),
-                    "body": draft.get("body"),
-                    "closing": draft.get("closing"),
-                },
-                content_type="text",
-                max_len=220,
-            )
-            mode_label = "三段式文本私信"
-        else:
-            preview = payload_preview({"text": draft.get("text")}, content_type="text", max_len=200)
-            mode_label = "单条文本私信"
-        extra_preview_line = ""
+        mode_label = message_mode_label(draft.get("message_mode"), content_type=content_type)
+        preview_error = str(draft.get("forward_preview_error") or "").strip()
+        lines = [
+            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>确认启动私信任务</b>",
+            f"内容类型：<code>{content_type_label(content_type)}</code>",
+            f"发送模式：<code>{mode_label}</code>",
+            f"目标数：<code>{len(draft.get('targets') or [])}</code>",
+            f"账号数：<code>{len(draft.get('account_ids') or [])}</code>",
+            f"单号上限：<code>{policy.get('per_account_success_limit', 40)}</code>",
+            f"随机间隔：<code>{policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒</code>",
+            f"打字状态：<code>{'开启' if policy.get('typing_simulation', True) else '关闭'}</code>",
+            f"账号策略：<code>{'自动切号' if policy.get('auto_switch_account', True) else '单号用完即停'}</code>",
+            f"自动置顶：<code>{'开启' if policy.get('pin_after_send', False) else '关闭'}</code> · 延迟：<code>{int(policy.get('pin_delay_seconds', 3))}秒</code>",
+        ]
+        if draft.get("message_mode") == "three_stage":
+            lines.append(f"三段间隔：<code>第1段后 {int(policy.get('stage1_delay_seconds', 5))}秒 / 第2段后 {int(policy.get('stage2_delay_seconds', 3))}秒</code>")
         if content_type == "forward" and preview_error:
-            extra_preview_line = f"\n帖子预览：<code>抓取失败｜{html.escape(preview_error[:120], quote=False)}</code>"
-        return (
-            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>确认启动私信任务</b>\n"
-            f"模式：<code>{mode_label}</code>\n"
-            f"目标数：<code>{len(draft.get('targets') or [])}</code>\n"
-            f"账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-            f"单号上限：<code>{policy.get('per_account_success_limit', 40)}</code>\n"
-            f"随机间隔：<code>{policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒</code>\n"
-            f"打字状态：<code>{'开启' if policy.get('typing_simulation', True) else '关闭'}</code>\n"
-            f"账号策略：<code>{'自动切号' if policy.get('auto_switch_account', True) else '单号用完即停'}</code>\n\n"
-            f"文案预览：\n<code>{preview}</code>{extra_preview_line}"
-        )
+            lines.append(f"帖子预览状态：<code>抓取失败｜{html.escape(preview_error[:120], quote=False)}</code>")
+        lines.extend(["", "这里不再自动把文案发出来。需要看真实效果，请点【预览文案】。"])
+        return "\n".join(lines)
 
     def _format_dm_task_text(self, task_id: int) -> str:
         task = self.dm_repository.get_dm_task(task_id)
         if not task:
             return self._not_found_text("私信任务不存在或已被删除。")
         accounts = self.dm_repository.list_dm_task_accounts(task_id)
-        failed = self.dm_repository.list_dm_task_recipients(task_id, statuses=("failed",), limit=8)
         current = self.dm_repository.get_dm_task_current_recipient(task_id)
         recent_logs = self.dm_repository.list_dm_recent_logs(task_id, limit=5)
         processed = self.dm_repository.get_dm_task_processed_count(task_id)
+        pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
         payload = json.loads(str(task["payload_json"] or "{}"))
         policy = json.loads(str(task["policy_json"] or "{}"))
         content_type = str(task["content_type"] or payload.get("content_type") or "text")
@@ -2363,51 +2485,61 @@ class DmCollectorBot:
             f"状态：{status_badge(task['status'])}",
             f"总目标：<code>{task['total_targets']}</code>",
             f"当前进度：<code>{processed}/{task['total_targets']}</code>",
-            f"成功：<code>{task['success_count']}</code>",
-            f"失败：<code>{task['failed_count']}</code>",
-            f"跳过：<code>{task['skipped_count']}</code>",
-            f"运行账号：<code>{task['active_accounts']}</code>",
+        ]
+        if int(task["success_count"] or 0) > 0:
+            lines.append(f"成功：<code>{task['success_count']}</code>")
+        if int(task["failed_count"] or 0) > 0:
+            lines.append(f"失败：<code>{task['failed_count']}</code>")
+        if int(task["skipped_count"] or 0) > 0:
+            lines.append(f"跳过：<code>{task['skipped_count']}</code>")
+        if pending_count > 0:
+            lines.append(f"剩余待发送：<code>{pending_count}</code>")
+        if int(task["active_accounts"] or 0) > 0:
+            lines.append(f"运行账号：<code>{task['active_accounts']}</code>")
+        lines.extend([
             f"创建时间：<code>{task['created_at'] or '-'}</code>",
             f"开始时间：<code>{task['started_at'] or '-'}</code>",
             f"内容类型：<code>{content_type_label(content_type)}</code>",
             f"发送模式：<code>{message_mode_label(task['message_mode'], content_type=content_type)}</code>",
             f"发送配置：<code>上限 {policy.get('per_account_success_limit', 40)} / 间隔 {policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒 / {'打字开' if policy.get('typing_simulation', True) else '打字关'}</code>",
-        ]
+        ])
+        if draft_mode := policy.get("pin_after_send", False):
+            lines.append(f"自动置顶：<code>{'开启' if draft_mode else '关闭'}</code> · 延迟 <code>{int(policy.get('pin_delay_seconds', 3))}秒</code>")
         if content_type == "forward" and payload.get("forward_preview_error"):
             lines.append(f"帖子预览：<code>抓取失败｜{html.escape(str(payload.get('forward_preview_error'))[:120], quote=False)}</code>")
         if task["last_error"]:
-            lines.append(f"最近错误：<code>{html.escape(str(task['last_error']), quote=False)}</code>")
+            lines.append(f"最近错误：<code>{html.escape(self._humanize_dm_error(None, str(task['last_error'])), quote=False)}</code>")
         if current:
             account_label = current["account_username"] or current["account_phone"] or current["account_display_name"] or f"#{current['assigned_account_id']}"
             lines.append(f"当前账号：<code>{html.escape(str(account_label), quote=False)}</code>")
             lines.append(f"当前用户：<code>{html.escape(str(current['normalized_input']), quote=False)}</code>")
         lines.append("")
-        lines.append(f"内容预览：<code>{body}</code>")
+        lines.append(f"内容概览：<code>{body}</code>")
         if accounts:
             lines.append("")
             lines.append("<b>账号进度</b>")
             for row in accounts[:6]:
                 label = row["username"] or row["phone"] or row["session_name"]
                 reason = row["last_error"] or row["account_last_error"] or row["restriction_reason"]
-                line = f"• #{self._account_display_code(row['account_id'])} {html.escape(str(label), quote=False)} · 成功 <code>{row['sent_success_count']}</code> · 失败 <code>{row['sent_fail_count']}</code> · {status_badge(row['status'])}"
+                metrics: list[str] = []
+                if int(row["sent_success_count"] or 0) > 0:
+                    metrics.append(f"成功 <code>{row['sent_success_count']}</code>")
+                if int(row["sent_fail_count"] or 0) > 0:
+                    metrics.append(f"失败 <code>{row['sent_fail_count']}</code>")
+                metrics.append(str(status_badge(row['status'])))
+                line = f"• #{self._account_display_code(row['account_id'])} {html.escape(str(label), quote=False)} · " + " · ".join(metrics)
                 if reason and row["status"] in {"error", "stopped"}:
-                    line += f" · <code>{html.escape(str(reason), quote=False)[:70]}</code>"
+                    line += f" · <code>{html.escape(self._humanize_dm_error(None, str(reason)), quote=False)[:70]}</code>"
                 lines.append(line)
-        if failed:
-            lines.append("")
-            lines.append("<b>最近失败</b>")
-            for row in failed:
-                lines.append(
-                    f"• {html.escape(str(row['normalized_input']), quote=False)} · <code>{html.escape(self._humanize_dm_error(row['error_code'], row['error_message']), quote=False)}</code>"
-                )
         if recent_logs:
             lines.append("")
-            lines.append("<b>最近 5 条日志</b>")
+            lines.append("<b>最新 5 条日志</b>")
             for row in recent_logs:
                 account_label = row["account_username"] or row["account_phone"] or row["account_display_name"] or (row["account_id"] and f"#{row['account_id']}") or "-"
                 target = row["normalized_input"] or "-"
+                detail = self._humanize_dm_error(None, str(row['message'] or row['raw_error'] or '-'))
                 lines.append(
-                    f"• [{html.escape(str(row['status']), quote=False)}] {html.escape(str(account_label), quote=False)} → {html.escape(str(target), quote=False)} · <code>{html.escape(str(row['message'] or row['raw_error'] or '-'), quote=False)[:80]}</code>"
+                    f"• [{html.escape(str(row['status']), quote=False)}] {html.escape(str(account_label), quote=False)} → {html.escape(str(target), quote=False)} · <code>{html.escape(detail, quote=False)[:80]}</code>"
                 )
         return "\n".join(lines)
 
@@ -2422,11 +2554,32 @@ class DmCollectorBot:
             "mutual_limit": "账号存在双向或发送限制",
             "frozen": "账号疑似冻结",
             "flood_wait": "官方限速等待中",
+            "chat_write_forbidden": "这个会话当前不允许发送消息",
+            "media_forbidden": "当前聊天不允许发送媒体",
+            "text_forbidden": "当前聊天不允许发送文本",
+            "forward_forbidden": "这个目标不允许转发该帖子内容",
+            "admin_required": "当前账号没有执行该操作的权限",
             "send_failed": "发送失败",
         }
+        raw = str(message or code or "-").strip()
         if code in mapping:
-            return mapping[str(code)] + (f"｜{message}" if message and code not in {"send_failed", "flood_wait"} else (f"｜{message}" if code == "send_failed" and message else ""))
-        return str(message or code or "-")
+            return mapping[str(code)] if not raw or raw == code else f"{mapping[str(code)]}｜{raw}"
+        lowered = raw.lower()
+        phrase_map = [
+            ("you can't write in this chat", "这个会话当前不允许发送消息"),
+            ("settypingrequest", "当前目标不支持显示正在输入或无法发送消息"),
+            ("privacy", "对方隐私限制，无法私信"),
+            ("peerflood", "官方判定发送过于频繁"),
+            ("floodwait", "官方限速，需要等待后再发"),
+            ("forward", "当前目标不允许转发该帖子内容"),
+            ("media", "当前聊天不允许发送媒体"),
+            ("entity not found", "用户不存在或无法解析"),
+            ("session 未登录", "session 已失效或未登录"),
+        ]
+        for needle, friendly in phrase_map:
+            if needle in lowered:
+                return friendly
+        return raw or "发送失败"
 
     def _channels_prompt_text(self) -> str:
         return (
@@ -2482,7 +2635,7 @@ class DmCollectorBot:
                 f"冻结：<code>{frozen}</code>",
                 f"待确认：<code>{unknown}</code>",
                 f"已删损坏：<code>{deleted_broken}</code>",
-                f"已删封禁/失效：<code>{deleted_banned}</code>",
+                f"已删封禁/失效/冻结：<code>{deleted_banned}</code>",
                 f"其他异常：<code>{kept_other_errors}</code>",
                 "",
                 "账号较多时会持续刷新这里，包含 SpamBot 检测过程，不是卡住。",
@@ -2728,13 +2881,22 @@ class DmCollectorBot:
                 premium_button(f"切号：{'开' if policy.get('auto_switch_account', True) else '关'}", self.settings.emoji_all_id, callback_data="dm:wizard:switch:toggle"),
             ],
             [
-                premium_button("继续输入文案", self.settings.emoji_start_id, callback_data="dm:wizard:cfg:done"),
+                premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),
+                premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:pin_delay:cycle"),
             ],
+        ]
+        if draft.get("message_mode") == "three_stage":
+            keyboard.append([
+                premium_button(f"第1段后：{int(policy.get('stage1_delay_seconds', 5))}秒", self.settings.emoji_stats_id, callback_data="dm:wizard:stage1:cycle"),
+                premium_button(f"第2段后：{int(policy.get('stage2_delay_seconds', 3))}秒", self.settings.emoji_welcome_id, callback_data="dm:wizard:stage2:cycle"),
+            ])
+        keyboard.extend([
+            [premium_button("继续输入文案", self.settings.emoji_start_id, callback_data="dm:wizard:cfg:done")],
             [
                 premium_button("重新选账号", self.settings.emoji_back_id, callback_data="dm:wizard:back_accounts"),
                 premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
             ],
-        ]
+        ])
         return InlineKeyboardMarkup(keyboard)
 
     def _build_workers_keyboard(self, draft: dict) -> InlineKeyboardMarkup:
@@ -2810,25 +2972,32 @@ class DmCollectorBot:
     def _build_dm_confirm_keyboard(self, back_callback: str = "dm:wizard:back:input") -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
             [
+                premium_button("预览文案", self.settings.emoji_welcome_id, callback_data="dm:wizard:preview"),
                 premium_button("开始私信", self.settings.emoji_start_id, callback_data="dm:wizard:start"),
-                premium_button("返回上一步", self.settings.emoji_back_id, callback_data=back_callback),
             ],
             [
+                premium_button("返回上一步", self.settings.emoji_back_id, callback_data=back_callback),
                 premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
             ],
         ])
 
     def _build_dm_task_keyboard(self, task_id: int, *, page: int = 1) -> InlineKeyboardMarkup:
         task = self.dm_repository.get_dm_task(task_id)
-        keyboard = [
-            [
-                premium_button("成功", self.settings.emoji_success_id, callback_data=f"dm:refresh:{task_id}:{page}"),
-                premium_button(str(task["success_count"] if task else 0), self.settings.emoji_success_id, callback_data=f"dm:refresh:{task_id}:{page}"),
-            ],
-            [
-                premium_button("失败", self.settings.emoji_error_id, callback_data=f"dm:refresh:{task_id}:{page}"),
-                premium_button(str(task["failed_count"] if task else 0), self.settings.emoji_error_id, callback_data=f"dm:refresh:{task_id}:{page}"),
-            ],
+        keyboard: list[list] = []
+        if task:
+            pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
+            stats_row = []
+            if int(task['success_count'] or 0) > 0:
+                stats_row.append(premium_button(f"成功 {task['success_count']}", self.settings.emoji_success_id, callback_data=f"dm:refresh:{task_id}:{page}"))
+            if int(task['failed_count'] or 0) > 0:
+                stats_row.append(premium_button(f"失败 {task['failed_count']}", self.settings.emoji_error_id, callback_data=f"dm:refresh:{task_id}:{page}"))
+            if stats_row:
+                keyboard.append(stats_row[:2])
+            if pending_count > 0:
+                keyboard.append([premium_button(f"待发送 {pending_count}", self.settings.emoji_waiting_id, callback_data=f"dm:refresh:{task_id}:{page}")])
+        if task and task["status"] in {"queued", "running"}:
+            keyboard.append([premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"dm:stop:{task_id}:{page}")])
+        keyboard.extend([
             [
                 premium_button("导出结果", self.settings.emoji_export_id, callback_data=f"dm:export:{task_id}"),
                 premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"dm:refresh:{task_id}:{page}"),
@@ -2837,9 +3006,7 @@ class DmCollectorBot:
                 premium_button("返回任务列表", self.settings.emoji_back_id, callback_data=f"dm:tasks:{page}"),
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
             ],
-        ]
-        if task and task["status"] in {"queued", "running"}:
-            keyboard.insert(2, [premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"dm:stop:{task_id}:{page}")])
+        ])
         return InlineKeyboardMarkup(keyboard)
 
     def _single_back_keyboard(self, callback_data: str) -> InlineKeyboardMarkup:
@@ -2867,6 +3034,77 @@ class DmCollectorBot:
         return self._task_display_map().get(task_id, task_id)
 
     # ---------- helpers ----------
+    def _account_export_bucket_label(self, bucket: str) -> str:
+        return {
+            "unrestricted": "无限制",
+            "limited": "受限",
+            "invalid": "失效/封禁",
+            "frozen": "冻结",
+        }.get(bucket, bucket)
+
+    def _filter_account_rows_for_export(self, bucket: str) -> list:
+        rows = self.db.list_all_accounts()
+        limited_statuses = {"temp_mutual", "permanent_mutual", "geo_limited", "spam_limited", "restricted"}
+        matched = []
+        for row in rows:
+            restriction = str(row["restriction_status"] or "unknown")
+            runtime_status = str(row["status"] or "active")
+            if bucket == "unrestricted" and restriction == "unrestricted":
+                matched.append(row)
+            elif bucket == "limited" and restriction in limited_statuses:
+                matched.append(row)
+            elif bucket == "frozen" and restriction == "frozen":
+                matched.append(row)
+            elif bucket == "invalid" and (restriction == "session_invalid" or runtime_status in {"unauthorized", "error"}):
+                matched.append(row)
+        return matched
+
+    def _build_accounts_export_zip(self, rows: list, bucket: str) -> Path:
+        self.settings.export_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zip_path = self.settings.export_dir / f"accounts_{bucket}_{stamp}.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for row in rows:
+                session_path = Path(str(row["session_file"] or ""))
+                if not session_path.exists():
+                    continue
+                folder_name = f"{self._account_display_code(row)}_{session_path.stem}"
+                archive.write(session_path, arcname=f"{folder_name}/{session_path.name}")
+                sidecar = session_path.with_suffix(".json")
+                if sidecar.exists():
+                    archive.write(sidecar, arcname=f"{folder_name}/{sidecar.name}")
+        return zip_path
+
+    async def _send_account_export(self, chat_id: int, rows: list, bucket: str, *, auto_delete: bool) -> None:
+        if not rows:
+            return
+        zip_path = self._build_accounts_export_zip(rows, bucket)
+        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+        with zip_path.open("rb") as fp:
+            await self.application.bot.send_document(
+                chat_id=chat_id,
+                document=fp,
+                filename=zip_path.name,
+                caption=(
+                    f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>账号导出｜{self._account_export_bucket_label(bucket)}</b>\n"
+                    f"数量：<code>{len(rows)}</code>"
+                    + ("\n说明：<code>导出后已自动删除这些账号</code>" if auto_delete else "")
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        if auto_delete:
+            for row in rows:
+                self._purge_account_files(row)
+                self.db.delete_account(int(row["id"]))
+
+    async def _export_accounts_by_bucket(self, query, chat_id: int, bucket: str) -> None:
+        rows = self._filter_account_rows_for_export(bucket)
+        if not rows:
+            await query.answer(f"没有可导出的{self._account_export_bucket_label(bucket)}账号", show_alert=True)
+            return
+        await self._send_account_export(chat_id, rows, bucket, auto_delete=bucket in {"invalid", "frozen"})
+        await self._show_accounts_menu(query, page=1)
+
     async def _send_dm_exports(self, chat_id: int) -> None:
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
         paths = self.db.export_csv(self.settings.export_dir)
@@ -2892,15 +3130,19 @@ class DmCollectorBot:
         if not task:
             return
         paths = self.dm_repository.export_task_results(task_id, self.settings.export_dir)
+        pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
         captions = [
-            (paths.success_txt, f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信成功名单</b>\n成功：<code>{task['success_count']}</code>"),
-            (paths.failed_txt, f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信失败名单</b>\n失败：<code>{task['failed_count']}</code>"),
-            (paths.failed_csv, f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信失败详情</b>"),
+            (paths.success_txt, int(task['success_count'] or 0), f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信成功名单</b>\n成功：<code>{task['success_count']}</code>"),
+            (paths.failed_txt, int(task['failed_count'] or 0), f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信失败名单</b>\n失败：<code>{task['failed_count']}</code>"),
+            (paths.failed_csv, int(task['failed_count'] or 0), f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信失败详情</b>"),
+            (paths.pending_txt, pending_count, f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信剩余待发送</b>\n待发送：<code>{pending_count}</code>"),
         ]
+        sent_any = False
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
-        for path, caption in captions:
-            if not path.exists():
+        for path, count, caption in captions:
+            if count <= 0 or not path.exists():
                 continue
+            sent_any = True
             with path.open("rb") as fp:
                 await self.application.bot.send_document(
                     chat_id=chat_id,
@@ -2909,6 +3151,12 @@ class DmCollectorBot:
                     caption=caption,
                     parse_mode=ParseMode.HTML,
                 )
+        if not sent_any:
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前这个私信任务还没有可导出的结果。",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def _send_task_result(self, chat_id: int, task_id: int, announce: bool = False) -> None:
         task = self.db.get_collect_task(task_id)

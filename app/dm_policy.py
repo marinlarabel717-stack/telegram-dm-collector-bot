@@ -28,6 +28,10 @@ class DMTaskPolicy:
     auto_stop_when_accounts_exhausted: bool = True
     typing_simulation: bool = True
     delay_window: DelayWindow = field(default_factory=DelayWindow)
+    stage1_delay_seconds: float = 5.0
+    stage2_delay_seconds: float = 3.0
+    pin_after_send: bool = False
+    pin_delay_seconds: float = 3.0
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
 
     def should_rotate_account(self, success_count: int) -> bool:

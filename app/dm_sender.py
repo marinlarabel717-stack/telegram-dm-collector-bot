@@ -116,7 +116,6 @@ class DmSenderManager:
         task = self.repository.get_dm_task(task_id)
         payload = json.loads(str(task["payload_json"] or "{}")) if task else {}
         content_type = str((task["content_type"] if task else None) or payload.get("content_type") or "text")
-        message_parts = self._build_message_parts(payload) if content_type == "text" else []
         self.repository.update_dm_task_account(task_id, account_id, status="running", last_error=None)
         try:
             client = self.collection_manager._build_client(session_file)
@@ -146,7 +145,8 @@ class DmSenderManager:
                 self.repository.mark_dm_recipient_sending(task_id, recipient_id, account_id)
                 try:
                     entity = await client.get_input_entity(target)
-                    await self._dispatch_payload(client, entity, payload, content_type, message_parts, policy)
+                    sent_message = await self._dispatch_payload(client, entity, payload, content_type, policy)
+                    await self._apply_post_send_actions(client, entity, sent_message, policy, task_id=task_id, account_id=account_id, recipient_id=recipient_id)
                     success_count += 1
                     self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
                     self.repository.update_dm_task_account(task_id, account_id, success_delta=1, last_error=None)
@@ -258,37 +258,56 @@ class DmSenderManager:
             if client is not None:
                 await client.disconnect()
 
-    async def _send_message_parts(self, client, entity, parts: list[str], policy: DMTaskPolicy) -> None:
-        for index, part in enumerate(parts):
-            if policy.typing_simulation:
+    async def _send_text_message(self, client, entity, text: str, policy: DMTaskPolicy):
+        content = str(text or "").strip()
+        if not content:
+            return None
+        if policy.typing_simulation:
+            try:
                 async with client.action(entity, "typing"):
                     await asyncio.sleep(min(2.5, max(0.5, policy.delay_window.next_delay() / 3)))
-            await client.send_message(entity, part)
-            if index < len(parts) - 1:
-                await asyncio.sleep(min(3.0, max(0.8, policy.delay_window.next_delay() / 4)))
+            except Exception:
+                logger.debug("typing 模拟失败，改为直接发送", exc_info=True)
+        return await client.send_message(entity, content)
 
-    async def _dispatch_payload(self, client, entity, payload: dict, content_type: str, message_parts: list[str], policy: DMTaskPolicy) -> None:
+    async def _dispatch_single_payload(self, client, entity, payload: dict, content_type: str, policy: DMTaskPolicy):
         if content_type == "media":
             media_path = Path(str(payload.get("media_path") or "")).expanduser()
             if not media_path.exists():
                 raise FileNotFoundError(f"媒体文件不存在: {media_path}")
             caption = str(payload.get("caption") or "").strip() or None
-            await client.send_file(entity, file=str(media_path), caption=caption)
-            return
+            return await client.send_file(entity, file=str(media_path), caption=caption)
         if content_type == "forward":
             forward_link = str(payload.get("forward_link") or "").strip()
             if forward_link:
                 source_peer, source_message_id = await self._resolve_channel_post_link(client, forward_link)
-                await client.forward_messages(entity, messages=source_message_id, from_peer=source_peer)
-                return
+                return self._normalize_sent_message(await client.forward_messages(entity, messages=source_message_id, from_peer=source_peer))
             source_chat_id = payload.get("source_chat_id")
             source_message_id = payload.get("source_message_id")
             if not source_chat_id or not source_message_id:
                 raise ValueError("频道帖子链接不能为空")
             from_peer = await client.get_input_entity(int(source_chat_id))
-            await client.forward_messages(entity, messages=int(source_message_id), from_peer=from_peer)
-            return
-        await self._send_message_parts(client, entity, message_parts, policy)
+            return self._normalize_sent_message(await client.forward_messages(entity, messages=int(source_message_id), from_peer=from_peer))
+        main_text = str(payload.get("body") or payload.get("text") or "").strip()
+        return await self._send_text_message(client, entity, main_text, policy)
+
+    async def _dispatch_payload(self, client, entity, payload: dict, content_type: str, policy: DMTaskPolicy):
+        mode = str(payload.get("mode") or "single")
+        if mode != "three_stage":
+            return await self._dispatch_single_payload(client, entity, payload, content_type, policy)
+
+        greeting = str(payload.get("greeting") or "").strip()
+        closing = str(payload.get("closing") or "").strip()
+        if greeting:
+            await self._send_text_message(client, entity, greeting, policy)
+            await asyncio.sleep(max(0.0, float(policy.stage1_delay_seconds or 0)))
+
+        main_sent = await self._dispatch_single_payload(client, entity, payload, content_type, policy)
+
+        if closing:
+            await asyncio.sleep(max(0.0, float(policy.stage2_delay_seconds or 0)))
+            await self._send_text_message(client, entity, closing, policy)
+        return main_sent
 
     @staticmethod
     def _build_message_parts(payload: dict) -> list[str]:
@@ -325,6 +344,10 @@ class DmSenderManager:
                 min_seconds=float(data.get("delay_min") or 8),
                 max_seconds=float(data.get("delay_max") or 15),
             ),
+            stage1_delay_seconds=float(data.get("stage1_delay_seconds") or 5),
+            stage2_delay_seconds=float(data.get("stage2_delay_seconds") or 3),
+            pin_after_send=bool(data.get("pin_after_send", False)),
+            pin_delay_seconds=float(data.get("pin_delay_seconds") or 3),
             retry_policy=RetryPolicy(
                 max_retries=int(data.get("max_retries") or 3),
                 stop_account_after_user_frequent=int(data.get("stop_account_after_user_frequent") or 30),
@@ -336,8 +359,18 @@ class DmSenderManager:
         lowered = short.lower()
         if "peerflood" in lowered:
             return "peer_flood", "官方判定发送过于频繁", True
+        if "you can't write in this chat" in lowered or "chat_write_forbidden" in lowered or "settypingrequest" in lowered:
+            return "chat_write_forbidden", "这个会话当前不允许发送消息", False
         if "privacy" in lowered or "privacyrestricted" in lowered or "user is not mutual contact" in lowered:
             return "privacy_restricted", "对方隐私限制，无法私信", False
+        if "chat_send_media_forbidden" in lowered or "send media" in lowered and "forbidden" in lowered:
+            return "media_forbidden", "当前聊天不允许发送媒体", False
+        if "chat_send_plain_forbidden" in lowered:
+            return "text_forbidden", "当前聊天不允许发送文本", False
+        if "chat_admin_required" in lowered or "pin" in lowered and "admin" in lowered:
+            return "admin_required", "当前账号在这个会话里没有管理员权限", False
+        if "message author required" in lowered or "forwards are restricted" in lowered or "forward" in lowered and "forbidden" in lowered:
+            return "forward_forbidden", "这个目标不允许转发该帖子内容", False
         if "username not occupied" in lowered or "cannot find" in lowered or "no user has" in lowered or "entity not found" in lowered:
             return "user_not_found", "用户不存在或无法解析", False
         if "bot method invalid" in lowered or "bot invalid" in lowered:
@@ -351,6 +384,39 @@ class DmSenderManager:
         if "frozen" in lowered:
             return "frozen", "账号疑似冻结", True
         return "send_failed", short or exc.__class__.__name__, False
+
+    async def _apply_post_send_actions(self, client, entity, sent_message, policy: DMTaskPolicy, *, task_id: int, account_id: int, recipient_id: int) -> None:
+        if not policy.pin_after_send or sent_message is None:
+            return
+        try:
+            await asyncio.sleep(max(0.0, float(policy.pin_delay_seconds or 0)))
+            await client.pin_message(entity, sent_message, notify=False)
+            self.repository.add_send_log(
+                task_id=task_id,
+                account_id=account_id,
+                recipient_id=recipient_id,
+                action="pin",
+                status="success",
+                message=f"发送后 {int(policy.pin_delay_seconds or 0)} 秒已自动置顶",
+            )
+        except Exception as exc:  # noqa: BLE001
+            raw = self.collection_manager._short_error(exc)
+            _, friendly, _ = self._classify_send_error(exc)
+            self.repository.add_send_log(
+                task_id=task_id,
+                account_id=account_id,
+                recipient_id=recipient_id,
+                action="pin",
+                status="failed",
+                message=f"置顶失败｜{friendly}",
+                raw_error=raw,
+            )
+
+    @staticmethod
+    def _normalize_sent_message(result):
+        if isinstance(result, list):
+            return result[-1] if result else None
+        return result
 
     async def _emit_progress(self, task_id: int) -> None:
         if self.on_progress:

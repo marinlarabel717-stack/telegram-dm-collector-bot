@@ -13,8 +13,6 @@ def content_type_label(content_type: str | None) -> str:
 
 
 def message_mode_label(message_mode: str | None, *, content_type: str | None = None) -> str:
-    if str(content_type or "text") != "text":
-        return "单条"
     return "三段式" if str(message_mode or "single") == "three_stage" else "单条"
 
 
@@ -28,6 +26,16 @@ def payload_preview(payload: dict | None, *, content_type: str | None = None, ma
         summary = f"{media_kind}｜{file_name}"
         if caption:
             summary += f"｜说明：{caption}"
+        if str(payload.get("mode") or "single") == "three_stage":
+            greeting = str(payload.get("greeting") or "").strip()[:60]
+            closing = str(payload.get("closing") or "").strip()[:60]
+            parts = []
+            if greeting:
+                parts.append(f"第1段：{greeting}")
+            parts.append(f"第2段：{summary[:120]}")
+            if closing:
+                parts.append(f"第3段：{closing}")
+            return html.escape("\n".join(parts)[:max_len], quote=False)
         return html.escape(summary[:max_len], quote=False)
     if kind == "forward":
         link = str(payload.get("forward_link") or "").strip()
@@ -38,7 +46,18 @@ def payload_preview(payload: dict | None, *, content_type: str | None = None, ma
             summary += f"｜备注：{preview}"
         if message_preview:
             summary += f"｜帖子预览：{message_preview}"
-        return html.escape(summary[:max_len], quote=False)
+        main_summary = summary[:max_len]
+        if str(payload.get("mode") or "single") == "three_stage":
+            greeting = str(payload.get("greeting") or "").strip()[:60]
+            closing = str(payload.get("closing") or "").strip()[:60]
+            parts = []
+            if greeting:
+                parts.append(f"第1段：{greeting}")
+            parts.append(f"第2段：{main_summary}")
+            if closing:
+                parts.append(f"第3段：{closing}")
+            return html.escape("\n".join(parts)[:max_len], quote=False)
+        return html.escape(main_summary[:max_len], quote=False)
     mode = str(payload.get("mode") or "single")
     if mode == "three_stage":
         parts = [

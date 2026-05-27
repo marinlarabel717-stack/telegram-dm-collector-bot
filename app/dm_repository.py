@@ -132,6 +132,7 @@ class DMExportPaths:
     success_txt: Path
     failed_txt: Path
     failed_csv: Path
+    pending_txt: Path
 
 
 class DmRepository:
@@ -555,6 +556,7 @@ class DmRepository:
         success_txt = export_dir / f"dm_task_{task_id}_success.txt"
         failed_txt = export_dir / f"dm_task_{task_id}_failed.txt"
         failed_csv = export_dir / f"dm_task_{task_id}_failed.csv"
+        pending_txt = export_dir / f"dm_task_{task_id}_pending.txt"
 
         with self.db.lock:
             success_rows = self.db.conn.execute(
@@ -577,12 +579,23 @@ class DmRepository:
                 """,
                 (task_id,),
             ).fetchall()
+            pending_rows = self.db.conn.execute(
+                """
+                SELECT r.normalized_input
+                FROM dm_task_recipients tr
+                JOIN dm_recipients r ON r.id = tr.recipient_id
+                WHERE tr.task_id=? AND tr.status IN ('pending','sending')
+                ORDER BY tr.id ASC
+                """,
+                (task_id,),
+            ).fetchall()
 
         success_txt.write_text("\n".join(str(row["normalized_input"]) for row in success_rows), encoding="utf-8-sig")
         failed_txt.write_text("\n".join(str(row["normalized_input"]) for row in failed_rows), encoding="utf-8-sig")
+        pending_txt.write_text("\n".join(str(row["normalized_input"]) for row in pending_rows), encoding="utf-8-sig")
         with failed_csv.open("w", newline="", encoding="utf-8-sig") as fp:
             writer = csv.writer(fp)
             writer.writerow(["target", "error_code", "error_message", "retry_count"])
             for row in failed_rows:
                 writer.writerow([row["normalized_input"], row["error_code"], row["error_message"], row["retry_count"]])
-        return DMExportPaths(success_txt=success_txt, failed_txt=failed_txt, failed_csv=failed_csv)
+        return DMExportPaths(success_txt=success_txt, failed_txt=failed_txt, failed_csv=failed_csv, pending_txt=pending_txt)
