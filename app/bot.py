@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import re
 import time
 import zipfile
@@ -1003,8 +1004,7 @@ class DmCollectorBot:
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
         draft["days"] = days
-        active_accounts = self.db.get_active_accounts()
-        draft.setdefault("account_ids", [row["id"] for row in active_accounts])
+        draft.setdefault("account_ids", [])
         if draft.get("task_type") == "group":
             state["mode"] = "select_group_filters"
             text = self._group_filters_text(draft)
@@ -1045,8 +1045,16 @@ class DmCollectorBot:
     async def _wizard_auto_accounts(self, query, user_id: int) -> None:
         active_accounts = self.db.get_active_accounts()
         state = self.user_states.setdefault(user_id, {"draft": {}})
-        state.setdefault("draft", {})["account_ids"] = [row["id"] for row in active_accounts]
-        await self._wizard_finish_accounts(query, user_id)
+        draft = state.setdefault("draft", {})
+        draft["account_ids"] = [row["id"] for row in active_accounts]
+        text = self._select_accounts_text(
+            draft.get("channels", []),
+            int(draft.get("days") or 1),
+            draft["account_ids"],
+            task_type=draft.get("task_type", "channel"),
+            filters=draft.get("filters"),
+        )
+        await self._safe_edit(query, text, self._build_account_selection_keyboard(draft["account_ids"]))
 
     async def _wizard_toggle_account(self, query, user_id: int, account_id: int) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
