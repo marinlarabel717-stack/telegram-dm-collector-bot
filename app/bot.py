@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from dataclasses import asdict
 import html
 import json
 import re
@@ -92,6 +93,22 @@ class DmCollectorBot:
             MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, self.capture_private_message),
             group=1,
         )
+        self.application.add_error_handler(self.handle_error)
+
+    async def handle_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        exc = context.error
+        logger.exception("PTB update 处理失败: %s", exc)
+
+        effective_message = getattr(update, "effective_message", None)
+        if not effective_message:
+            return
+        try:
+            await effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 刚刚这一步执行失败了，我已经记下日志。请重试一次；如果还报错，把刚刚的操作再发我。",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("发送统一错误提示失败")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_chat or not update.effective_message:
@@ -504,7 +521,7 @@ class DmCollectorBot:
                 )
                 return
             draft = state.setdefault("draft", {})
-            draft["targets"] = [item.__dict__ for item in targets]
+            draft["targets"] = [asdict(item) for item in targets]
             draft["invalid_targets"] = invalid
             state["mode"] = "dm_select_accounts"
             await update.effective_message.reply_text(
@@ -755,7 +772,7 @@ class DmCollectorBot:
                 )
                 return
             draft = state.setdefault("draft", {})
-            draft["targets"] = [item.__dict__ for item in targets]
+            draft["targets"] = [asdict(item) for item in targets]
             draft["invalid_targets"] = invalid
             state["mode"] = "dm_select_accounts"
             await update.effective_message.reply_text(
