@@ -6,6 +6,7 @@ from dataclasses import asdict
 import html
 import json
 import re
+import tempfile
 import time
 import zipfile
 from math import ceil
@@ -1745,8 +1746,7 @@ class DmCollectorBot:
         elif content_type == "post":
             post_code = str(payload.get("body") or payload.get("post_code") or payload.get("text") or "").strip()
             if post_code:
-                preview_text = await self._build_postbot_preview_text(post_code, draft=draft)
-                await self.application.bot.send_message(chat_id=chat_id, text=preview_text)
+                await self._send_postbot_preview(chat_id, post_code, draft=draft)
         elif content_type == "forward":
             preview_text = str(payload.get("forward_message_preview") or "").strip() or str(payload.get("forward_preview") or "").strip() or "暂时无法抓到帖子摘要"
             await self.application.bot.send_message(
@@ -1782,6 +1782,86 @@ class DmCollectorBot:
         finally:
             if client is not None:
                 await client.disconnect()
+
+    async def _send_postbot_preview(self, chat_id: int, post_code: str, *, draft: dict | None = None) -> None:
+        draft = draft or {}
+        account_ids = [int(item) for item in (draft.get("account_ids") or []) if str(item).strip()]
+        if not account_ids:
+            preview_text = await self._build_postbot_preview_text(post_code, draft=draft)
+            await self.application.bot.send_message(chat_id=chat_id, text=preview_text)
+            return
+
+        account = self.db.get_account(account_ids[0])
+        if not account:
+            preview_text = await self._build_postbot_preview_text(post_code, draft=draft)
+            await self.application.bot.send_message(chat_id=chat_id, text=preview_text)
+            return
+
+        client = None
+        preview_message = None
+        try:
+            client = self.collection_manager._build_client(Path(str(account["session_file"])))
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise RuntimeError("预览账号 session 未登录")
+
+            _, inline_result = await fetch_postbot_inline_result(client, post_code)
+            preview_message = await inline_result.click("me")
+            preview_message = self._normalize_preview_message(preview_message)
+            if preview_message is None:
+                raise RuntimeError("PostBot 预览消息生成失败")
+            await self._relay_preview_message_to_chat(chat_id, client, preview_message)
+        finally:
+            if client is not None:
+                if preview_message is not None:
+                    try:
+                        await client.delete_messages("me", [preview_message.id])
+                    except Exception:
+                        logger.debug("删除 PostBot 预览缓存消息失败", exc_info=True)
+                await client.disconnect()
+
+    async def _relay_preview_message_to_chat(self, chat_id: int, client, message) -> None:
+        text = (getattr(message, "raw_text", None) or getattr(message, "message", None) or "").strip()
+        if getattr(message, "media", None):
+            mime_type = None
+            media_kind = "document"
+            if getattr(message, "photo", None):
+                media_kind = "photo"
+            elif getattr(message, "video", None):
+                media_kind = "video"
+                mime_type = getattr(message.video, "mime_type", None)
+            elif getattr(message, "document", None):
+                mime_type = getattr(message.document, "mime_type", None)
+
+            with tempfile.TemporaryDirectory(prefix="postbot_preview_") as tmp_dir:
+                downloaded = await client.download_media(message, file=tmp_dir)
+                if downloaded:
+                    media_path = Path(str(downloaded))
+                    resolved_kind = self._detect_dm_preview_media_kind(media_path, media_kind, mime_type)
+                    with media_path.open("rb") as fp:
+                        if resolved_kind == "photo":
+                            await self.application.bot.send_photo(chat_id=chat_id, photo=fp, caption=text or None)
+                            return
+                        if resolved_kind == "video":
+                            await self.application.bot.send_video(chat_id=chat_id, video=fp, caption=text or None)
+                            return
+                        await self.application.bot.send_document(
+                            chat_id=chat_id,
+                            document=fp,
+                            filename=media_path.name,
+                            caption=text or None,
+                        )
+                        return
+        if text:
+            await self.application.bot.send_message(chat_id=chat_id, text=text)
+            return
+        await self.application.bot.send_message(chat_id=chat_id, text="【预览失败】PostBot 没有返回可展示的消息内容")
+
+    @staticmethod
+    def _normalize_preview_message(result):
+        if isinstance(result, list):
+            return result[-1] if result else None
+        return result
 
     @staticmethod
     def _detect_dm_preview_media_kind(path: Path, media_kind: str | None, mime_type: str | None = None) -> str:
