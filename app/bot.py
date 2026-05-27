@@ -151,7 +151,13 @@ class DmCollectorBot:
             await self._delete_account(query, account_id)
             return
         if data == "collect:new":
+            await self._show_collect_create_menu(query)
+            return
+        if data == "collect:new:channel":
             await self._start_collect_wizard(query, update.effective_user.id)
+            return
+        if data == "collect:new:group":
+            await self._show_collect_group_placeholder(query)
             return
         if data == "collect:tasks":
             await self._show_task_list(query, page=1)
@@ -765,8 +771,8 @@ class DmCollectorBot:
 
     async def _show_collect_menu(self, query) -> None:
         text = (
-            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>采集中心</b>\n"
-            f"第一版支持：多频道、可选几天前消息、多账号并发、去重导出 txt。"
+            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>采集用户</b>\n"
+            f"当前支持：采集频道用户名；采集群组入口已预留，功能稍后继续对。"
         )
         keyboard = [
             [
@@ -776,6 +782,36 @@ class DmCollectorBot:
             [
                 premium_button("历史结果", self.settings.emoji_history_id, callback_data="menu:history"),
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
+            ],
+        ]
+        await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
+
+    async def _show_collect_create_menu(self, query) -> None:
+        text = (
+            f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>新建采集任务</b>\n"
+            f"请选择这次要采集的来源类型。"
+        )
+        keyboard = [
+            [
+                premium_button("采集频道", self.settings.emoji_progress_id, callback_data="collect:new:channel"),
+                premium_button("采集群组", self.settings.emoji_list_id, callback_data="collect:new:group"),
+            ],
+            [
+                premium_button("返回采集用户", self.settings.emoji_back_id, callback_data="menu:collect"),
+                premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
+            ],
+        ]
+        await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
+
+    async def _show_collect_group_placeholder(self, query) -> None:
+        text = (
+            f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>采集群组</b>\n"
+            f"群组采集入口已经先加上了，具体采集逻辑等你下一条需求我再继续接。"
+        )
+        keyboard = [
+            [
+                premium_button("返回新建任务", self.settings.emoji_back_id, callback_data="collect:new"),
+                premium_button("返回采集用户", self.settings.emoji_home_id, callback_data="menu:collect"),
             ],
         ]
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
@@ -823,7 +859,7 @@ class DmCollectorBot:
                 premium_button("历史结果", self.settings.emoji_history_id, callback_data="menu:history:1"),
             ])
         keyboard.append([
-            premium_button("返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect"),
+            premium_button("返回采集用户", self.settings.emoji_back_id, callback_data="menu:collect"),
             premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data=f"collect:tasks:{page}"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
@@ -869,7 +905,7 @@ class DmCollectorBot:
         if nav:
             keyboard.append(nav)
         keyboard.append([
-            premium_button("返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect"),
+            premium_button("返回采集用户", self.settings.emoji_back_id, callback_data="menu:collect"),
             premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data=f"menu:history:{page}"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
@@ -1244,7 +1280,7 @@ class DmCollectorBot:
         keyboard = [
             [
                 premium_button("账号管理", self.settings.emoji_list_id, callback_data="menu:accounts"),
-                premium_button("采集中心", self.settings.emoji_progress_id, callback_data="menu:collect"),
+                premium_button("采集用户", self.settings.emoji_progress_id, callback_data="menu:collect"),
             ],
             [
                 premium_button("统计", self.settings.emoji_stats_id, callback_data="menu:stats"),
