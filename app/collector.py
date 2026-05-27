@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -247,7 +249,72 @@ class CollectionManager:
         session_base = str(session_file)
         if session_base.endswith(".session"):
             session_base = session_base[:-8]
-        return TelegramClient(session_base, self.settings.api_id, self.settings.api_hash)
+        try:
+            return TelegramClient(session_base, self.settings.api_id, self.settings.api_hash)
+        except ValueError as exc:
+            if "too many values to unpack" not in str(exc):
+                raise
+            compat_session = self._build_compat_session_file(session_file)
+            compat_base = str(compat_session)
+            if compat_base.endswith(".session"):
+                compat_base = compat_base[:-8]
+            return TelegramClient(compat_base, self.settings.api_id, self.settings.api_hash)
+
+    def _build_compat_session_file(self, session_file: Path) -> Path:
+        compat_file = session_file.with_name(f"{session_file.stem}.compat.session")
+        shutil.copy2(session_file, compat_file)
+
+        with sqlite3.connect(compat_file) as conn:
+            conn.row_factory = sqlite3.Row
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if not columns:
+                raise ValueError("session 文件里缺少 sessions 表")
+            row = conn.execute("SELECT * FROM sessions LIMIT 1").fetchone()
+            if row is None:
+                raise ValueError("session 文件里没有可用的登录记录")
+            row_dict = {key: row[key] for key in row.keys()}
+            required = {
+                "dc_id": row_dict.get("dc_id"),
+                "server_address": row_dict.get("server_address"),
+                "port": row_dict.get("port"),
+                "auth_key": row_dict.get("auth_key"),
+                "takeout_id": row_dict.get("takeout_id"),
+            }
+            if required["dc_id"] is None or required["server_address"] is None or required["port"] is None or required["auth_key"] is None:
+                raise ValueError("session 文件缺少 Telethon 必要字段")
+
+            conn.execute("ALTER TABLE sessions RENAME TO sessions_backup")
+            conn.execute(
+                """
+                CREATE TABLE sessions (
+                    dc_id INTEGER PRIMARY KEY,
+                    server_address TEXT,
+                    port INTEGER,
+                    auth_key BLOB,
+                    takeout_id INTEGER
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO sessions (dc_id, server_address, port, auth_key, takeout_id) VALUES (?, ?, ?, ?, ?)",
+                (
+                    required["dc_id"],
+                    required["server_address"],
+                    required["port"],
+                    required["auth_key"],
+                    required["takeout_id"],
+                ),
+            )
+            conn.execute("DROP TABLE sessions_backup")
+
+            version_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='version'"
+            ).fetchone()
+            if version_exists:
+                conn.execute("DELETE FROM version")
+                conn.execute("INSERT INTO version (version) VALUES (7)")
+            conn.commit()
+        return compat_file
 
     @staticmethod
     def _extract_usernames(text: str) -> list[str]:
