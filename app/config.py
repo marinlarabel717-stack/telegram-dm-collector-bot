@@ -115,7 +115,7 @@ def get_settings() -> Settings:
         auto_reply_enabled=_parse_bool(os.getenv("AUTO_REPLY_ENABLED"), False),
         auto_reply_text=os.getenv("AUTO_REPLY_TEXT", "消息已收到，我们会尽快查看。"),
         welcome_text=os.getenv("WELCOME_TEXT", "欢迎，直接给我发消息就行，我会自动记录你的资料和私信内容。"),
-        max_collect_workers=max(1, _parse_int(os.getenv("MAX_COLLECT_WORKERS"), 3)),
+        max_collect_workers=min(50, max(1, _parse_int(os.getenv("MAX_COLLECT_WORKERS"), 50))),
         emoji_welcome_id=os.getenv("EMOJI_WELCOME_ID", DEFAULT_EMOJI_IDS["welcome"]),
         emoji_inbox_id=os.getenv("EMOJI_INBOX_ID", DEFAULT_EMOJI_IDS["inbox"]),
         emoji_stats_id=os.getenv("EMOJI_STATS_ID", DEFAULT_EMOJI_IDS["stats"]),

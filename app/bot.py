@@ -199,6 +199,12 @@ class DmCollectorBot:
         if data == "wizard:acc:done":
             await self._wizard_finish_accounts(query, update.effective_user.id)
             return
+        if data == "wizard:wrk_custom":
+            state = self.user_states.setdefault(update.effective_user.id, {"draft": {}})
+            draft = state.setdefault("draft", {})
+            state["mode"] = "await_custom_workers"
+            await self._safe_edit(query, self._custom_workers_prompt_text(draft), self._single_back_keyboard("collect:new"))
+            return
         if data.startswith("wizard:wrk:"):
             worker_count = int(data.split(":")[-1])
             await self._wizard_set_workers(query, update.effective_user.id, worker_count)
@@ -402,6 +408,26 @@ class DmCollectorBot:
                 )
                 return
             await self._wizard_set_days(None, update.effective_user.id, days, reply_message=update.effective_message)
+            return
+
+        if mode == "await_custom_workers":
+            draft = state.setdefault("draft", {})
+            max_workers = self._max_worker_count(draft)
+            try:
+                workers = int(text)
+            except ValueError:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请输入整数线程数，例如 {max_workers}。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            if workers <= 0 or workers > max_workers:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 线程数请控制在 1 到 {max_workers} 之间。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            await self._wizard_set_workers(None, update.effective_user.id, workers, reply_message=update.effective_message)
 
     async def capture_private_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_chat or not update.effective_message:
@@ -552,19 +578,68 @@ class DmCollectorBot:
         deleted_banned: list[str] = []
         kept_other_errors: list[str] = []
         total_checked = len(rows)
+        processed = 0
+        parallel = min(10, total_checked)
 
-        for index, row in enumerate(rows, start=1):
-            current_label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
+        semaphore = asyncio.Semaphore(parallel)
+
+        async def _verify_one(account_row):
+            async with semaphore:
+                result = await self.collection_manager.verify_account(account_row)
+                refreshed = self.db.get_account(account_row["id"])
+                return account_row, refreshed, result
+
+        await self._safe_edit(
+            query,
+            self._format_check_all_progress_text(
+                total=total_checked,
+                processed=0,
+                current_label="准备开始",
+                kept_active=0,
+                deleted_broken=0,
+                deleted_banned=0,
+                kept_other_errors=0,
+                parallel=parallel,
+            ),
+            InlineKeyboardMarkup([
+                [
+                    premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
+                    premium_button("账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                ],
+            ]),
+        )
+
+        tasks = [asyncio.create_task(_verify_one(row)) for row in rows]
+        for finished in asyncio.as_completed(tasks):
+            original, refreshed, result = await finished
+            processed += 1
+            account = refreshed or original
+            label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+            issue_text = self._humanize_account_issue(result.status, result.last_error)
+            if result.status == "active":
+                kept_active += 1
+            elif self._should_auto_purge_account(result.status, result.last_error):
+                if "损坏" in issue_text:
+                    deleted_broken.append(str(label))
+                else:
+                    deleted_banned.append(str(label))
+                if refreshed:
+                    self._purge_account_files(refreshed)
+                    self.db.delete_account(refreshed["id"])
+            else:
+                kept_other_errors.append(f"{label}｜{issue_text}")
+
             await self._safe_edit(
                 query,
                 self._format_check_all_progress_text(
                     total=total_checked,
-                    processed=index - 1,
-                    current_label=str(current_label),
+                    processed=processed,
+                    current_label=str(label),
                     kept_active=kept_active,
                     deleted_broken=len(deleted_broken),
                     deleted_banned=len(deleted_banned),
                     kept_other_errors=len(kept_other_errors),
+                    parallel=parallel,
                 ),
                 InlineKeyboardMarkup([
                     [
@@ -573,24 +648,6 @@ class DmCollectorBot:
                     ],
                 ]),
             )
-            result = await self.collection_manager.verify_account(row)
-            refreshed = self.db.get_account(row["id"])
-            account = refreshed or row
-            label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
-            issue_text = self._humanize_account_issue(result.status, result.last_error)
-            if result.status == "active":
-                kept_active += 1
-                continue
-            if self._should_auto_purge_account(result.status, result.last_error):
-                if "损坏" in issue_text:
-                    deleted_broken.append(str(label))
-                else:
-                    deleted_banned.append(str(label))
-                if refreshed:
-                    self._purge_account_files(refreshed)
-                    self.db.delete_account(refreshed["id"])
-                continue
-            kept_other_errors.append(f"{label}｜{issue_text}")
 
         total_alive = self.db.count_accounts()
         lines = [
@@ -802,15 +859,20 @@ class DmCollectorBot:
             )
             return
         state["mode"] = "select_workers"
-        await self._safe_edit(query, self._select_workers_text(draft), self._build_workers_keyboard())
+        await self._safe_edit(query, self._select_workers_text(draft), self._build_workers_keyboard(draft))
 
-    async def _wizard_set_workers(self, query, user_id: int, worker_count: int) -> None:
+    async def _wizard_set_workers(self, query, user_id: int, worker_count: int, reply_message=None) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
-        max_workers = max(1, min(len(draft.get("account_ids") or []), self.settings.max_collect_workers))
+        max_workers = self._max_worker_count(draft)
         draft["worker_count"] = max(1, min(worker_count, max_workers))
         state["mode"] = "confirm_task"
-        await self._safe_edit(query, self._collect_confirm_text(draft), self._build_confirm_keyboard())
+        text = self._collect_confirm_text(draft)
+        markup = self._build_confirm_keyboard()
+        if query is not None:
+            await self._safe_edit(query, text, markup)
+        elif reply_message is not None:
+            await reply_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
     async def _wizard_start_task(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
@@ -979,20 +1041,20 @@ class DmCollectorBot:
         deleted_broken: int,
         deleted_banned: int,
         kept_other_errors: int,
+        parallel: int,
     ) -> str:
-        current_index = min(processed + 1, total)
         return "\n".join(
             [
                 f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>正在批量检测账号</b>",
-                f"进度：<code>{processed}/{total}</code>",
-                f"当前检测：<code>{current_index}/{total}</code> · <code>{html.escape(current_label[:36], quote=False)}</code>",
+                f"进度：<code>{processed}/{total}</code> · 并发：<code>{parallel}</code>",
+                f"最近完成：<code>{html.escape(current_label[:36], quote=False)}</code>",
                 "",
                 f"已确认可用：<code>{kept_active}</code>",
                 f"已删损坏：<code>{deleted_broken}</code>",
                 f"已删封禁/失效：<code>{deleted_banned}</code>",
                 f"其他异常：<code>{kept_other_errors}</code>",
                 "",
-                "账号较多时会逐个更新这里，不是卡住。",
+                "账号较多时会持续刷新这里，不是卡住。",
             ]
         )
 
@@ -1000,6 +1062,14 @@ class DmCollectorBot:
         return (
             f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} <b>自定义天数</b>\n"
             f"请直接发送一个整数天数，例如 <code>7</code>。"
+        )
+
+    def _custom_workers_prompt_text(self, draft: dict) -> str:
+        max_workers = self._max_worker_count(draft)
+        return (
+            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>自定义并发线程</b>\n"
+            f"当前最多可设：<code>{max_workers}</code>\n"
+            f"请直接发送一个整数，例如 <code>{max_workers}</code>。"
         )
 
     def _select_accounts_text(self, channels: list[str], days: int, selected_ids: list[int]) -> str:
@@ -1017,12 +1087,19 @@ class DmCollectorBot:
         return "\n".join(lines)
 
     def _select_workers_text(self, draft: dict) -> str:
+        max_workers = self._max_worker_count(draft)
         return (
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>设置并发</b>\n"
             f"频道数：<code>{len(draft.get('channels') or [])}</code>\n"
             f"账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-            f"推荐先从 <code>1~3</code> 开始，第一版更稳。"
+            f"当前最多可设：<code>{max_workers}</code>\n"
+            f"并发会按 账号数 / 频道数 / 上限 取最小值。"
         )
+
+    def _max_worker_count(self, draft: dict) -> int:
+        channels = len(draft.get("channels") or [])
+        accounts = len(draft.get("account_ids") or [])
+        return max(1, min(channels or 1, accounts or 1, self.settings.max_collect_workers))
 
     def _collect_confirm_text(self, draft: dict) -> str:
         channels = draft.get("channels") or []
@@ -1113,21 +1190,29 @@ class DmCollectorBot:
         ])
         return InlineKeyboardMarkup(keyboard)
 
-    def _build_workers_keyboard(self) -> InlineKeyboardMarkup:
-        keyboard = [
-            [
-                premium_button("1 线程", self.settings.emoji_progress_id, callback_data="wizard:wrk:1"),
-                premium_button("2 线程", self.settings.emoji_progress_id, callback_data="wizard:wrk:2"),
-            ],
-            [
-                premium_button("3 线程", self.settings.emoji_progress_id, callback_data="wizard:wrk:3"),
-                premium_button("5 线程", self.settings.emoji_next_id, callback_data="wizard:wrk:5"),
-            ],
-            [
-                premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
-                premium_button("重新开始", self.settings.emoji_idea_id, callback_data="collect:new"),
-            ],
-        ]
+    def _build_workers_keyboard(self, draft: dict) -> InlineKeyboardMarkup:
+        max_workers = self._max_worker_count(draft)
+        presets = [1, 2, 3, 5, 10, 20, 30, 50]
+        available = [value for value in presets if value <= max_workers]
+        if max_workers not in available:
+            available.append(max_workers)
+        available = sorted(set(available))
+
+        keyboard = []
+        row_buffer = []
+        for value in available:
+            row_buffer.append(
+                premium_button(f"{value} 线程", self.settings.emoji_progress_id, callback_data=f"wizard:wrk:{value}")
+            )
+            if len(row_buffer) == 2:
+                keyboard.append(row_buffer)
+                row_buffer = []
+        if row_buffer:
+            keyboard.append(row_buffer)
+        keyboard.append([
+            premium_button("自定义线程", self.settings.emoji_idea_id, callback_data="wizard:wrk_custom"),
+            premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+        ])
         return InlineKeyboardMarkup(keyboard)
 
     def _build_confirm_keyboard(self) -> InlineKeyboardMarkup:
