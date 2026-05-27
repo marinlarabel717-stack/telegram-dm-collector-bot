@@ -28,6 +28,7 @@ from .config import Settings
 from .database import Database
 from .dm_account_checker import DmAccountChecker
 from .dm_content import content_type_label, message_mode_label, payload_preview
+from .dm_links import normalize_channel_post_link
 from .dm_repository import DmRepository
 from .dm_sender import DmSenderManager
 from .dm_targets import ParsedTarget, parse_targets_text
@@ -586,33 +587,25 @@ class DmCollectorBot:
         message = update.effective_message
         if not message:
             return
-        source_chat = getattr(message, "forward_from_chat", None)
-        source_message_id = getattr(message, "forward_from_message_id", None)
-        if not source_chat or not source_message_id:
+        raw_link = (message.text or message.caption or "").strip()
+        link = normalize_channel_post_link(raw_link)
+        if not link:
             await message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请直接转发频道原消息，普通复制内容不算。",
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请直接发送频道帖子链接，例如：<code>https://t.me/channelname/123</code>",
                 parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
             )
             return
-        chat_type = getattr(source_chat, "type", None)
-        if str(chat_type) not in {"channel", "ChatType.CHANNEL"}:
-            await message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 目前只支持转发 <b>频道消息</b>，群消息先别用这个入口。",
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        preview = (message.text_html or message.caption_html or message.text or message.caption or "").strip()
         draft = state.setdefault("draft", {})
         draft["content_type"] = "forward"
         draft["message_mode"] = "single"
-        draft["forward_source_chat_id"] = int(source_chat.id)
-        draft["forward_source_message_id"] = int(source_message_id)
-        draft["forward_source_title"] = getattr(source_chat, "title", None) or getattr(source_chat, "username", None) or str(source_chat.id)
-        draft["forward_preview"] = preview[:160]
+        draft["forward_link"] = link
+        draft["forward_preview"] = link
         state["mode"] = "dm_confirm"
         await message.reply_text(
             self._dm_confirm_text(draft),
             parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
             reply_markup=self._build_dm_confirm_keyboard(),
         )
 
@@ -784,10 +777,7 @@ class DmCollectorBot:
             return
 
         if mode == "await_dm_forward":
-            await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_history_id, '📝')} 当前在等待频道原消息，请直接把频道消息转发给我。",
-                parse_mode=ParseMode.HTML,
-            )
+            await self._handle_dm_forward_input(update, state)
             return
 
         if mode == "await_custom_days":
@@ -849,7 +839,7 @@ class DmCollectorBot:
             mode = state.get("mode")
             if mode == "await_dm_media" and (message.photo or message.video):
                 await self._handle_dm_media_input(update, state)
-            elif mode == "await_dm_forward" and (message.forward_origin or message.forward_from_chat):
+            elif mode == "await_dm_forward" and (message.text or message.caption):
                 await self._handle_dm_forward_input(update, state)
             return
 
@@ -1190,7 +1180,7 @@ class DmCollectorBot:
     async def _show_dm_menu(self, query) -> None:
         text = (
             f"{tg_emoji(self.settings.emoji_start_id, '🎊')} <b>私信任务</b>\n"
-            f"当前支持：文本私信、媒体私信、转发频道消息、txt/手输用户名单、单号上限、自动切号、实时成功失败统计。"
+            f"当前支持：文本私信、媒体私信、发送频道帖子链接、txt/手输用户名单、单号上限、自动切号、实时成功失败统计。"
         )
         keyboard = [
             [
@@ -1280,7 +1270,7 @@ class DmCollectorBot:
             draft["message_mode"] = "single"
             for key in ("text", "greeting", "body", "closing"):
                 draft.pop(key, None)
-        for key in ("media_kind", "media_path", "media_file_name", "media_caption", "forward_source_chat_id", "forward_source_message_id", "forward_source_title", "forward_preview"):
+        for key in ("media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview"):
             draft.pop(key, None)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
@@ -1343,7 +1333,7 @@ class DmCollectorBot:
         if content_type == "media":
             has_content = bool(draft.get("media_path"))
         elif content_type == "forward":
-            has_content = bool(draft.get("forward_source_chat_id") and draft.get("forward_source_message_id"))
+            has_content = bool(draft.get("forward_link"))
         else:
             has_content = bool((draft.get("text") or "").strip()) if mode == "single" else bool((draft.get("body") or "").strip())
         if not raw_targets or not draft.get("account_ids") or not has_content:
@@ -1368,9 +1358,7 @@ class DmCollectorBot:
         elif content_type == "forward":
             payload.update(
                 {
-                    "source_chat_id": draft.get("forward_source_chat_id"),
-                    "source_message_id": draft.get("forward_source_message_id"),
-                    "source_chat_title": draft.get("forward_source_title") or "",
+                    "forward_link": draft.get("forward_link") or "",
                     "forward_preview": draft.get("forward_preview") or "",
                 }
             )
@@ -2093,9 +2081,9 @@ class DmCollectorBot:
             )
         if content_type == "forward":
             return (
-                f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>转发频道消息</b>\n"
+                f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>发送频道帖子链接</b>\n"
                 f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-                f"请把要群发的 <b>频道原消息</b> 直接转发给我。"
+                f"请直接发送频道帖子链接，例如：<code>https://t.me/channelname/123</code>"
             )
         if draft.get("message_mode") == "three_stage":
             return (
@@ -2160,13 +2148,13 @@ class DmCollectorBot:
         elif content_type == "forward":
             preview = payload_preview(
                 {
-                    "source_chat_title": draft.get("forward_source_title"),
+                    "forward_link": draft.get("forward_link"),
                     "forward_preview": draft.get("forward_preview"),
                 },
                 content_type="forward",
                 max_len=200,
             )
-            mode_label = "转发频道消息"
+            mode_label = "频道帖子链接"
         elif draft.get("message_mode") == "three_stage":
             preview = payload_preview(
                 {

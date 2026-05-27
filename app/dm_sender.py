@@ -245,10 +245,14 @@ class DmSenderManager:
             await client.send_file(entity, file=str(media_path), caption=caption)
             return
         if content_type == "forward":
+            forward_link = str(payload.get("forward_link") or "").strip()
+            if forward_link:
+                await client.send_message(entity, forward_link)
+                return
             source_chat_id = payload.get("source_chat_id")
             source_message_id = payload.get("source_message_id")
             if not source_chat_id or not source_message_id:
-                raise ValueError("转发源消息信息不完整")
+                raise ValueError("频道帖子链接不能为空")
             from_peer = await client.get_input_entity(int(source_chat_id))
             await client.forward_messages(entity, messages=int(source_message_id), from_peer=from_peer)
             return

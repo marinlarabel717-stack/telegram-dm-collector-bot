@@ -7,7 +7,7 @@ def content_type_label(content_type: str | None) -> str:
     mapping = {
         "text": "文本",
         "media": "媒体",
-        "forward": "转发",
+        "forward": "频道链接",
     }
     return mapping.get(str(content_type or "text"), "文本")
 
@@ -30,11 +30,11 @@ def payload_preview(payload: dict | None, *, content_type: str | None = None, ma
             summary += f"｜说明：{caption}"
         return html.escape(summary[:max_len], quote=False)
     if kind == "forward":
-        title = str(payload.get("source_chat_title") or "未知来源")
+        link = str(payload.get("forward_link") or "").strip()
         preview = str(payload.get("forward_preview") or "").strip()
-        summary = f"转发自：{title}"
+        summary = f"频道帖子链接：{link or '-'}"
         if preview:
-            summary += f"｜预览：{preview}"
+            summary += f"｜备注：{preview}"
         return html.escape(summary[:max_len], quote=False)
     mode = str(payload.get("mode") or "single")
     if mode == "three_stage":
