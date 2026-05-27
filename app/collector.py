@@ -60,6 +60,18 @@ class CollectionManager:
         self.on_progress = on_progress
         self.on_complete = on_complete
 
+    @staticmethod
+    def _task_tag(task_id: int) -> str:
+        return f"【任务{task_id}】"
+
+    @staticmethod
+    def _account_tag(account_id: int) -> str:
+        return f"【账号{account_id}】"
+
+    @staticmethod
+    def _target_tag(kind: str, value: str) -> str:
+        return f"【{kind} {value}】"
+
     async def verify_session_file(self, session_file: Path) -> SessionCheckResult:
         client: TelegramClient | None = None
         try:
@@ -126,8 +138,8 @@ class CollectionManager:
 
         try:
             logger.info(
-                "采集任务启动 task=%s type=%s channels=%s accounts=%s workers=%s days=%s",
-                task_id,
+                "%s 启动｜类型=%s｜目标=%s｜账号=%s｜并发=%s｜最近=%s天",
+                self._task_tag(task_id),
                 task["task_type"],
                 task["total_channels"],
                 task["account_count"],
@@ -144,13 +156,13 @@ class CollectionManager:
             for account in accounts:
                 checked = await self.verify_account(account)
                 logger.info(
-                    "账号检测 task=%s account=%s status=%s username=%s phone=%s error=%s",
-                    task_id,
-                    account["id"],
+                    "%s%s 账号检测｜状态=%s｜用户名=%s｜手机号=%s｜错误=%s",
+                    self._task_tag(task_id),
+                    self._account_tag(account["id"]),
                     checked.status,
-                    checked.username,
-                    checked.phone,
-                    checked.last_error,
+                    checked.username or "-",
+                    checked.phone or "-",
+                    checked.last_error or "-",
                 )
                 if checked.status == "active":
                     active_workers.append(self.db.get_account(account["id"]))
@@ -166,8 +178,8 @@ class CollectionManager:
 
             worker_count = min(task["worker_count"], len(active_workers), queue.qsize(), self.settings.max_collect_workers)
             logger.info(
-                "采集任务开始执行 task=%s active_workers=%s queue=%s worker_count=%s",
-                task_id,
+                "%s 开始执行｜可用账号=%s｜队列=%s｜实际并发=%s",
+                self._task_tag(task_id),
                 len(active_workers),
                 queue.qsize(),
                 worker_count,
@@ -189,8 +201,8 @@ class CollectionManager:
                 self.db.mark_collect_task_status(task_id, "stopped")
 
             logger.info(
-                "采集任务结束 task=%s status=%s scanned=%s hits=%s unique=%s",
-                task_id,
+                "%s 结束｜状态=%s｜扫描=%s｜命中=%s｜去重=%s",
+                self._task_tag(task_id),
                 final_status,
                 self.db.get_collect_task(task_id)["total_messages_scanned"],
                 self.db.get_collect_task(task_id)["total_hits"],
@@ -207,7 +219,7 @@ class CollectionManager:
                 self.db.set_task_result_file(task_id, str(output_path))
             await self._emit_complete(task_id)
         except asyncio.CancelledError:
-            logger.warning("采集任务被取消 task=%s", task_id)
+            logger.warning("%s 已取消", self._task_tag(task_id))
             self.db.stop_collect_task_now(task_id, reason="任务已停止，账号已释放")
             if (task["task_type"] or "channel") == "group":
                 outputs = self.db.export_group_task_files(task_id, self.settings.export_dir)
@@ -220,7 +232,7 @@ class CollectionManager:
             await self._emit_complete(task_id)
             return
         except Exception as exc:  # noqa: BLE001
-            logger.exception("采集任务异常 task=%s error=%s", task_id, exc)
+            logger.exception("%s 异常｜%s", self._task_tag(task_id), exc)
             self.db.mark_collect_task_status(task_id, "error", last_error=self._short_error(exc))
             try:
                 if (task["task_type"] or "channel") == "group":
@@ -241,12 +253,12 @@ class CollectionManager:
         session_file = Path(account_row["session_file"])
         client: TelegramClient | None = None
         try:
-            logger.info("频道 worker 启动 task=%s account=%s session=%s", task_id, account_id, session_file.name)
+            logger.info("%s%s 频道 worker 启动｜session=%s", self._task_tag(task_id), self._account_tag(account_id), session_file.name)
             client = self._build_client(session_file)
             await client.connect()
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
-                logger.warning("频道 worker 未授权 task=%s account=%s", task_id, account_id)
+                logger.warning("%s%s 未授权，跳过", self._task_tag(task_id), self._account_tag(account_id))
                 return
             self.db.update_account_status(account_id, status="collecting", last_error=None)
 
@@ -258,7 +270,7 @@ class CollectionManager:
                 except asyncio.QueueEmpty:
                     break
                 try:
-                    logger.info("频道任务分配 task=%s account=%s channel=%s", task_id, account_id, task_channel["channel"])
+                    logger.info("%s%s 分配频道｜%s", self._task_tag(task_id), self._account_tag(account_id), task_channel["channel"])
                     await self._process_channel(task_id, client, account_id, task_channel)
                 finally:
                     queue.task_done()
@@ -266,7 +278,7 @@ class CollectionManager:
             raise
         except Exception as exc:  # noqa: BLE001
             self.db.update_account_status(account_id, status="error", last_error=self._short_error(exc))
-            logger.exception("频道 worker 异常 task=%s account=%s error=%s", task_id, account_id, exc)
+            logger.exception("%s%s 频道 worker 异常｜%s", self._task_tag(task_id), self._account_tag(account_id), exc)
         finally:
             refreshed = self.db.get_account(account_id)
             next_status = "active"
@@ -285,12 +297,12 @@ class CollectionManager:
         client: TelegramClient | None = None
         joined_since_cooldown = 0
         try:
-            logger.info("群组 worker 启动 task=%s account=%s session=%s", task_id, account_id, session_file.name)
+            logger.info("%s%s 群组 worker 启动｜session=%s", self._task_tag(task_id), self._account_tag(account_id), session_file.name)
             client = self._build_client(session_file)
             await client.connect()
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
-                logger.warning("群组 worker 未授权 task=%s account=%s", task_id, account_id)
+                logger.warning("%s%s 未授权，跳过", self._task_tag(task_id), self._account_tag(account_id))
                 return
             self.db.update_account_status(account_id, status="collecting", last_error=None)
 
@@ -298,7 +310,7 @@ class CollectionManager:
                 if self.db.should_stop_task(task_id):
                     break
                 if joined_since_cooldown >= GROUP_JOIN_BATCH_LIMIT:
-                    logger.info("群组 worker 冷却 task=%s account=%s joined_since_cooldown=%s wait=%ss", task_id, account_id, joined_since_cooldown, GROUP_JOIN_COOLDOWN_SECONDS)
+                    logger.info("%s%s 冷却中｜已连续入群=%s｜等待=%ss", self._task_tag(task_id), self._account_tag(account_id), joined_since_cooldown, GROUP_JOIN_COOLDOWN_SECONDS)
                     await self._sleep_with_stop(task_id, GROUP_JOIN_COOLDOWN_SECONDS)
                     joined_since_cooldown = 0
                 try:
@@ -306,7 +318,7 @@ class CollectionManager:
                 except asyncio.QueueEmpty:
                     break
                 try:
-                    logger.info("群组任务分配 task=%s account=%s group=%s", task_id, account_id, task_channel["channel"])
+                    logger.info("%s%s 分配群组｜%s", self._task_tag(task_id), self._account_tag(account_id), task_channel["channel"])
                     joined = await self._process_group(task_id, client, account_id, task_channel)
                     if joined:
                         joined_since_cooldown += 1
@@ -316,7 +328,7 @@ class CollectionManager:
             raise
         except Exception as exc:  # noqa: BLE001
             self.db.update_account_status(account_id, status="error", last_error=self._short_error(exc))
-            logger.exception("群组 worker 异常 task=%s account=%s error=%s", task_id, account_id, exc)
+            logger.exception("%s%s 群组 worker 异常｜%s", self._task_tag(task_id), self._account_tag(account_id), exc)
         finally:
             refreshed = self.db.get_account(account_id)
             next_status = "active"
@@ -341,7 +353,7 @@ class CollectionManager:
         status = "completed"
 
         self.db.start_task_channel(task_channel_id, account_id)
-        logger.info("频道开始采集 task=%s account=%s channel=%s cutoff=%s", task_id, account_id, channel, cutoff.isoformat())
+        logger.info("%s%s%s 开始采集｜截止=%s", self._task_tag(task_id), self._account_tag(account_id), self._target_tag("频道", channel), cutoff.isoformat())
         try:
             async for message in client.iter_messages(channel):
                 if self.db.should_stop_task(task_id):
@@ -358,10 +370,10 @@ class CollectionManager:
                 scanned_messages += 1
                 if scanned_messages % LOG_PROGRESS_EVERY_MESSAGES == 0:
                     logger.info(
-                        "频道采集中 task=%s account=%s channel=%s scanned=%s hits=%s unique=%s",
-                        task_id,
-                        account_id,
-                        channel,
+                        "%s%s%s 采集中｜扫描=%s｜命中=%s｜去重=%s",
+                        self._task_tag(task_id),
+                        self._account_tag(account_id),
+                        self._target_tag("频道", channel),
                         scanned_messages,
                         total_hits,
                         inserted_hits,
@@ -407,15 +419,15 @@ class CollectionManager:
         )
         self.db.sync_task_metrics(task_id, unique_total=unique_total)
         logger.info(
-            "频道采集结束 task=%s account=%s channel=%s status=%s scanned=%s hits=%s unique=%s error=%s",
-            task_id,
-            account_id,
-            channel,
+            "%s%s%s 结束｜状态=%s｜扫描=%s｜命中=%s｜去重=%s｜错误=%s",
+            self._task_tag(task_id),
+            self._account_tag(account_id),
+            self._target_tag("频道", channel),
             status,
             scanned_messages,
             total_hits,
             inserted_hits,
-            last_error,
+            last_error or "-",
         )
         await self._emit_progress(task_id)
 
@@ -434,12 +446,12 @@ class CollectionManager:
         joined_now = False
 
         self.db.start_task_channel(task_channel_id, account_id)
-        logger.info("群组开始采集 task=%s account=%s group=%s cutoff=%s", task_id, account_id, group_target, cutoff.isoformat())
+        logger.info("%s%s%s 开始采集｜截止=%s", self._task_tag(task_id), self._account_tag(account_id), self._target_tag("群", group_target), cutoff.isoformat())
         try:
             entity, joined_now = await self._ensure_group_entity(client, group_target)
-            logger.info("群组实体就绪 task=%s account=%s group=%s joined_now=%s", task_id, account_id, group_target, joined_now)
+            logger.info("%s%s%s 实体就绪｜joined_now=%s", self._task_tag(task_id), self._account_tag(account_id), self._target_tag("群", group_target), joined_now)
             admin_ids = await self._load_admin_ids(client, entity)
-            logger.info("群组管理员已加载 task=%s account=%s group=%s admin_count=%s", task_id, account_id, group_target, len(admin_ids))
+            logger.info("%s%s%s 管理员已加载｜数量=%s", self._task_tag(task_id), self._account_tag(account_id), self._target_tag("群", group_target), len(admin_ids))
             async for message in client.iter_messages(entity):
                 if self.db.should_stop_task(task_id):
                     status = "stopped"
@@ -455,10 +467,10 @@ class CollectionManager:
                 scanned_messages += 1
                 if scanned_messages % LOG_PROGRESS_EVERY_MESSAGES == 0:
                     logger.info(
-                        "群组采集中 task=%s account=%s group=%s scanned=%s hits=%s unique=%s",
-                        task_id,
-                        account_id,
-                        group_target,
+                        "%s%s%s 采集中｜扫描=%s｜命中=%s｜去重=%s",
+                        self._task_tag(task_id),
+                        self._account_tag(account_id),
+                        self._target_tag("群", group_target),
                         scanned_messages,
                         total_hits,
                         inserted_hits,
@@ -540,15 +552,15 @@ class CollectionManager:
         )
         self.db.sync_task_metrics(task_id, unique_total=unique_total)
         logger.info(
-            "群组采集结束 task=%s account=%s group=%s status=%s scanned=%s hits=%s unique=%s error=%s",
-            task_id,
-            account_id,
-            group_target,
+            "%s%s%s 结束｜状态=%s｜扫描=%s｜命中=%s｜去重=%s｜错误=%s",
+            self._task_tag(task_id),
+            self._account_tag(account_id),
+            self._target_tag("群", group_target),
             status,
             scanned_messages,
             total_hits,
             inserted_hits,
-            last_error,
+            last_error or "-",
         )
         await self._emit_progress(task_id)
         return joined_now
