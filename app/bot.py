@@ -258,6 +258,11 @@ class DmCollectorBot:
         if not (file_name.endswith(".session") or file_name.endswith(".zip")):
             return
 
+        await update.effective_message.reply_text(
+            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 已收到文件，正在保存并检测，请稍等……",
+            parse_mode=ParseMode.HTML,
+        )
+
         try:
             await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             session_files = await self._save_uploaded_session_files(document)
@@ -366,6 +371,10 @@ class DmCollectorBot:
             )
             return
 
+        await update.effective_message.reply_text(
+            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 已收到频道文件，正在读取并解析，请稍等……",
+            parse_mode=ParseMode.HTML,
+        )
         await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
         tg_file = await document.get_file()
         raw_bytes = await tg_file.download_as_bytearray()
