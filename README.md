@@ -1,27 +1,37 @@
 # telegram-dm-collector-bot
 
-一个用于 **收集 Telegram 用户资料与私信内容** 的私聊机器人项目。
+一个用于 **收集 Telegram 私信用户资料**，并支持 **上传 session 账号后采集频道帖子中的 @用户名** 的机器人项目。
 
-## 当前技术约定
+当前版本：`0.2.0`
+
+## 第一版已完成
 
 - 基于 **python-telegram-bot 20+**
+- 管理端全部使用 **内联按钮交互**
 - 正文消息统一走：`<tg-emoji ...>` + `parse_mode='HTML'`
 - 按钮图标统一走：`api_kwargs['icon_custom_emoji_id']`
-- 机器人默认按 **高级会员 Bot** 的展示风格来组织文案和按钮
+- 支持上传 `.session` 文件并立即验证账号状态
+- 账号列表可查看：
+  - 可用
+  - 检测中
+  - 未登录
+  - 异常
+  - 采集中
+- 支持新建采集任务：
+  - 多频道
+  - 选择最近几天消息
+  - 多账号并发
+  - 提取帖子正文中的 `@username`
+  - 自动去重
+  - 生成 txt 结果文件
+- 支持查看任务进度、停止任务、导出结果
+- 保留原先 DM 收集链路（用户资料 / 私信入库 / 可选转发管理员）
 
-## 当前能力
+## 技术栈
 
-- 自动记录首次私聊用户资料
-- 自动保存用户每一条私信
-- 支持文本、图片、视频、文件、语音、贴纸等常见类型
-- 可选：把用户私信同步转发给管理员
-- 可选：自动回复“已收到”
-- 管理员命令：
-  - `/stats` 查看用户数 / 消息数
-  - `/export` 导出 `users.csv` 和 `messages.csv`
-- 管理员欢迎页已接入会员 emoji 按钮：
-  - 查看统计
-  - 导出数据
+- `python-telegram-bot>=20,<23`
+- `Telethon==1.41.1`
+- `SQLite`
 
 ## 项目结构
 
@@ -29,83 +39,110 @@
 telegram-dm-collector-bot/
 ├─ app/
 │  ├─ bot.py
+│  ├─ collector.py
 │  ├─ config.py
 │  ├─ database.py
-│  └─ emoji.py
-├─ data/                # 运行后自动生成
+│  ├─ emoji.py
+│  └─ version.py
+├─ data/                # 运行后自动生成/保存数据库、session、导出文件
 ├─ .env.example
+├─ VERSION
 ├─ main.py
 ├─ README.md
 └─ requirements.txt
 ```
 
-## 使用方法
-
-### 1. 安装依赖
+## 安装
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 配置环境变量
+## 配置
 
 复制 `.env.example` 为 `.env`，至少填写：
 
 ```env
 BOT_TOKEN=你的机器人Token
 ADMIN_IDS=你的Telegram数字ID
+API_ID=你的Telegram API_ID
+API_HASH=你的Telegram API_HASH
 ```
 
-### 3. 启动
+### 关键环境变量
+
+- `BOT_TOKEN`：机器人 token
+- `ADMIN_IDS`：管理员 ID，多个用英文逗号分隔
+- `API_ID` / `API_HASH`：Telethon 连接用户 session 必填
+- `DATA_DIR`：数据目录
+- `DB_PATH`：SQLite 路径
+- `SESSION_DIR`：session 文件目录
+- `EXPORT_DIR`：导出结果目录
+- `MAX_COLLECT_WORKERS`：最大并发 worker 数
+
+### 会员 emoji 相关
+
+支持自定义这些 custom emoji id：
+
+- `EMOJI_WELCOME_ID`
+- `EMOJI_INBOX_ID`
+- `EMOJI_STATS_ID`
+- `EMOJI_EXPORT_ID`
+- `EMOJI_SUCCESS_ID`
+- `EMOJI_UPLOAD_ID`
+- `EMOJI_WAITING_ID`
+- `EMOJI_OK_ID`
+- `EMOJI_ERROR_ID`
+- `EMOJI_TIMEOUT_ID`
+- `EMOJI_PROGRESS_ID`
+- `EMOJI_IDEA_ID`
+
+## 启动
 
 ```bash
 python main.py
 ```
 
-## 环境变量说明
+## 第一版交互说明
 
-- `BOT_TOKEN`：机器人 token
-- `ADMIN_IDS`：管理员 ID，多个用英文逗号分隔
-- `DB_PATH`：SQLite 数据库路径
-- `FORWARD_TO_ADMINS`：是否把用户私信同步给管理员
-- `SAVE_RAW_UPDATE`：是否保存原始消息 JSON
-- `AUTO_REPLY_ENABLED`：是否自动回复
-- `AUTO_REPLY_TEXT`：自动回复内容
-- `WELCOME_TEXT`：用户 `/start` 时的欢迎语
-- `EMOJI_WELCOME_ID`：欢迎标题 custom emoji id
-- `EMOJI_INBOX_ID`：收件箱/正文提示 custom emoji id
-- `EMOJI_STATS_ID`：统计按钮 custom emoji id
-- `EMOJI_EXPORT_ID`：导出按钮 custom emoji id
-- `EMOJI_SUCCESS_ID`：成功提示 custom emoji id
+### 1. 上传账号
+- 进入 **账号管理**
+- 点击 **上传 session**
+- 发送 `.session` 文件
+- 机器人会自动保存并验证账号状态
 
-## 数据说明
+### 2. 新建采集
+- 进入 **采集中心**
+- 点击 **新建采集任务**
+- 发送频道列表（一行一个）
+- 选择天数
+- 选择账号
+- 选择并发
+- 确认启动
 
-### users 表
+### 3. 查看结果
+- 在任务详情页点击 **导出结果**
+- 或在 **历史结果** 里重新导出
 
-保存用户基础信息：
-- 用户 ID
-- 用户名
-- 姓名
-- 语言
-- 是否 Premium
-- 首次出现时间
-- 最后活跃时间
-- `/start` 次数
-- 消息数
+导出的 txt 内容格式：
 
-### messages 表
+```text
+@username1
+@username2
+@username3
+```
 
-保存每条私信：
-- Telegram 消息 ID
-- 用户 ID
-- 消息类型
-- 文本 / caption
-- 附件 file_id
-- media_group_id
-- 原始 JSON（可选）
-- 创建时间
+## 当前限制（第一版已知）
 
-## 下一步
+- 目前只支持上传已登录的 `.session` 文件，不包含手机号验证码登录流程
+- 频道采集依赖上传的账号是否能访问目标频道
+- 提取范围目前以消息正文中的 `@用户名` 为主，不含按钮链接深挖
+- 任务停止后会保留已采集到的部分结果，可继续导出
 
-你后面继续给功能需求，我就在这个仓库里继续往下加。
-目前这版先把 **PTB 20+ + 会员 emoji 正文链路 + 会员按钮图标链路** 先固定下来。
+## 后续适合继续迭代的方向
+
+- session 二次登录/验证码流程
+- 自动重试和失败频道切号重跑
+- 关键词过滤和多种导出格式
+- 更细的任务统计和分页结果查看
+- Web 后台
