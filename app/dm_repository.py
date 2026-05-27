@@ -242,7 +242,7 @@ class DmRepository:
             return self.db.conn.execute(
                 """
                 SELECT ta.*, a.session_file, a.session_name, a.username, a.phone, a.display_name, a.status AS account_runtime_status,
-                       a.restriction_status, a.restriction_reason
+                       a.restriction_status, a.restriction_reason, a.last_error AS account_last_error
                 FROM dm_task_accounts ta
                 JOIN accounts a ON a.id = ta.account_id
                 WHERE ta.task_id=?

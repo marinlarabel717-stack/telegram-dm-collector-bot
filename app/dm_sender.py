@@ -32,13 +32,32 @@ class DmSenderManager:
             return
         active_policy = policy or self._policy_from_task(task)
         recipients = self.repository.list_dm_task_recipients(task_id, statuses=("pending",))
-        accounts = [row for row in self.repository.list_dm_task_accounts(task_id) if row["account_runtime_status"] == "active"]
+        task_accounts = self.repository.list_dm_task_accounts(task_id)
+        accounts = []
+        unavailable_reasons: list[str] = []
+        for row in task_accounts:
+            can_send, reason = self._account_can_send(row)
+            if can_send:
+                accounts.append(row)
+                continue
+            self.repository.update_dm_task_account(task_id, int(row["account_id"]), status="error", last_error=reason)
+            self.repository.add_send_log(
+                task_id=task_id,
+                account_id=int(row["account_id"]),
+                action="account_check",
+                status="failed",
+                message=f"账号不可用｜{reason}",
+                raw_error=str(row["account_last_error"] or row["restriction_reason"] or reason),
+            )
+            unavailable_reasons.append(f"#{row['account_id']} {reason}")
         if not recipients:
             self.repository.mark_dm_task_status(task_id, "completed")
             await self._emit_complete(task_id)
             return
         if not accounts:
-            self.repository.mark_dm_task_status(task_id, "error", last_error="没有可用账号")
+            reason_text = "；".join(unavailable_reasons[:3]) if unavailable_reasons else "没有可用账号"
+            self.repository.mark_dm_task_status(task_id, "error", last_error=f"所选账号不可用｜{reason_text}")
+            self.repository.sync_dm_task_metrics(task_id)
             await self._emit_complete(task_id)
             return
 
@@ -76,6 +95,17 @@ class DmSenderManager:
         export = self.repository.export_task_results(task_id, self.collection_manager.settings.export_dir)
         self.repository.set_dm_task_result_file(task_id, str(export.success_txt))
         await self._emit_complete(task_id)
+
+    def _account_can_send(self, account_row) -> tuple[bool, str]:
+        runtime_status = str(account_row["account_runtime_status"] or "")
+        restriction_status = str(account_row["restriction_status"] or "unknown")
+        restriction_reason = str(account_row["restriction_reason"] or "").strip()
+        account_last_error = str(account_row["account_last_error"] or "").strip()
+        if runtime_status != "active":
+            return False, account_last_error or f"账号状态={runtime_status}"
+        if restriction_status in {"session_invalid", "frozen"}:
+            return False, restriction_reason or f"限制状态={restriction_status}"
+        return True, ""
 
     async def _account_worker(self, task_id: int, queue: asyncio.Queue, account_row, policy: DMTaskPolicy) -> None:
         account_id = int(account_row["account_id"])

@@ -2388,9 +2388,11 @@ class DmCollectorBot:
             lines.append("<b>账号进度</b>")
             for row in accounts[:6]:
                 label = row["username"] or row["phone"] or row["session_name"]
-                lines.append(
-                    f"• #{self._account_display_code(row['account_id'])} {html.escape(str(label), quote=False)} · 成功 <code>{row['sent_success_count']}</code> · 失败 <code>{row['sent_fail_count']}</code> · {status_badge(row['status'])}"
-                )
+                reason = row["last_error"] or row["account_last_error"] or row["restriction_reason"]
+                line = f"• #{self._account_display_code(row['account_id'])} {html.escape(str(label), quote=False)} · 成功 <code>{row['sent_success_count']}</code> · 失败 <code>{row['sent_fail_count']}</code> · {status_badge(row['status'])}"
+                if reason and row["status"] in {"error", "stopped"}:
+                    line += f" · <code>{html.escape(str(reason), quote=False)[:70]}</code>"
+                lines.append(line)
         if failed:
             lines.append("")
             lines.append("<b>最近失败</b>")
