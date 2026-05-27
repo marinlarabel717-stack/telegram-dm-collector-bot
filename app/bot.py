@@ -202,6 +202,10 @@ class DmCollectorBot:
             return
 
         file_name = (document.file_name or "").lower()
+        state = self.user_states.get(update.effective_user.id) or {}
+        if file_name.endswith(".txt"):
+            await self._handle_channel_txt_upload(update, document, state)
+            return
         if not (file_name.endswith(".session") or file_name.endswith(".zip")):
             return
 
@@ -289,6 +293,37 @@ class DmCollectorBot:
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             reply_markup=self._single_back_keyboard("account:list:1"),
+        )
+
+    async def _handle_channel_txt_upload(self, update: Update, document, state: dict) -> None:
+        if state.get("mode") != "await_channels":
+            await update.effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_idea_id, '💡')} 频道 txt 只在 <b>新建采集任务</b> 时使用。先点“新建采集任务”，再上传 txt。",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+        tg_file = await document.get_file()
+        raw_bytes = await tg_file.download_as_bytearray()
+        try:
+            text = bytes(raw_bytes).decode("utf-8")
+        except UnicodeDecodeError:
+            text = bytes(raw_bytes).decode("utf-8-sig", errors="ignore")
+        channels = self._parse_channels(text)
+        if not channels:
+            await update.effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} txt 里没识别到有效频道，请检查内容后重传。",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        draft = state.setdefault("draft", {})
+        draft["channels"] = channels
+        state["mode"] = "select_days"
+        await update.effective_message.reply_text(
+            self._select_days_text(channels),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._build_days_keyboard(),
         )
 
     async def handle_admin_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -705,7 +740,10 @@ class DmCollectorBot:
     def _channels_prompt_text(self) -> str:
         return (
             f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>新建采集任务</b>\n"
-            f"请发送频道列表，一行一个。支持：\n"
+            f"你可以：\n"
+            f"1. 直接发频道列表（一行一个）\n"
+            f"2. 上传一个 <code>.txt</code> 频道文件\n\n"
+            f"支持格式：\n"
             f"<code>@channel</code>\n<code>https://t.me/channel</code>\n<code>t.me/channel</code>"
         )
 

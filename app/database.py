@@ -597,10 +597,29 @@ class Database:
         export_dir.mkdir(parents=True, exist_ok=True)
         output = export_dir / f"task_{task_id}_usernames.txt"
         with self.lock:
-            rows = self.conn.execute(
+            usernames = self.conn.execute(
                 "SELECT username FROM collect_task_usernames WHERE task_id=? ORDER BY username ASC",
                 (task_id,),
             ).fetchall()
-        output.write_text("\n".join(row["username"] for row in rows), encoding="utf-8")
+            failed_channels = self.conn.execute(
+                """
+                SELECT channel, status, last_error
+                FROM collect_task_channels
+                WHERE task_id=? AND status IN ('error', 'stopped')
+                ORDER BY id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+
+        lines = ["# 去重用户名结果", ""]
+        lines.extend(row["username"] for row in usernames)
+
+        if failed_channels:
+            lines.extend(["", "# 失败/跳过频道", ""])
+            for row in failed_channels:
+                reason = row["last_error"] or ("任务已停止" if row["status"] == "stopped" else "未知原因")
+                lines.append(f"{row['channel']} | {reason}")
+
+        output.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
         self.set_task_result_file(task_id, str(output))
         return output
