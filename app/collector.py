@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, RpcError
+from telethon.errors import FloodWaitError, RPCError
 
 from .config import Settings
 from .database import Database
@@ -218,7 +218,7 @@ class CollectionManager:
             status = "error"
             last_error = f"FloodWait {exc.seconds}s"
             self.db.update_account_status(account_id, status="error", last_error=last_error)
-        except RpcError as exc:
+        except RPCError as exc:
             status = "error"
             last_error = self._short_error(exc)
         except Exception as exc:  # noqa: BLE001
