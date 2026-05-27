@@ -571,13 +571,35 @@ class Database:
                 "SELECT COUNT(*) FROM collect_task_channels WHERE task_id=? AND status IN ('completed', 'error', 'stopped')",
                 (task_id,),
             ).fetchone()[0]
-            unique_hits = self.conn.execute(
-                "SELECT COUNT(*) FROM collect_task_usernames WHERE task_id=?",
+            total_scanned, total_hits = self.conn.execute(
+                """
+                SELECT COALESCE(SUM(scanned_messages), 0), COALESCE(SUM(hits), 0)
+                FROM collect_task_channels
+                WHERE task_id=?
+                """,
                 (task_id,),
-            ).fetchone()[0]
+            ).fetchone()
+            if (task["task_type"] or "channel") == "group":
+                unique_hits = self.conn.execute(
+                    "SELECT COUNT(*) FROM collect_task_members WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()[0]
+            else:
+                unique_hits = self.conn.execute(
+                    "SELECT COUNT(*) FROM collect_task_usernames WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()[0]
             self.conn.execute(
-                "UPDATE collect_tasks SET finished_channels=?, unique_hits=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (finished_channels, unique_hits, task_id),
+                """
+                UPDATE collect_tasks SET
+                    finished_channels=?,
+                    total_messages_scanned=?,
+                    total_hits=?,
+                    unique_hits=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (finished_channels, total_scanned, total_hits, unique_hits, task_id),
             )
 
             try:
