@@ -30,6 +30,7 @@ STATUS_META = {
     "active": (DEFAULT_EMOJI_IDS["ok"], "✅", "可用"),
     "checking": (DEFAULT_EMOJI_IDS["waiting"], "🕜", "检测中"),
     "collecting": (DEFAULT_EMOJI_IDS["progress"], "🎚️", "采集中"),
+    "running": (DEFAULT_EMOJI_IDS["progress"], "🎚️", "采集中"),
     "unauthorized": (DEFAULT_EMOJI_IDS["error"], "❌", "未登录"),
     "error": (DEFAULT_EMOJI_IDS["error"], "❌", "异常"),
     "stopped": (DEFAULT_EMOJI_IDS["timeout"], "⏱️", "已停止"),

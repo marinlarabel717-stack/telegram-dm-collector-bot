@@ -644,7 +644,7 @@ class DmCollectorBot:
     async def _on_task_progress(self, task_id: int) -> None:
         now = time.time()
         last = self.progress_throttle.get(task_id, 0)
-        if now - last < 2:
+        if now - last < 8:
             return
         self.progress_throttle[task_id] = now
         await self._push_task_update(task_id)
@@ -719,6 +719,7 @@ class DmCollectorBot:
         if not task:
             return self._not_found_text("任务不存在或已被删除。")
         channels = self.db.list_collect_task_channels(task_id)
+        visible_channels = [item for item in channels if item["status"] != "completed"]
         lines = [
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>任务 #{task_id}</b> <code>v{__version__}</code>",
             f"状态：{status_badge(task['status'])}",
@@ -729,12 +730,12 @@ class DmCollectorBot:
             f"命中总数：<code>{task['total_hits']}</code>",
             f"去重数量：<code>{task['unique_hits']}</code>",
         ]
-        if task["last_error"]:
+        if task["last_error"] and task["status"] in {"error", "stopped"}:
             lines.append(f"错误：<code>{html.escape(str(task['last_error']), quote=False)}</code>")
-        if channels:
+        if visible_channels:
             lines.append("")
             lines.append("<b>频道子任务</b>")
-            for item in channels[:6]:
+            for item in visible_channels[:6]:
                 lines.append(
                     f"• {html.escape(item['channel'], quote=False)} · {status_badge(item['status'])} · 扫描 <code>{item['scanned_messages']}</code> · 去重 <code>{item['unique_hits']}</code>"
                 )
