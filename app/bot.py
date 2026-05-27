@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import html
 import json
 import re
@@ -44,6 +45,7 @@ class DmCollectorBot:
         self.application = Application.builder().token(settings.bot_token).build()
         self.user_states: dict[int, dict] = {}
         self.task_runners: dict[int, asyncio.Task] = {}
+        self.task_watchers: dict[int, asyncio.Task] = {}
         self.progress_throttle: dict[int, float] = {}
         self.progress_snapshots: dict[int, dict[str, float | int]] = {}
         self.application.bot_data["settings"] = settings
@@ -1154,7 +1156,16 @@ class DmCollectorBot:
         self._clear_state(user_id)
         runner = asyncio.create_task(self.collection_manager.run_collect_task(task["id"]))
         self.task_runners[task["id"]] = runner
-        runner.add_done_callback(lambda _: self.task_runners.pop(task["id"], None))
+        watcher = asyncio.create_task(self._task_progress_heartbeat(task["id"]))
+        self.task_watchers[task["id"]] = watcher
+
+        def _cleanup_task_runtime(_: asyncio.Task, task_id: int = task["id"]) -> None:
+            self.task_runners.pop(task_id, None)
+            heartbeat = self.task_watchers.pop(task_id, None)
+            if heartbeat and not heartbeat.done():
+                heartbeat.cancel()
+
+        runner.add_done_callback(_cleanup_task_runtime)
 
     # ---------- task events ----------
     async def _on_task_progress(self, task_id: int) -> None:
@@ -1212,12 +1223,26 @@ class DmCollectorBot:
 
     async def _on_task_complete(self, task_id: int) -> None:
         await self._push_task_update(task_id, force=True)
+        heartbeat = self.task_watchers.pop(task_id, None)
+        if heartbeat and not heartbeat.done():
+            heartbeat.cancel()
         self.progress_throttle.pop(task_id, None)
         self.progress_snapshots.pop(task_id, None)
         task = self.db.get_collect_task(task_id)
         if not task:
             return
         await self._send_task_result(task["requester_id"], task_id, announce=True)
+
+    async def _task_progress_heartbeat(self, task_id: int) -> None:
+        try:
+            while True:
+                await asyncio.sleep(60)
+                task = self.db.get_collect_task(task_id)
+                if not task or task["status"] not in {"queued", "running"}:
+                    return
+                await self._push_task_update(task_id)
+        except asyncio.CancelledError:
+            return
 
     async def _push_task_update(self, task_id: int, force: bool = False) -> bool:
         task = self.db.get_collect_task(task_id)
@@ -1303,13 +1328,18 @@ class DmCollectorBot:
             f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>任务 #{display_code}</b> <code>v{__version__}</code>",
             f"类型：<code>{'群组发言采集' if task_type == 'group' else '频道用户名采集'}</code>",
             f"状态：{status_badge(task['status'])}",
+        ]
+        runtime_text = self._format_runtime(task.get("started_at"), task.get("finished_at"))
+        if runtime_text:
+            lines.append(f"已运行：<code>{runtime_text}</code>")
+        lines.extend([
             f"时间范围：最近 <code>{task['days_limit']}</code> 天",
             f"账号数：<code>{task['account_count']}</code> · 并发：<code>{task['worker_count']}</code>",
             f"{unit}进度：<code>{task['finished_channels']}/{task['total_channels']}</code>",
             f"扫描消息：<code>{task['total_messages_scanned']}</code>",
             f"命中总数：<code>{task['total_hits']}</code>",
             f"去重数量：<code>{task['unique_hits']}</code>",
-        ]
+        ])
         if task_type == "group":
             filters_text = self._format_filter_summary(self._parse_group_filters(task["filters_json"]), empty_label="不过滤")
             lines.append(f"筛选规则：<code>{html.escape(filters_text, quote=False)}</code>")
@@ -1321,10 +1351,33 @@ class DmCollectorBot:
             lines.append("")
             lines.append(f"<b>{unit}子任务</b>")
             for item in visible_channels[:6]:
+                item_runtime = self._format_runtime(item.get("started_at"), item.get("finished_at"))
+                runtime_suffix = f" · 已跑 <code>{item_runtime}</code>" if item["status"] == "running" and item_runtime else ""
                 lines.append(
-                    f"• {html.escape(item['channel'], quote=False)} · {status_badge(item['status'])} · 扫描 <code>{item['scanned_messages']}</code> · 去重 <code>{item['unique_hits']}</code>"
+                    f"• {html.escape(item['channel'], quote=False)} · {status_badge(item['status'])} · 扫描 <code>{item['scanned_messages']}</code> · 去重 <code>{item['unique_hits']}</code>{runtime_suffix}"
                 )
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_runtime(started_at, finished_at=None) -> str:
+        if not started_at:
+            return ""
+        try:
+            start_dt = datetime.strptime(str(started_at), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            return ""
+        try:
+            end_dt = datetime.strptime(str(finished_at), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) if finished_at else datetime.now(timezone.utc)
+        except Exception:
+            end_dt = datetime.now(timezone.utc)
+        seconds = max(0, int((end_dt - start_dt).total_seconds()))
+        hours, rem = divmod(seconds, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours > 0:
+            return f"{hours}时{minutes}分"
+        if minutes > 0:
+            return f"{minutes}分{secs}秒"
+        return f"{secs}秒"
 
     def _upload_prompt_text(self) -> str:
         return (
