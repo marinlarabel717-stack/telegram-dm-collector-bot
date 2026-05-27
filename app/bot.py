@@ -481,7 +481,7 @@ class DmCollectorBot:
             ],
             [
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
-                premium_button("刷新页面", self.settings.emoji_progress_id, callback_data="menu:accounts"),
+                premium_button("刷新页面", self.settings.emoji_refresh_id, callback_data="menu:accounts"),
             ],
         ]
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
@@ -530,7 +530,7 @@ class DmCollectorBot:
             keyboard.append(nav)
         keyboard.append([
             premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
-            premium_button("刷新列表", self.settings.emoji_progress_id, callback_data=f"account:list:{page}"),
+            premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data=f"account:list:{page}"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
@@ -767,7 +767,7 @@ class DmCollectorBot:
             keyboard.append(row_buffer)
         keyboard.append([
             premium_button("返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect"),
-            premium_button("刷新列表", self.settings.emoji_progress_id, callback_data="collect:tasks"),
+            premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data="collect:tasks"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
@@ -799,7 +799,7 @@ class DmCollectorBot:
             keyboard.append(row_buffer)
         keyboard.append([
             premium_button("返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect"),
-            premium_button("刷新列表", self.settings.emoji_progress_id, callback_data="menu:history"),
+            premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data="menu:history"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
@@ -986,7 +986,7 @@ class DmCollectorBot:
         channels = self.db.list_collect_task_channels(task_id)
         visible_channels = [item for item in channels if item["status"] != "completed"]
         lines = [
-            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>任务 #{task_id}</b> <code>v{__version__}</code>",
+            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>任务 #{task_id}</b> <code>v{__version__}</code>",
             f"状态：{status_badge(task['status'])}",
             f"时间范围：最近 <code>{task['days_limit']}</code> 天",
             f"账号数：<code>{task['account_count']}</code> · 并发：<code>{task['worker_count']}</code>",
@@ -1143,7 +1143,7 @@ class DmCollectorBot:
             ],
             [
                 premium_button("返回账号列表", self.settings.emoji_back_id, callback_data="account:list:1"),
-                premium_button("刷新详情", self.settings.emoji_progress_id, callback_data=f"account:view:{account_id}"),
+                premium_button("刷新详情", self.settings.emoji_refresh_id, callback_data=f"account:view:{account_id}"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -1228,7 +1228,7 @@ class DmCollectorBot:
         task = self.db.get_collect_task(task_id)
         keyboard = [
             [
-                premium_button("刷新进度", self.settings.emoji_progress_id, callback_data=f"task:refresh:{task_id}"),
+                premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"task:refresh:{task_id}"),
                 premium_button("导出结果", self.settings.emoji_export_id, callback_data=f"task:export:{task_id}"),
             ],
         ]
@@ -1240,7 +1240,7 @@ class DmCollectorBot:
         else:
             keyboard.append([
                 premium_button("返回任务列表", self.settings.emoji_back_id, callback_data="collect:tasks"),
-                premium_button("刷新任务", self.settings.emoji_progress_id, callback_data=f"task:view:{task_id}"),
+                premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
             ])
         return InlineKeyboardMarkup(keyboard)
 

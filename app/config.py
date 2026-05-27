@@ -39,6 +39,7 @@ class Settings:
     emoji_error_id: str
     emoji_timeout_id: str
     emoji_progress_id: str
+    emoji_refresh_id: str
     emoji_idea_id: str
     emoji_back_id: str
     emoji_home_id: str
@@ -127,6 +128,7 @@ def get_settings() -> Settings:
         emoji_error_id=os.getenv("EMOJI_ERROR_ID", DEFAULT_EMOJI_IDS["error"]),
         emoji_timeout_id=os.getenv("EMOJI_TIMEOUT_ID", DEFAULT_EMOJI_IDS["timeout"]),
         emoji_progress_id=os.getenv("EMOJI_PROGRESS_ID", DEFAULT_EMOJI_IDS["progress"]),
+        emoji_refresh_id=os.getenv("EMOJI_REFRESH_ID", DEFAULT_EMOJI_IDS["refresh"]),
         emoji_idea_id=os.getenv("EMOJI_IDEA_ID", DEFAULT_EMOJI_IDS["idea"]),
         emoji_back_id=os.getenv("EMOJI_BACK_ID", DEFAULT_EMOJI_IDS["back"]),
         emoji_home_id=os.getenv("EMOJI_HOME_ID", DEFAULT_EMOJI_IDS["home"]),
