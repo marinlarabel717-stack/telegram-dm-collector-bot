@@ -1232,7 +1232,7 @@ class DmCollectorBot:
     async def _show_dm_menu(self, query) -> None:
         text = (
             f"{tg_emoji(self.settings.emoji_start_id, '🎊')} <b>私信任务</b>\n"
-            f"当前支持：文本私信、媒体私信、发送频道帖子链接、txt/手输用户名单、单号上限、自动切号、实时成功失败统计。"
+            f"当前支持：文本私信、媒体私信、频道帖子转发（通过链接定位原帖）、txt/手输用户名单、单号上限、自动切号、实时成功失败统计。"
         )
         keyboard = [
             [
@@ -2135,9 +2135,9 @@ class DmCollectorBot:
             )
         if content_type == "forward":
             return (
-                f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>发送频道帖子链接</b>\n"
+                f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>频道帖子转发</b>\n"
                 f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-                f"请直接发送频道帖子链接，例如：<code>https://t.me/channelname/123</code>"
+                f"请直接发送频道帖子链接，例如：<code>https://t.me/channelname/123</code>\n我会用这个链接定位原帖，并由私信账号把原帖内容转发出去。"
             )
         if draft.get("message_mode") == "three_stage":
             return (

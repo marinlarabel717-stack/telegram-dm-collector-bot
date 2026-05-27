@@ -9,6 +9,7 @@ from telethon.errors import FloodWaitError, RPCError
 
 from .collector import CollectionManager
 from .database import Database
+from .dm_links import parse_channel_post_link
 from .dm_logging import compose_log
 from .dm_policy import DMTaskPolicy, DelayWindow, RetryPolicy
 from .dm_repository import DmRepository
@@ -247,7 +248,8 @@ class DmSenderManager:
         if content_type == "forward":
             forward_link = str(payload.get("forward_link") or "").strip()
             if forward_link:
-                await client.send_message(entity, forward_link)
+                source_peer, source_message_id = await self._resolve_channel_post_link(client, forward_link)
+                await client.forward_messages(entity, messages=source_message_id, from_peer=source_peer)
                 return
             source_chat_id = payload.get("source_chat_id")
             source_message_id = payload.get("source_message_id")
@@ -270,6 +272,16 @@ class DmSenderManager:
                 ) if part
             ]
         return [str(payload.get("text") or "").strip()]
+
+    async def _resolve_channel_post_link(self, client, link: str):
+        parsed = parse_channel_post_link(link)
+        if not parsed:
+            raise ValueError("频道帖子链接格式不正确")
+        if parsed["kind"] == "public":
+            source_peer = await client.get_input_entity(f"@{parsed['username']}")
+        else:
+            source_peer = await client.get_input_entity(int(f"-100{parsed['channel_id']}"))
+        return source_peer, int(parsed["message_id"])
 
     def _policy_from_task(self, task) -> DMTaskPolicy:
         raw = str(task["policy_json"] or "{}")

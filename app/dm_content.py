@@ -7,7 +7,7 @@ def content_type_label(content_type: str | None) -> str:
     mapping = {
         "text": "文本",
         "media": "媒体",
-        "forward": "频道链接",
+        "forward": "频道转发",
     }
     return mapping.get(str(content_type or "text"), "文本")
 
