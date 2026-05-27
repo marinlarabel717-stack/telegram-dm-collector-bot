@@ -679,7 +679,7 @@ class DmCollectorBot:
         link = normalize_channel_post_link(raw_link)
         if not link:
             await message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请直接发送频道帖子链接，例如：<code>https://t.me/channelname/123</code>",
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 频道帖子链接格式不正确。",
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
