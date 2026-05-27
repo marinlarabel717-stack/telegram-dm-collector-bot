@@ -407,7 +407,7 @@ class DmCollectorBot:
     async def _show_accounts_menu(self, query, page: int = 1) -> None:
         count = self.db.count_accounts()
         text = (
-            f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>账号管理</b>\n"
+            f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
             f"当前已保存账号：<code>{count}</code>\n\n"
             f"上传 .session 后会立即做一次登录验证，并在账号列表里显示状态。"
         )
@@ -440,7 +440,7 @@ class DmCollectorBot:
         for row in rows:
             label = row["username"] or row["phone"] or row["session_name"]
             keyboard.append([
-                premium_button(f"#{row['id']} {str(label)[:28]}", self.settings.emoji_inbox_id, callback_data=f"account:view:{row['id']}")
+                premium_button(f"#{row['id']} {str(label)[:28]}", self.settings.emoji_list_id, callback_data=f"account:view:{row['id']}")
             ])
         nav = []
         if page > 1:
@@ -504,7 +504,7 @@ class DmCollectorBot:
         keyboard = []
         for task in tasks:
             keyboard.append([
-                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_inbox_id, callback_data=f"task:view:{task['id']}")
+                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}")
             ])
         keyboard.append([
             premium_button("返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect")
@@ -806,7 +806,7 @@ class DmCollectorBot:
             return None
         keyboard = [
             [
-                premium_button("账号管理", self.settings.emoji_upload_id, callback_data="menu:accounts"),
+                premium_button("账号管理", self.settings.emoji_list_id, callback_data="menu:accounts"),
                 premium_button("采集中心", self.settings.emoji_progress_id, callback_data="menu:collect"),
             ],
             [
