@@ -24,6 +24,7 @@ DEFAULT_EMOJI_IDS = {
     "start": "5201730588351945766",     # 🎊
     "history": "6321175945327680619",   # 📝
     "all": "5199658498559854923",       # 🍀
+    "completed": "5318880799217431403", # 🟢
 }
 
 
@@ -35,7 +36,7 @@ STATUS_META = {
     "unauthorized": (DEFAULT_EMOJI_IDS["error"], "❌", "未登录"),
     "error": (DEFAULT_EMOJI_IDS["error"], "❌", "异常"),
     "stopped": (DEFAULT_EMOJI_IDS["timeout"], "⏱️", "已停止"),
-    "completed": (DEFAULT_EMOJI_IDS["ok"], "✅", "已完成"),
+    "completed": (DEFAULT_EMOJI_IDS["completed"], "🟢", "已完成"),
     "queued": (DEFAULT_EMOJI_IDS["waiting"], "🕜", "排队中"),
 }
 
