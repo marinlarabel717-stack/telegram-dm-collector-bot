@@ -118,7 +118,11 @@ class DmCollectorBot:
             await self._show_collect_menu(query)
             return
         if data == "menu:history":
-            await self._show_history(query)
+            await self._show_history(query, page=1)
+            return
+        if data.startswith("menu:history:"):
+            page = int(data.split(":")[-1])
+            await self._show_history(query, page=page)
             return
         if data == "account:upload":
             self.user_states[update.effective_user.id] = {"mode": "await_session_upload"}
@@ -160,18 +164,21 @@ class DmCollectorBot:
             parts = data.split(":")
             task_id = int(parts[2])
             page = int(parts[3]) if len(parts) > 3 else 1
-            await self._show_task_detail(query, task_id, page=page, force=True)
+            source = parts[4] if len(parts) > 4 else "tasks"
+            await self._show_task_detail(query, task_id, page=page, source=source, force=True)
             return
         if data.startswith("task:refresh:"):
             parts = data.split(":")
             task_id = int(parts[2])
             page = int(parts[3]) if len(parts) > 3 else 1
-            await self._show_task_detail(query, task_id, page=page, force=True)
+            source = parts[4] if len(parts) > 4 else "tasks"
+            await self._show_task_detail(query, task_id, page=page, source=source, force=True)
             return
         if data.startswith("task:stop:"):
             parts = data.split(":")
             task_id = int(parts[2])
             page = int(parts[3]) if len(parts) > 3 else 1
+            source = parts[4] if len(parts) > 4 else "tasks"
             self.db.stop_collect_task_now(task_id, reason="管理员手动停止任务，账号已释放")
             runner = self.task_runners.get(task_id)
             if runner and not runner.done():
@@ -180,13 +187,17 @@ class DmCollectorBot:
                     await runner
                 except asyncio.CancelledError:
                     pass
-            await self._show_task_detail(query, task_id, page=page, force=True)
+            await self._show_task_detail(query, task_id, page=page, source=source, force=True)
             return
         if data.startswith("task:delete:"):
             parts = data.split(":")
             task_id = int(parts[2])
             page = int(parts[3]) if len(parts) > 3 else 1
-            await self._delete_task(query, task_id, page=page)
+            source = parts[4] if len(parts) > 4 else "tasks"
+            await self._delete_task(query, task_id, page=page, source=source)
+            return
+        if data == "task:clear_history":
+            await self._clear_task_history(query)
             return
         if data.startswith("task:export:"):
             task_id = int(data.split(":")[-1])
@@ -766,10 +777,11 @@ class DmCollectorBot:
         total_pages = max(1, ceil(total / per_page))
         page = max(1, min(page, total_pages))
         tasks = self.db.list_collect_tasks(limit=per_page, offset=(page - 1) * per_page)
+        history_total = self.db.count_collect_tasks(history=True)
         lines = [
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>任务列表</b>",
             f"页码：<code>{page}/{total_pages}</code>",
-            f"任务总数：<code>{total}</code>",
+            f"任务总数：<code>{total}</code> · 历史任务：<code>{history_total}</code>",
         ]
         if not tasks:
             lines.append("\n还没有采集任务。")
@@ -779,11 +791,16 @@ class DmCollectorBot:
                     f"\n• 任务 #{task['id']} · {status_badge(task['status'])} · 频道 <code>{task['finished_channels']}/{task['total_channels']}</code> · 去重 <code>{task['unique_hits']}</code>"
                 )
         keyboard = []
+        row_buffer = []
         for task in tasks:
-            keyboard.append([
-                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}:{page}"),
-                premium_button(f"删除 #{task['id']}", self.settings.emoji_error_id, callback_data=f"task:delete:{task['id']}:{page}"),
-            ])
+            row_buffer.append(
+                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}:{page}:tasks")
+            )
+            if len(row_buffer) == 2:
+                keyboard.append(row_buffer)
+                row_buffer = []
+        if row_buffer:
+            keyboard.append(row_buffer)
         nav = []
         if page > 1:
             nav.append(premium_button("上一页", self.settings.emoji_back_id, callback_data=f"collect:tasks:{page - 1}"))
@@ -791,48 +808,70 @@ class DmCollectorBot:
             nav.append(premium_button("下一页", self.settings.emoji_next_id, callback_data=f"collect:tasks:{page + 1}"))
         if nav:
             keyboard.append(nav)
+        if history_total > 0:
+            keyboard.append([
+                premium_button("一键清空任务历史", self.settings.emoji_error_id, callback_data="task:clear_history"),
+                premium_button("历史结果", self.settings.emoji_history_id, callback_data="menu:history:1"),
+            ])
         keyboard.append([
             premium_button("返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect"),
             premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data=f"collect:tasks:{page}"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
-    async def _show_task_detail(self, query, task_id: int, page: int = 1, force: bool = False) -> None:
+    async def _show_task_detail(self, query, task_id: int, page: int = 1, source: str = "tasks", force: bool = False) -> None:
         text = self._format_task_text(task_id)
-        await self._safe_edit(query, text, self._build_task_keyboard(task_id, page=page))
+        await self._safe_edit(query, text, self._build_task_keyboard(task_id, page=page, source=source))
 
-    async def _show_history(self, query) -> None:
-        tasks = self.db.list_collect_tasks(limit=8, history=True)
-        tasks = [task for task in tasks if task["status"] in {"completed", "stopped", "error"}]
-        lines = [f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>历史结果</b>"]
+    async def _show_history(self, query, page: int = 1) -> None:
+        per_page = 6
+        total = self.db.count_collect_tasks(history=True)
+        total_pages = max(1, ceil(total / per_page))
+        page = max(1, min(page, total_pages))
+        tasks = self.db.list_history_tasks(limit=per_page, offset=(page - 1) * per_page)
+        lines = [
+            f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>历史结果</b>",
+            f"页码：<code>{page}/{total_pages}</code>",
+            f"历史总数：<code>{total}</code>",
+        ]
         if not tasks:
             lines.append("\n还没有已完成/已停止的任务。")
         else:
-            for task in tasks[:8]:
+            for task in tasks:
                 lines.append(
                     f"\n• 任务 #{task['id']} · {status_badge(task['status'])} · 去重 <code>{task['unique_hits']}</code>"
                 )
         keyboard = []
         row_buffer = []
-        for task in tasks[:8]:
+        for task in tasks:
             row_buffer.append(
-                premium_button(f"导出任务 #{task['id']}", self.settings.emoji_export_id, callback_data=f"task:export:{task['id']}")
+                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}:{page}:history")
             )
             if len(row_buffer) == 2:
                 keyboard.append(row_buffer)
                 row_buffer = []
         if row_buffer:
             keyboard.append(row_buffer)
+        nav = []
+        if page > 1:
+            nav.append(premium_button("上一页", self.settings.emoji_back_id, callback_data=f"menu:history:{page - 1}"))
+        if page < total_pages:
+            nav.append(premium_button("下一页", self.settings.emoji_next_id, callback_data=f"menu:history:{page + 1}"))
+        if nav:
+            keyboard.append(nav)
         keyboard.append([
             premium_button("返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect"),
-            premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data="menu:history"),
+            premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data=f"menu:history:{page}"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
-    async def _delete_task(self, query, task_id: int, page: int = 1) -> None:
+    async def _delete_task(self, query, task_id: int, page: int = 1, source: str = "tasks") -> None:
         task = self.db.get_collect_task(task_id)
         if not task:
-            await self._show_task_list(query, page=page)
+            if source == "history":
+                await self._show_history(query, page=page)
+            else:
+                await self._show_task_list(query, page=page)
             return
         if task["status"] in {"queued", "running"}:
             self.db.stop_collect_task_now(task_id, reason="管理员删除任务，账号已释放")
@@ -849,11 +888,27 @@ class DmCollectorBot:
                 Path(str(deleted["result_file_path"])).unlink(missing_ok=True)
             except Exception:
                 logger.exception("删除任务导出文件失败: %s", deleted["result_file_path"])
-        total_after = self.db.count_collect_tasks()
+        total_after = self.db.count_collect_tasks(history=(source == 'history'))
         per_page = 6
         total_pages_after = max(1, ceil(total_after / per_page))
         target_page = max(1, min(page, total_pages_after))
-        await self._show_task_list(query, page=target_page)
+        if source == "history":
+            await self._show_history(query, page=target_page)
+        else:
+            await self._show_task_list(query, page=target_page)
+
+    async def _clear_task_history(self, query) -> None:
+        rows = self.db.delete_history_tasks()
+        if not rows:
+            await self._show_task_list(query, page=1)
+            return
+        for row in rows:
+            if row['result_file_path']:
+                try:
+                    Path(str(row['result_file_path'])).unlink(missing_ok=True)
+                except Exception:
+                    logger.exception("删除任务导出文件失败: %s", row['result_file_path'])
+        await self._show_task_list(query, page=1)
 
     async def _start_collect_wizard(self, query, user_id: int) -> None:
         active_accounts = self.db.get_active_accounts()
@@ -1276,27 +1331,29 @@ class DmCollectorBot:
         ]
         return InlineKeyboardMarkup(keyboard)
 
-    def _build_task_keyboard(self, task_id: int, *, page: int = 1) -> InlineKeyboardMarkup:
+    def _build_task_keyboard(self, task_id: int, *, page: int = 1, source: str = "tasks") -> InlineKeyboardMarkup:
         task = self.db.get_collect_task(task_id)
+        back_callback = f"menu:history:{page}" if source == "history" else f"collect:tasks:{page}"
+        back_label = "返回历史结果" if source == "history" else "返回任务列表"
         keyboard = [
             [
-                premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"task:refresh:{task_id}:{page}"),
+                premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"task:refresh:{task_id}:{page}:{source}"),
                 premium_button("导出结果", self.settings.emoji_export_id, callback_data=f"task:export:{task_id}"),
             ],
             [
-                premium_button("删除任务", self.settings.emoji_error_id, callback_data=f"task:delete:{task_id}:{page}"),
-                premium_button("返回任务列表", self.settings.emoji_back_id, callback_data=f"collect:tasks:{page}"),
+                premium_button("删除任务", self.settings.emoji_error_id, callback_data=f"task:delete:{task_id}:{page}:{source}"),
+                premium_button(back_label, self.settings.emoji_back_id, callback_data=back_callback),
             ],
         ]
         if task and task["status"] in {"queued", "running"}:
             keyboard.insert(1, [
-                premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"task:stop:{task_id}:{page}"),
+                premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"task:stop:{task_id}:{page}:{source}"),
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
             ])
         else:
             keyboard.append([
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
-                premium_button("任务列表", self.settings.emoji_progress_id, callback_data=f"collect:tasks:{page}"),
+                premium_button(back_label, self.settings.emoji_progress_id, callback_data=back_callback),
             ])
         return InlineKeyboardMarkup(keyboard)
 

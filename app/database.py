@@ -457,7 +457,7 @@ class Database:
     def count_collect_tasks(self, *, history: bool = False) -> int:
         with self.lock:
             if history:
-                return self.conn.execute("SELECT COUNT(*) FROM collect_tasks").fetchone()[0]
+                return self.conn.execute("SELECT COUNT(*) FROM collect_tasks WHERE status IN ('completed','stopped','error')").fetchone()[0]
             return self.conn.execute(
                 "SELECT COUNT(*) FROM collect_tasks WHERE status IN ('queued','running','stopped','error','completed')"
             ).fetchone()[0]
@@ -706,6 +706,28 @@ class Database:
             self.conn.execute("DELETE FROM collect_tasks WHERE id=?", (task_id,))
             self.conn.commit()
             return row
+
+    def list_history_tasks(self, *, limit: int = 10, offset: int = 0) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM collect_tasks WHERE status IN ('completed','stopped','error') ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+
+    def delete_history_tasks(self) -> list[sqlite3.Row]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM collect_tasks WHERE status IN ('completed','stopped','error') ORDER BY id DESC"
+            ).fetchall()
+            if not rows:
+                return []
+            task_ids = [int(row['id']) for row in rows]
+            placeholders = ','.join('?' for _ in task_ids)
+            self.conn.execute(f"DELETE FROM collect_task_usernames WHERE task_id IN ({placeholders})", task_ids)
+            self.conn.execute(f"DELETE FROM collect_task_channels WHERE task_id IN ({placeholders})", task_ids)
+            self.conn.execute(f"DELETE FROM collect_tasks WHERE id IN ({placeholders})", task_ids)
+            self.conn.commit()
+            return rows
 
     def export_task_usernames_txt(self, task_id: int, export_dir: Path) -> Path:
         export_dir.mkdir(parents=True, exist_ok=True)
