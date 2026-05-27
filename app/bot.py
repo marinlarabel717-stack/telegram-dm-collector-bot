@@ -46,6 +46,9 @@ class DmCollectorBot:
         self.progress_throttle: dict[int, float] = {}
         self.application.bot_data["settings"] = settings
         self.application.bot_data["db"] = self.db
+        recovered = self.db.recover_interrupted_tasks(reason="机器人重启，已停止上次未完成任务并释放账号")
+        if recovered:
+            logger.info("启动时已回收中断采集任务: %s", recovered)
         self._register_handlers()
 
     def _register_handlers(self) -> None:
@@ -153,7 +156,14 @@ class DmCollectorBot:
             return
         if data.startswith("task:stop:"):
             task_id = int(data.split(":")[-1])
-            self.db.request_task_stop(task_id)
+            self.db.stop_collect_task_now(task_id, reason="管理员手动停止任务，账号已释放")
+            runner = self.task_runners.get(task_id)
+            if runner and not runner.done():
+                runner.cancel()
+                try:
+                    await runner
+                except asyncio.CancelledError:
+                    pass
             await self._show_task_detail(query, task_id, force=True)
             return
         if data.startswith("task:export:"):
@@ -628,6 +638,7 @@ class DmCollectorBot:
         self._clear_state(user_id)
         runner = asyncio.create_task(self.collection_manager.run_collect_task(task["id"]))
         self.task_runners[task["id"]] = runner
+        runner.add_done_callback(lambda _: self.task_runners.pop(task["id"], None))
 
     # ---------- task events ----------
     async def _on_task_progress(self, task_id: int) -> None:

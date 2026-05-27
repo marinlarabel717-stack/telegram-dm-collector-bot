@@ -105,46 +105,53 @@ class CollectionManager:
         if not task:
             return
 
-        self.db.mark_collect_task_status(task_id, "running")
-        await self._emit_progress(task_id)
+        try:
+            self.db.mark_collect_task_status(task_id, "running")
+            await self._emit_progress(task_id)
 
-        task_channels = self.db.list_collect_task_channels(task_id)
-        selected_account_ids = self._parse_json_ids(task["account_ids_json"])
-        accounts = [row for row in (self.db.get_account(account_id) for account_id in selected_account_ids) if row]
-        active_workers = []
-        for account in accounts:
-            checked = await self.verify_account(account)
-            if checked.status == "active":
-                active_workers.append(self.db.get_account(account["id"]))
+            task_channels = self.db.list_collect_task_channels(task_id)
+            selected_account_ids = self._parse_json_ids(task["account_ids_json"])
+            accounts = [row for row in (self.db.get_account(account_id) for account_id in selected_account_ids) if row]
+            active_workers = []
+            for account in accounts:
+                checked = await self.verify_account(account)
+                if checked.status == "active":
+                    active_workers.append(self.db.get_account(account["id"]))
 
-        if not active_workers:
-            self.db.mark_collect_task_status(task_id, "error", last_error="没有可用账号，无法开始采集")
+            if not active_workers:
+                self.db.mark_collect_task_status(task_id, "error", last_error="没有可用账号，无法开始采集")
+                await self._emit_complete(task_id)
+                return
+
+            queue: asyncio.Queue = asyncio.Queue()
+            for item in task_channels:
+                queue.put_nowait(item)
+
+            worker_count = min(task["worker_count"], len(active_workers), queue.qsize(), self.settings.max_collect_workers)
+            workers = [
+                asyncio.create_task(self._worker(task_id, queue, active_workers[index]))
+                for index in range(worker_count)
+            ]
+            await asyncio.gather(*workers, return_exceptions=True)
+
+            unique_total = self.db.count_unique_usernames(task_id)
+            self.db.increment_task_metrics(task_id, unique_total=unique_total)
+
+            final_status = "stopped" if self.db.should_stop_task(task_id) else "completed"
+            if final_status == "completed":
+                self.db.mark_collect_task_status(task_id, "completed")
+            else:
+                self.db.mark_collect_task_status(task_id, "stopped")
+
+            output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
+            self.db.set_task_result_file(task_id, str(output_path))
+            await self._emit_complete(task_id)
+        except asyncio.CancelledError:
+            self.db.stop_collect_task_now(task_id, reason="任务已停止，账号已释放")
+            output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
+            self.db.set_task_result_file(task_id, str(output_path))
             await self._emit_complete(task_id)
             return
-
-        queue: asyncio.Queue = asyncio.Queue()
-        for item in task_channels:
-            queue.put_nowait(item)
-
-        worker_count = min(task["worker_count"], len(active_workers), queue.qsize(), self.settings.max_collect_workers)
-        workers = [
-            asyncio.create_task(self._worker(task_id, queue, active_workers[index]))
-            for index in range(worker_count)
-        ]
-        await asyncio.gather(*workers, return_exceptions=True)
-
-        unique_total = self.db.count_unique_usernames(task_id)
-        self.db.increment_task_metrics(task_id, unique_total=unique_total)
-
-        final_status = "stopped" if self.db.should_stop_task(task_id) else "completed"
-        if final_status == "completed":
-            self.db.mark_collect_task_status(task_id, "completed")
-        else:
-            self.db.mark_collect_task_status(task_id, "stopped")
-
-        output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
-        self.db.set_task_result_file(task_id, str(output_path))
-        await self._emit_complete(task_id)
 
     async def _worker(self, task_id: int, queue: asyncio.Queue, account_row) -> None:
         account_id = account_row["id"]

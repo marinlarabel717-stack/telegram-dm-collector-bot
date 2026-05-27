@@ -470,6 +470,76 @@ class Database:
             )
             self.conn.commit()
 
+    def stop_collect_task_now(self, task_id: int, *, reason: str) -> sqlite3.Row | None:
+        with self.lock:
+            task = self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
+            if not task:
+                return None
+
+            self.conn.execute(
+                """
+                UPDATE collect_tasks SET
+                    status='stopped',
+                    stop_requested=1,
+                    last_error=?,
+                    finished_at=CURRENT_TIMESTAMP,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (reason, task_id),
+            )
+            self.conn.execute(
+                """
+                UPDATE collect_task_channels SET
+                    status='stopped',
+                    last_error=COALESCE(last_error, ?),
+                    finished_at=COALESCE(finished_at, CURRENT_TIMESTAMP),
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE task_id=? AND status IN ('queued', 'running')
+                """,
+                (reason, task_id),
+            )
+
+            finished_channels = self.conn.execute(
+                "SELECT COUNT(*) FROM collect_task_channels WHERE task_id=? AND status IN ('completed', 'error', 'stopped')",
+                (task_id,),
+            ).fetchone()[0]
+            unique_hits = self.conn.execute(
+                "SELECT COUNT(*) FROM collect_task_usernames WHERE task_id=?",
+                (task_id,),
+            ).fetchone()[0]
+            self.conn.execute(
+                "UPDATE collect_tasks SET finished_channels=?, unique_hits=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (finished_channels, unique_hits, task_id),
+            )
+
+            try:
+                account_ids = [int(value) for value in json.loads(task["account_ids_json"] or "[]")]
+            except Exception:  # noqa: BLE001
+                account_ids = []
+            if account_ids:
+                placeholders = ",".join("?" for _ in account_ids)
+                self.conn.execute(
+                    f"UPDATE accounts SET status='active', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE status='collecting' AND id IN ({placeholders})",
+                    account_ids,
+                )
+            self.conn.commit()
+            return self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
+
+    def recover_interrupted_tasks(self, *, reason: str) -> int:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id FROM collect_tasks WHERE status IN ('queued', 'running') ORDER BY id ASC"
+            ).fetchall()
+        for row in rows:
+            self.stop_collect_task_now(row["id"], reason=reason)
+        with self.lock:
+            self.conn.execute(
+                "UPDATE accounts SET status='active', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE status='collecting'"
+            )
+            self.conn.commit()
+        return len(rows)
+
     def should_stop_task(self, task_id: int) -> bool:
         with self.lock:
             row = self.conn.execute("SELECT stop_requested FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
