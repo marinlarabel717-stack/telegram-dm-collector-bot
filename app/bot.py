@@ -292,6 +292,8 @@ class DmCollectorBot:
             f"自动删除损坏：<code>{len(deleted_broken)}</code>",
             f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
         ]
+        if not imported_accounts:
+            lines.append("\n<b>本次没有保留下任何可用账号</b>")
         if imported_accounts:
             lines.append("")
             lines.append("<b>已保留可用账号</b>")
@@ -431,9 +433,11 @@ class DmCollectorBot:
     # ---------- callbacks / menu rendering ----------
     async def _show_accounts_menu(self, query, page: int = 1) -> None:
         count = self.db.count_accounts()
+        stats = self.db.get_account_status_counts()
         text = (
             f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
-            f"当前存活账号：<code>{count}</code>\n\n"
+            f"当前存活账号：<code>{count}</code>\n"
+            f"可用：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n\n"
             f"上传 .session 后会立即做一次登录验证；损坏 / 封禁 / 失效账号会自动清掉。"
         )
         keyboard = [
@@ -456,7 +460,7 @@ class DmCollectorBot:
             "",
         ]
         if not rows:
-            lines.append("还没有账号，先上传一个 .session 文件吧。")
+            lines.append("当前没有存活账号，先上传一个可用的 .session 文件吧。")
         else:
             for row in rows:
                 label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
@@ -543,13 +547,17 @@ class DmCollectorBot:
             kept_other_errors.append(f"{label}｜{issue_text}")
 
         total_alive = self.db.count_accounts()
+        total_checked = len(rows)
         lines = [
             f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检测完成</b>",
-            f"存活账号：<code>{kept_active}</code>",
+            f"总检测账号：<code>{total_checked}</code>",
+            f"保留可用：<code>{kept_active}</code>",
             f"自动删除损坏 session：<code>{len(deleted_broken)}</code>",
             f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
             f"当前列表保留：<code>{total_alive}</code>",
         ]
+        if total_alive == 0:
+            lines.append("\n<b>当前账号列表已清空，没有可用账号。</b>")
         if deleted_broken:
             lines.append("")
             lines.append("<b>已删除：session 已损坏</b>")

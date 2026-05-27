@@ -340,6 +340,16 @@ class Database:
         with self.lock:
             return self.conn.execute("SELECT COUNT(*) FROM accounts WHERE status IN ('active','checking','collecting')").fetchone()[0]
 
+    def get_account_status_counts(self) -> dict[str, int]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT status, COUNT(*) AS total FROM accounts WHERE status IN ('active','checking','collecting') GROUP BY status"
+            ).fetchall()
+        result = {"active": 0, "checking": 0, "collecting": 0}
+        for row in rows:
+            result[str(row["status"])] = int(row["total"])
+        return result
+
     def get_account(self, account_id: int) -> sqlite3.Row | None:
         with self.lock:
             return self.conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
