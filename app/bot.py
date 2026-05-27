@@ -197,28 +197,27 @@ class DmCollectorBot:
         if not self._is_admin(update.effective_user.id):
             return
 
-        state = self.user_states.get(update.effective_user.id) or {}
-        if state.get("mode") != "await_session_upload":
-            return
-
         document = update.effective_message.document
         if not document:
             return
 
         file_name = (document.file_name or "").lower()
         if not (file_name.endswith(".session") or file_name.endswith(".zip")):
-            await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 目前支持上传 <code>.session</code> 或包含 <code>.session + .json</code> 的 <code>.zip</code> 文件。",
-                parse_mode=ParseMode.HTML,
-            )
             return
 
-        await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
         try:
+            await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             session_files = await self._save_uploaded_session_files(document)
         except zipfile.BadZipFile:
             await update.effective_message.reply_text(
                 f"{tg_emoji(self.settings.emoji_error_id, '❌')} 这个 zip 看起来不是有效压缩包，请重新打包后再传。",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("处理上传文件失败: %s", document.file_name)
+            await update.effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 处理上传文件时出错：<code>{html.escape(str(exc) or exc.__class__.__name__, quote=False)[:300]}</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -231,22 +230,35 @@ class DmCollectorBot:
             return
 
         imported_accounts = []
+        failed_sessions = []
         for session_file in session_files:
-            result = await self.collection_manager.verify_session_file(session_file)
-            account = self.db.upsert_account(
-                session_name=session_file.stem,
-                session_file=str(session_file),
-                tg_user_id=result.tg_user_id,
-                phone=result.phone,
-                username=result.username,
-                display_name=result.display_name,
-                status=result.status,
-                last_error=result.last_error,
-            )
-            imported_accounts.append(account)
+            try:
+                result = await self.collection_manager.verify_session_file(session_file)
+                account = self.db.upsert_account(
+                    session_name=session_file.stem,
+                    session_file=str(session_file),
+                    tg_user_id=result.tg_user_id,
+                    phone=result.phone,
+                    username=result.username,
+                    display_name=result.display_name,
+                    status=result.status,
+                    last_error=result.last_error,
+                )
+                imported_accounts.append(account)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("导入 session 失败: %s", session_file)
+                failed_sessions.append((session_file.name, str(exc) or exc.__class__.__name__))
 
         self._clear_state(update.effective_user.id)
-        if len(imported_accounts) == 1:
+        if not imported_accounts and failed_sessions:
+            failed_name, failed_error = failed_sessions[0]
+            await update.effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 导入失败：<code>{html.escape(failed_name, quote=False)}</code>\n<code>{html.escape(failed_error, quote=False)[:300]}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        if len(imported_accounts) == 1 and not failed_sessions:
             await update.effective_message.reply_text(
                 self._format_account_text(imported_accounts[0]),
                 parse_mode=ParseMode.HTML,
@@ -256,15 +268,18 @@ class DmCollectorBot:
             return
 
         lines = [
-            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>批量导入完成</b>",
-            f"导入账号数：<code>{len(imported_accounts)}</code>",
+            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>导入处理完成</b>",
+            f"成功导入：<code>{len(imported_accounts)}</code>",
+            f"失败数量：<code>{len(failed_sessions)}</code>",
             "",
         ]
         for account in imported_accounts[:10]:
             label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
             lines.append(f"• #{account['id']} {html.escape(str(label), quote=False)} · {status_badge(account['status'])}")
-        if len(imported_accounts) > 10:
-            lines.append(f"… 其余 <code>{len(imported_accounts) - 10}</code> 个账号已写入列表")
+        if failed_sessions:
+            lines.append("")
+            for failed_name, failed_error in failed_sessions[:3]:
+                lines.append(f"× <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
         await update.effective_message.reply_text(
             "\n".join(lines),
             parse_mode=ParseMode.HTML,
