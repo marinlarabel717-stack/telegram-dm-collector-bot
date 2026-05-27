@@ -760,6 +760,7 @@ class DmCollectorBot:
         media = None
         original_name = None
         media_kind = None
+        mime_type = None
         if getattr(message, "photo", None):
             media = message.photo[-1]
             original_name = f"photo_{message.message_id}.jpg"
@@ -768,10 +769,12 @@ class DmCollectorBot:
             media = message.video
             original_name = message.video.file_name or f"video_{message.message_id}.mp4"
             media_kind = "video"
+            mime_type = getattr(message.video, "mime_type", None)
         elif getattr(message, "document", None):
             media = message.document
             original_name = message.document.file_name or f"document_{message.message_id}.bin"
             media_kind = "document"
+            mime_type = getattr(message.document, "mime_type", None)
         if not media or not original_name or not media_kind:
             return None
         media_dir = self.settings.data_dir / "dm_media"
@@ -779,6 +782,7 @@ class DmCollectorBot:
         target = self._unique_dm_media_path(original_name)
         tg_file = await media.get_file()
         await tg_file.download_to_drive(custom_path=str(target))
+        media_kind = self._detect_dm_preview_media_kind(target, media_kind, mime_type)
         return {
             "media_kind": media_kind,
             "media_path": str(target),
@@ -1701,7 +1705,7 @@ class DmCollectorBot:
             if media_path.exists():
                 with media_path.open("rb") as fp:
                     caption = str(payload.get("caption") or "") or None
-                    media_kind = str(payload.get("media_kind") or "document")
+                    media_kind = self._detect_dm_preview_media_kind(media_path, str(payload.get("media_kind") or "document"))
                     if media_kind == "photo":
                         await self.application.bot.send_photo(chat_id=chat_id, photo=fp, caption=caption)
                     elif media_kind == "video":
@@ -1728,6 +1732,19 @@ class DmCollectorBot:
                 await self.application.bot.send_message(chat_id=chat_id, text=main_text)
         if mode == "three_stage" and str(payload.get("closing") or "").strip():
             await self.application.bot.send_message(chat_id=chat_id, text=str(payload.get("closing") or ""))
+
+    @staticmethod
+    def _detect_dm_preview_media_kind(path: Path, media_kind: str | None, mime_type: str | None = None) -> str:
+        normalized = str(media_kind or "document").lower()
+        if normalized in {"photo", "video"}:
+            return normalized
+        mime = str(mime_type or "").lower()
+        suffix = path.suffix.lower()
+        if mime.startswith("image/") or suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+            return "photo"
+        if mime.startswith("video/") or suffix in {".mp4", ".mov", ".mkv", ".webm"}:
+            return "video"
+        return "document"
 
     async def _show_dm_task_list(self, query, page: int = 1) -> None:
         per_page = 6

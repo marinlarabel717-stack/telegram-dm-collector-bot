@@ -286,7 +286,14 @@ class DmSenderManager:
             if not media_path.exists():
                 raise FileNotFoundError(f"媒体文件不存在: {media_path}")
             caption = str(payload.get("caption") or "").strip() or None
-            return await client.send_file(entity, file=str(media_path), caption=caption)
+            media_kind = self._detect_dm_media_kind(media_path, str(payload.get("media_kind") or "document"))
+            return await client.send_file(
+                entity,
+                file=str(media_path),
+                caption=caption,
+                force_document=(media_kind == "document"),
+                supports_streaming=(media_kind == "video"),
+            )
         if content_type == "forward":
             forward_link = str(payload.get("forward_link") or "").strip()
             if forward_link:
@@ -443,3 +450,15 @@ class DmSenderManager:
             return message
         current = max(0, int(success_count or 0))
         return f"{message}[{current}/{limit}]"
+
+    @staticmethod
+    def _detect_dm_media_kind(path: Path, media_kind: str | None) -> str:
+        normalized = str(media_kind or "document").lower()
+        if normalized in {"photo", "video"}:
+            return normalized
+        suffix = path.suffix.lower()
+        if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+            return "photo"
+        if suffix in {".mp4", ".mov", ".mkv", ".webm"}:
+            return "video"
+        return "document"
