@@ -1329,7 +1329,7 @@ class DmCollectorBot:
             f"类型：<code>{'群组发言采集' if task_type == 'group' else '频道用户名采集'}</code>",
             f"状态：{status_badge(task['status'])}",
         ]
-        runtime_text = self._format_runtime(task.get("started_at"), task.get("finished_at"))
+        runtime_text = self._format_runtime(task["started_at"], task["finished_at"])
         if runtime_text:
             lines.append(f"已运行：<code>{runtime_text}</code>")
         lines.extend([
@@ -1351,7 +1351,7 @@ class DmCollectorBot:
             lines.append("")
             lines.append(f"<b>{unit}子任务</b>")
             for item in visible_channels[:6]:
-                item_runtime = self._format_runtime(item.get("started_at"), item.get("finished_at"))
+                item_runtime = self._format_runtime(item["started_at"], item["finished_at"])
                 runtime_suffix = f" · 已跑 <code>{item_runtime}</code>" if item["status"] == "running" and item_runtime else ""
                 lines.append(
                     f"• {html.escape(item['channel'], quote=False)} · {status_badge(item['status'])} · 扫描 <code>{item['scanned_messages']}</code> · 去重 <code>{item['unique_hits']}</code>{runtime_suffix}"
