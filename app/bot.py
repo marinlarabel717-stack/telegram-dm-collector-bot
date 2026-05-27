@@ -340,7 +340,7 @@ class DmCollectorBot:
             lines.append("<b>已保留可用账号</b>")
             for account in imported_accounts[:10]:
                 label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
-                lines.append(f"• #{account['id']} {html.escape(str(label), quote=False)} · {status_badge(account['status'])}")
+                lines.append(f"• #{self._account_display_code(account)} {html.escape(str(label), quote=False)} · {status_badge(account['status'])}")
         if deleted_broken:
             lines.append("")
             lines.append("<b>已删除：session 已损坏</b>")
@@ -538,7 +538,7 @@ class DmCollectorBot:
         else:
             for row in rows:
                 label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
-                lines.append(f"• #{row['id']} {html.escape(str(label), quote=False)} · {status_badge(row['status'])}")
+                lines.append(f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {status_badge(row['status'])}")
 
         keyboard: list[list] = [
             [
@@ -550,7 +550,7 @@ class DmCollectorBot:
         for row in rows:
             label = row["username"] or row["phone"] or row["session_name"]
             row_buffer.append(
-                premium_button(f"#{row['id']} {str(label)[:28]}", self.settings.emoji_list_id, callback_data=f"account:view:{row['id']}")
+                premium_button(f"#{self._account_display_code(row)} {str(label)[:28]}", self.settings.emoji_list_id, callback_data=f"account:view:{row['id']}")
             )
             if len(row_buffer) == 2:
                 keyboard.append(row_buffer)
@@ -1078,9 +1078,10 @@ class DmCollectorBot:
 
     def _format_account_text(self, account) -> str:
         title = account["display_name"] or account["username"] or account["phone"] or account["session_name"]
+        display_code = self._account_display_code(account)
         lines = [
             f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>账号详情</b>",
-            f"编号：<code>{account['id']}</code>",
+            f"编号：<code>#{display_code}</code>",
             f"名称：<code>{html.escape(str(title), quote=False)}</code>",
             f"状态：{status_badge(account['status'])}",
             f"用户名：<code>{html.escape(str(account['username'] or '-'), quote=False)}</code>",
@@ -1199,7 +1200,7 @@ class DmCollectorBot:
         for row in active:
             mark = "已选" if row["id"] in selected_ids else "未选"
             label = row["username"] or row["phone"] or row["session_name"]
-            lines.append(f"• #{row['id']} {html.escape(str(label), quote=False)} · {mark}")
+            lines.append(f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {mark}")
         return "\n".join(lines)
 
     def _select_workers_text(self, draft: dict) -> str:
@@ -1289,7 +1290,7 @@ class DmCollectorBot:
             icon = self.settings.emoji_ok_id if is_selected else self.settings.emoji_error_id
             title = row["username"] or row["phone"] or row["session_name"]
             row_buffer.append(
-                premium_button(f"#{row['id']} {str(title)[:28]}", icon, callback_data=f"wizard:acc:toggle:{row['id']}")
+                premium_button(f"#{self._account_display_code(row)} {str(title)[:28]}", icon, callback_data=f"wizard:acc:toggle:{row['id']}")
             )
             if len(row_buffer) == 2:
                 keyboard.append(row_buffer)
@@ -1368,6 +1369,18 @@ class DmCollectorBot:
 
     def _single_back_keyboard(self, callback_data: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[premium_button("返回", self.settings.emoji_back_id, callback_data=callback_data)]])
+
+    def _account_display_map(self) -> dict[int, int]:
+        visible_rows = [
+            row for row in self.db.list_all_accounts()
+            if row["status"] in {"active", "checking", "collecting"}
+        ]
+        visible_rows.sort(key=lambda row: int(row["id"]))
+        return {int(row["id"]): index for index, row in enumerate(visible_rows, start=1)}
+
+    def _account_display_code(self, account_or_id) -> int:
+        account_id = int(account_or_id["id"] if hasattr(account_or_id, "keys") else account_or_id)
+        return self._account_display_map().get(account_id, account_id)
 
     # ---------- helpers ----------
     async def _send_dm_exports(self, chat_id: int) -> None:
