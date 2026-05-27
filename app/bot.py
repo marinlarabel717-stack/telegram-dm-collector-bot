@@ -12,7 +12,7 @@ from pathlib import Path
 import logging
 from telegram import InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -45,6 +45,7 @@ class DmCollectorBot:
         self.user_states: dict[int, dict] = {}
         self.task_runners: dict[int, asyncio.Task] = {}
         self.progress_throttle: dict[int, float] = {}
+        self.progress_snapshots: dict[int, dict[str, float | int]] = {}
         self.application.bot_data["settings"] = settings
         self.application.bot_data["db"] = self.db
         recovered = self.db.recover_interrupted_tasks(reason="机器人重启，已停止上次未完成任务并释放账号")
@@ -1022,7 +1023,16 @@ class DmCollectorBot:
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
         filters_map = draft.setdefault("filters", {})
-        filters_map[key] = not bool(filters_map.get(key))
+        if key == "premium_mode":
+            current = str(filters_map.get("premium_mode") or "all")
+            next_value = {
+                "all": "premium_only",
+                "premium_only": "non_premium_only",
+                "non_premium_only": "all",
+            }.get(current, "all")
+            filters_map["premium_mode"] = next_value
+        else:
+            filters_map[key] = not bool(filters_map.get(key))
         state["mode"] = "select_group_filters"
         await self._safe_edit(query, self._group_filters_text(draft), self._build_group_filters_keyboard(draft))
 
@@ -1133,24 +1143,71 @@ class DmCollectorBot:
 
     # ---------- task events ----------
     async def _on_task_progress(self, task_id: int) -> None:
-        now = time.time()
-        last = self.progress_throttle.get(task_id, 0)
-        if now - last < 8:
+        task = self.db.get_collect_task(task_id)
+        if not task:
             return
-        self.progress_throttle[task_id] = now
-        await self._push_task_update(task_id)
+        now = time.time()
+        snapshot = self.progress_snapshots.setdefault(
+            task_id,
+            {
+                "last_scanned": 0,
+                "last_hits": 0,
+                "last_unique": 0,
+                "last_finished": 0,
+                "retry_after_until": 0.0,
+            },
+        )
+        retry_after_until = float(snapshot.get("retry_after_until", 0.0) or 0.0)
+        if now < retry_after_until:
+            return
+
+        scanned = int(task["total_messages_scanned"] or 0)
+        hits = int(task["total_hits"] or 0)
+        unique_hits = int(task["unique_hits"] or 0)
+        finished_channels = int(task["finished_channels"] or 0)
+
+        delta_scanned = scanned - int(snapshot.get("last_scanned", 0) or 0)
+        delta_hits = hits - int(snapshot.get("last_hits", 0) or 0)
+        delta_unique = unique_hits - int(snapshot.get("last_unique", 0) or 0)
+        delta_finished = finished_channels - int(snapshot.get("last_finished", 0) or 0)
+
+        min_interval = 15.0
+        if delta_finished > 0:
+            min_interval = 2.0
+        elif delta_hits > 0 or delta_unique > 0:
+            min_interval = 4.0
+        elif delta_scanned >= 500:
+            min_interval = 5.0
+        elif delta_scanned >= 200:
+            min_interval = 7.0
+        elif delta_scanned >= 50:
+            min_interval = 10.0
+
+        last = self.progress_throttle.get(task_id, 0.0)
+        if now - last < min_interval:
+            return
+
+        pushed = await self._push_task_update(task_id)
+        if pushed:
+            self.progress_throttle[task_id] = now
+            snapshot["last_scanned"] = scanned
+            snapshot["last_hits"] = hits
+            snapshot["last_unique"] = unique_hits
+            snapshot["last_finished"] = finished_channels
 
     async def _on_task_complete(self, task_id: int) -> None:
         await self._push_task_update(task_id, force=True)
+        self.progress_throttle.pop(task_id, None)
+        self.progress_snapshots.pop(task_id, None)
         task = self.db.get_collect_task(task_id)
         if not task:
             return
         await self._send_task_result(task["requester_id"], task_id, announce=True)
 
-    async def _push_task_update(self, task_id: int, force: bool = False) -> None:
+    async def _push_task_update(self, task_id: int, force: bool = False) -> bool:
         task = self.db.get_collect_task(task_id)
         if not task or not task["progress_chat_id"] or not task["progress_message_id"]:
-            return
+            return False
         try:
             await self.application.bot.edit_message_text(
                 chat_id=task["progress_chat_id"],
@@ -1160,9 +1217,18 @@ class DmCollectorBot:
                 disable_web_page_preview=True,
                 reply_markup=self._build_task_keyboard(task_id),
             )
+            return True
+        except RetryAfter as exc:
+            retry_seconds = max(3.0, float(getattr(exc, "retry_after", 3) or 3))
+            snapshot = self.progress_snapshots.setdefault(task_id, {})
+            snapshot["retry_after_until"] = time.time() + retry_seconds + 1
+            logger.warning("任务消息刷新过快，延后重试 task=%s retry_after=%s", task_id, retry_seconds)
+            return False
         except BadRequest as exc:
             if "Message is not modified" not in str(exc):
                 logger.warning("更新任务消息失败 task=%s: %s", task_id, exc)
+                return False
+            return True
 
     # ---------- formatting ----------
     def _build_welcome_text(self, user_id: int) -> str:
@@ -1343,12 +1409,13 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>设置筛选规则</b>",
             f"群组数：<code>{len(draft.get('channels') or [])}</code> · 时间范围：<code>{draft.get('days') or 1}</code> 天",
-            "开启后会在采集发言用户时自动排除对应人群。",
+            "普通项开启后会排除对应人群；会员项可切换为全部 / 仅会员 / 仅非会员。",
             "",
             f"• 机器人：<code>{'过滤' if filters['exclude_bots'] else '保留'}</code>",
             f"• 管理员：<code>{'过滤' if filters['exclude_admins'] else '保留'}</code>",
             f"• 无头像：<code>{'过滤' if filters['exclude_no_photo'] else '保留'}</code>",
             f"• 无用户名：<code>{'过滤' if filters['exclude_no_username'] else '保留（会导出 ID）'}</code>",
+            f"• 会员：<code>{self._premium_mode_label(filters.get('premium_mode'))}</code>",
         ]
         return "\n".join(lines)
 
@@ -1452,6 +1519,9 @@ class DmCollectorBot:
             [
                 premium_button(f"无头像：{'过滤' if filters['exclude_no_photo'] else '保留'}", self.settings.emoji_upload_id, callback_data="wizard:gflt:toggle:exclude_no_photo"),
                 premium_button(f"无用户名：{'过滤' if filters['exclude_no_username'] else '保留'}", self.settings.emoji_inbox_id, callback_data="wizard:gflt:toggle:exclude_no_username"),
+            ],
+            [
+                premium_button(f"会员：{self._premium_mode_label(filters.get('premium_mode'))}", self.settings.emoji_all_id, callback_data="wizard:gflt:toggle:premium_mode"),
             ],
             [
                 premium_button("完成设置", self.settings.emoji_ok_id, callback_data="wizard:gflt:done"),
@@ -1841,6 +1911,7 @@ class DmCollectorBot:
             "exclude_admins": False,
             "exclude_no_photo": False,
             "exclude_no_username": False,
+            "premium_mode": "all",
         }
         if isinstance(raw, str):
             try:
@@ -1848,9 +1919,12 @@ class DmCollectorBot:
             except Exception:
                 raw = None
         if isinstance(raw, dict):
-            for key in defaults:
+            for key in ("exclude_bots", "exclude_admins", "exclude_no_photo", "exclude_no_username"):
                 if key in raw:
                     defaults[key] = bool(raw[key])
+            premium_mode = str(raw.get("premium_mode") or "all")
+            if premium_mode in {"all", "premium_only", "non_premium_only"}:
+                defaults["premium_mode"] = premium_mode
         return defaults
 
     def _format_filter_summary(self, raw_filters, *, empty_label: str = "全部保留") -> str:
@@ -1864,7 +1938,19 @@ class DmCollectorBot:
             labels.append("无头像")
         if filters["exclude_no_username"]:
             labels.append("无用户名")
+        if filters["premium_mode"] == "premium_only":
+            labels.append("仅会员")
+        elif filters["premium_mode"] == "non_premium_only":
+            labels.append("仅非会员")
         return "、".join(labels) if labels else empty_label
+
+    @staticmethod
+    def _premium_mode_label(value: str | None) -> str:
+        if value == "premium_only":
+            return "仅会员"
+        if value == "non_premium_only":
+            return "仅非会员"
+        return "全部"
 
     def _humanize_account_issue(self, status: str, last_error: str | None) -> str:
         raw = (last_error or "").strip()

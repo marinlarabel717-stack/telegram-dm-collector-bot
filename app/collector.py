@@ -381,6 +381,7 @@ class CollectionManager:
                 is_bot = bool(getattr(sender, "bot", False))
                 is_admin = int(getattr(sender, "id", 0)) in admin_ids
                 has_photo = bool(getattr(sender, "photo", None))
+                is_premium = bool(getattr(sender, "premium", False) or getattr(sender, "is_premium", False))
                 if filters["exclude_bots"] and is_bot:
                     continue
                 if filters["exclude_admins"] and is_admin:
@@ -388,6 +389,10 @@ class CollectionManager:
                 if filters["exclude_no_photo"] and not has_photo:
                     continue
                 if filters["exclude_no_username"] and not username:
+                    continue
+                if filters["premium_mode"] == "premium_only" and not is_premium:
+                    continue
+                if filters["premium_mode"] == "non_premium_only" and is_premium:
                     continue
 
                 total_hits += 1
@@ -589,12 +594,13 @@ class CollectionManager:
         return getattr(user, "username", None) or str(getattr(user, "id", "-"))
 
     @staticmethod
-    def _parse_filters(raw: str | None) -> dict[str, bool]:
+    def _parse_filters(raw: str | None) -> dict[str, object]:
         defaults = {
             "exclude_bots": False,
             "exclude_admins": False,
             "exclude_no_photo": False,
             "exclude_no_username": False,
+            "premium_mode": "all",
         }
         if not raw:
             return defaults
@@ -602,9 +608,12 @@ class CollectionManager:
             loaded = json.loads(raw)
         except Exception:  # noqa: BLE001
             return defaults
-        for key in defaults:
+        for key in ("exclude_bots", "exclude_admins", "exclude_no_photo", "exclude_no_username"):
             if key in loaded:
                 defaults[key] = bool(loaded[key])
+        premium_mode = str(loaded.get("premium_mode") or "all")
+        if premium_mode in {"all", "premium_only", "non_premium_only"}:
+            defaults["premium_mode"] = premium_mode
         return defaults
 
     @staticmethod
