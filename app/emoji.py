@@ -35,7 +35,7 @@ STATUS_META = {
     "unauthorized": (DEFAULT_EMOJI_IDS["error"], "❌", "未登录"),
     "error": (DEFAULT_EMOJI_IDS["error"], "❌", "异常"),
     "stopped": (DEFAULT_EMOJI_IDS["timeout"], "⏱️", "已停止"),
-    "completed": (DEFAULT_EMOJI_IDS["success"], "🆗", "已完成"),
+    "completed": (DEFAULT_EMOJI_IDS["ok"], "✅", "已完成"),
     "queued": (DEFAULT_EMOJI_IDS["waiting"], "🕜", "排队中"),
 }
 
