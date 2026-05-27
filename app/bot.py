@@ -30,6 +30,7 @@ from .database import Database
 from .dm_account_checker import DmAccountChecker
 from .dm_content import content_type_label, message_mode_label, payload_preview
 from .dm_links import normalize_channel_post_link, parse_channel_post_link
+from .dm_postbot import describe_postbot_inline_result, fetch_postbot_inline_result
 from .dm_repository import DmRepository, dm_log_action_label, dm_log_status_label
 from .dm_sender import DmSenderManager
 from .dm_targets import ParsedTarget, parse_targets_text
@@ -1713,12 +1714,12 @@ class DmCollectorBot:
         if not chat_id:
             return
         try:
-            await self._send_dm_preview(chat_id, payload, draft.get("content_type") or "text")
+            await self._send_dm_preview(chat_id, payload, draft.get("content_type") or "text", draft=draft)
         except Exception as exc:  # noqa: BLE001
             logger.exception("私信预览失败")
             await query.answer(f"预览失败：{self._humanize_dm_error(None, str(exc))[:120]}", show_alert=True)
 
-    async def _send_dm_preview(self, chat_id: int, payload: dict, content_type: str) -> None:
+    async def _send_dm_preview(self, chat_id: int, payload: dict, content_type: str, *, draft: dict | None = None) -> None:
         mode = str(payload.get("mode") or "single")
         if mode == "three_stage" and str(payload.get("greeting") or "").strip():
             await self.application.bot.send_message(chat_id=chat_id, text=str(payload.get("greeting") or ""))
@@ -1744,7 +1745,8 @@ class DmCollectorBot:
         elif content_type == "post":
             post_code = str(payload.get("body") or payload.get("post_code") or payload.get("text") or "").strip()
             if post_code:
-                await self.application.bot.send_message(chat_id=chat_id, text=post_code, parse_mode=ParseMode.HTML)
+                preview_text = await self._build_postbot_preview_text(post_code, draft=draft)
+                await self.application.bot.send_message(chat_id=chat_id, text=preview_text)
         elif content_type == "forward":
             preview_text = str(payload.get("forward_message_preview") or "").strip() or str(payload.get("forward_preview") or "").strip() or "暂时无法抓到帖子摘要"
             await self.application.bot.send_message(
@@ -1758,6 +1760,28 @@ class DmCollectorBot:
                 await self.application.bot.send_message(chat_id=chat_id, text=main_text)
         if mode == "three_stage" and str(payload.get("closing") or "").strip():
             await self.application.bot.send_message(chat_id=chat_id, text=str(payload.get("closing") or ""))
+
+    async def _build_postbot_preview_text(self, post_code: str, *, draft: dict | None = None) -> str:
+        draft = draft or {}
+        account_ids = [int(item) for item in (draft.get("account_ids") or []) if str(item).strip()]
+        if not account_ids:
+            return "【PostBot 预览】\n已保存文案代码。实际发送时会按 PostBot 返回的内联内容发出，不会把代码原样发出去。"
+
+        account = self.db.get_account(account_ids[0])
+        if not account:
+            return "【PostBot 预览】\n未找到可用于预览的账号。实际发送时会按 PostBot 返回的内联内容发出。"
+
+        client = None
+        try:
+            client = self.collection_manager._build_client(Path(str(account["session_file"])))
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise RuntimeError("预览账号 session 未登录")
+            _, inline_result = await fetch_postbot_inline_result(client, post_code)
+            return "【PostBot 预览】\n" + describe_postbot_inline_result(inline_result)
+        finally:
+            if client is not None:
+                await client.disconnect()
 
     @staticmethod
     def _detect_dm_preview_media_kind(path: Path, media_kind: str | None, mime_type: str | None = None) -> str:
@@ -2499,7 +2523,7 @@ class DmCollectorBot:
             return (
                 f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送 PostBot 图文代码</b>\n"
                 f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-                f"请直接粘贴 PostBot 生成的文案代码，我会按代码内容预览和发送。"
+                f"请直接粘贴 PostBot 生成的文案代码，例如：<code>@postbot jsc1mpdn1gw3</code>\n我会按它生成的内联内容发送，不会把代码原样发出去。"
             )
         if content_type == "media":
             return (
@@ -2532,7 +2556,7 @@ class DmCollectorBot:
             return (
                 f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送第 2 段主内容（PostBot 图文代码）</b>\n"
                 f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-                f"请直接粘贴 PostBot 生成的文案代码。"
+                f"请直接粘贴 PostBot 生成的文案代码，例如：<code>@postbot jsc1mpdn1gw3</code>。"
             )
         if content_type == "media":
             return (
@@ -2708,6 +2732,7 @@ class DmCollectorBot:
             "text_forbidden": "当前聊天不允许发送文本",
             "forward_forbidden": "这个目标不允许转发该帖子内容",
             "admin_required": "当前账号没有执行该操作的权限",
+            "postbot_failed": "PostBot 内联结果获取失败",
             "send_failed": "发送失败",
         }
         raw = str(message or code or "-").strip()
@@ -2722,6 +2747,7 @@ class DmCollectorBot:
             ("floodwait", "官方限速，需要等待后再发"),
             ("forward", "当前目标不允许转发该帖子内容"),
             ("media", "当前聊天不允许发送媒体"),
+            ("inline bot", "PostBot 内联结果获取失败"),
             ("entity not found", "用户不存在或无法解析"),
             ("session 未登录", "session 已失效或未登录"),
         ]

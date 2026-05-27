@@ -11,6 +11,7 @@ from .collector import CollectionManager
 from .database import Database
 from .dm_links import parse_channel_post_link
 from .dm_logging import compose_log
+from .dm_postbot import fetch_postbot_inline_result
 from .dm_policy import DMTaskPolicy, DelayWindow, RetryPolicy
 from .dm_repository import DmRepository
 
@@ -297,8 +298,9 @@ class DmSenderManager:
                 supports_streaming=(media_kind == "video"),
             )
         if content_type == "post":
-            main_text = str(payload.get("body") or payload.get("post_code") or payload.get("text") or "").strip()
-            return await self._send_text_message(client, entity, main_text, policy, parse_mode="html")
+            post_code = str(payload.get("body") or payload.get("post_code") or payload.get("text") or "").strip()
+            _, inline_result = await fetch_postbot_inline_result(client, post_code)
+            return self._normalize_sent_message(await inline_result.click(entity))
         if content_type == "forward":
             forward_link = str(payload.get("forward_link") or "").strip()
             if forward_link:
@@ -393,6 +395,8 @@ class DmSenderManager:
             return "admin_required", "当前账号在这个会话里没有管理员权限", False
         if "message author required" in lowered or "forwards are restricted" in lowered or "forward" in lowered and "forbidden" in lowered:
             return "forward_forbidden", "这个目标不允许转发该帖子内容", False
+        if "inline bot" in lowered or "bot response timeout" in lowered or "next_offset_invalid" in lowered:
+            return "postbot_failed", "PostBot 内联结果获取失败", False
         if "username not occupied" in lowered or "cannot find" in lowered or "no user has" in lowered or "entity not found" in lowered:
             return "user_not_found", "用户不存在或无法解析", False
         if "bot method invalid" in lowered or "bot invalid" in lowered:
@@ -452,7 +456,7 @@ class DmSenderManager:
     def _action_success_message(content_type: str) -> str:
         return {
             "text": "文本发送成功",
-            "post": "PostBot 图文发送成功",
+            "post": "PostBot 内联文案发送成功",
             "media": "媒体发送成功",
             "forward": "频道帖子转发成功",
         }.get(str(content_type or "text"), "发送成功")
