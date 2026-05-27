@@ -44,8 +44,9 @@ class CollectionManager:
         self.on_complete = on_complete
 
     async def verify_session_file(self, session_file: Path) -> SessionCheckResult:
-        client = self._build_client(session_file)
+        client: TelegramClient | None = None
         try:
+            client = self._build_client(session_file)
             await client.connect()
             authorized = await client.is_user_authorized()
             if not authorized:
@@ -85,7 +86,8 @@ class CollectionManager:
                 last_error=self._short_error(exc),
             )
         finally:
-            await client.disconnect()
+            if client is not None:
+                await client.disconnect()
 
     async def verify_account(self, account_row) -> SessionCheckResult:
         result = await self.verify_session_file(Path(account_row["session_file"]))
@@ -152,12 +154,22 @@ class CollectionManager:
             self.db.set_task_result_file(task_id, str(output_path))
             await self._emit_complete(task_id)
             return
+        except Exception as exc:  # noqa: BLE001
+            self.db.mark_collect_task_status(task_id, "error", last_error=self._short_error(exc))
+            try:
+                output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
+                self.db.set_task_result_file(task_id, str(output_path))
+            except Exception:  # noqa: BLE001
+                pass
+            await self._emit_complete(task_id)
+            return
 
     async def _worker(self, task_id: int, queue: asyncio.Queue, account_row) -> None:
         account_id = account_row["id"]
         session_file = Path(account_row["session_file"])
-        client = self._build_client(session_file)
+        client: TelegramClient | None = None
         try:
+            client = self._build_client(session_file)
             await client.connect()
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
@@ -175,6 +187,10 @@ class CollectionManager:
                     await self._process_channel(task_id, client, account_id, task_channel)
                 finally:
                     queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.db.update_account_status(account_id, status="error", last_error=self._short_error(exc))
         finally:
             refreshed = self.db.get_account(account_id)
             next_status = "active"
@@ -184,7 +200,8 @@ class CollectionManager:
                 if refreshed["status"] in {"unauthorized", "error"}:
                     next_status = refreshed["status"]
             self.db.update_account_status(account_id, status=next_status, last_error=last_error)
-            await client.disconnect()
+            if client is not None:
+                await client.disconnect()
 
     async def _process_channel(self, task_id: int, client: TelegramClient, account_id: int, task_channel) -> None:
         task_channel_id = task_channel["id"]
@@ -271,56 +288,59 @@ class CollectionManager:
         compat_file = session_file.with_name(f"{session_file.stem}.compat.session")
         shutil.copy2(session_file, compat_file)
 
-        with sqlite3.connect(compat_file) as conn:
-            conn.row_factory = sqlite3.Row
-            columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
-            if not columns:
-                raise ValueError("session 文件里缺少 sessions 表")
-            row = conn.execute("SELECT * FROM sessions LIMIT 1").fetchone()
-            if row is None:
-                raise ValueError("session 文件里没有可用的登录记录")
-            row_dict = {key: row[key] for key in row.keys()}
-            required = {
-                "dc_id": row_dict.get("dc_id"),
-                "server_address": row_dict.get("server_address"),
-                "port": row_dict.get("port"),
-                "auth_key": row_dict.get("auth_key"),
-                "takeout_id": row_dict.get("takeout_id"),
-            }
-            if required["dc_id"] is None or required["server_address"] is None or required["port"] is None or required["auth_key"] is None:
-                raise ValueError("session 文件缺少 Telethon 必要字段")
+        try:
+            with sqlite3.connect(compat_file) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+                if not columns:
+                    raise ValueError("session 文件里缺少 sessions 表")
+                row = conn.execute("SELECT * FROM sessions LIMIT 1").fetchone()
+                if row is None:
+                    raise ValueError("session 文件里没有可用的登录记录")
+                row_dict = {key: row[key] for key in row.keys()}
+                required = {
+                    "dc_id": row_dict.get("dc_id"),
+                    "server_address": row_dict.get("server_address"),
+                    "port": row_dict.get("port"),
+                    "auth_key": row_dict.get("auth_key"),
+                    "takeout_id": row_dict.get("takeout_id"),
+                }
+                if required["dc_id"] is None or required["server_address"] is None or required["port"] is None or required["auth_key"] is None:
+                    raise ValueError("session 文件缺少 Telethon 必要字段")
 
-            conn.execute("ALTER TABLE sessions RENAME TO sessions_backup")
-            conn.execute(
-                """
-                CREATE TABLE sessions (
-                    dc_id INTEGER PRIMARY KEY,
-                    server_address TEXT,
-                    port INTEGER,
-                    auth_key BLOB,
-                    takeout_id INTEGER
+                conn.execute("ALTER TABLE sessions RENAME TO sessions_backup")
+                conn.execute(
+                    """
+                    CREATE TABLE sessions (
+                        dc_id INTEGER PRIMARY KEY,
+                        server_address TEXT,
+                        port INTEGER,
+                        auth_key BLOB,
+                        takeout_id INTEGER
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute(
-                "INSERT INTO sessions (dc_id, server_address, port, auth_key, takeout_id) VALUES (?, ?, ?, ?, ?)",
-                (
-                    required["dc_id"],
-                    required["server_address"],
-                    required["port"],
-                    required["auth_key"],
-                    required["takeout_id"],
-                ),
-            )
-            conn.execute("DROP TABLE sessions_backup")
+                conn.execute(
+                    "INSERT INTO sessions (dc_id, server_address, port, auth_key, takeout_id) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        required["dc_id"],
+                        required["server_address"],
+                        required["port"],
+                        required["auth_key"],
+                        required["takeout_id"],
+                    ),
+                )
+                conn.execute("DROP TABLE sessions_backup")
 
-            version_exists = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='version'"
-            ).fetchone()
-            if version_exists:
-                conn.execute("DELETE FROM version")
-                conn.execute("INSERT INTO version (version) VALUES (7)")
-            conn.commit()
+                version_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='version'"
+                ).fetchone()
+                if version_exists:
+                    conn.execute("DELETE FROM version")
+                    conn.execute("INSERT INTO version (version) VALUES (7)")
+                conn.commit()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(f"session 文件已损坏或不是有效 SQLite：{self._short_error(exc)}") from exc
         return compat_file
 
     @staticmethod
