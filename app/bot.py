@@ -187,7 +187,7 @@ class DmCollectorBot:
             task_id = int(parts[2])
             page = int(parts[3]) if len(parts) > 3 else 1
             source = parts[4] if len(parts) > 4 else "tasks"
-            self.db.stop_collect_task_now(task_id, reason="管理员手动停止任务，账号已释放")
+            self.db.stop_collect_task_now(task_id, reason="管理员手动停止任务，已保留当前已采集结果并释放账号")
             runner = self.task_runners.get(task_id)
             if runner and not runner.done():
                 runner.cancel()
@@ -1315,6 +1315,8 @@ class DmCollectorBot:
             lines.append(f"筛选规则：<code>{html.escape(filters_text, quote=False)}</code>")
         if task["last_error"] and task["status"] in {"error", "stopped"}:
             lines.append(f"错误：<code>{html.escape(str(task['last_error']), quote=False)}</code>")
+        if task["status"] == "stopped" and int(task["total_messages_scanned"] or 0) > 0:
+            lines.append("提示：<code>已保留当前已采集结果，可直接点击“导出结果”</code>")
         if visible_channels:
             lines.append("")
             lines.append(f"<b>{unit}子任务</b>")
