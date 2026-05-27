@@ -26,7 +26,10 @@ from telegram.ext import (
 from .collector import CollectionManager
 from .config import Settings
 from .database import Database
-from .emoji import premium_button, status_badge, tg_emoji
+from .dm_account_checker import DmAccountChecker
+from .dm_repository import DmRepository
+from .dm_sender import DmSenderManager
+from .emoji import premium_button, restriction_badge, status_badge, tg_emoji
 from .version import __version__
 
 logger = logging.getLogger(__name__)
@@ -36,12 +39,15 @@ class DmCollectorBot:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.db = Database(settings.db_path)
+        self.dm_repository = DmRepository(self.db)
         self.collection_manager = CollectionManager(
             settings,
             self.db,
             on_progress=self._on_task_progress,
             on_complete=self._on_task_complete,
         )
+        self.dm_account_checker = DmAccountChecker(self.dm_repository, self.collection_manager)
+        self.dm_sender = DmSenderManager(self.dm_repository)
         self.application = Application.builder().token(settings.bot_token).build()
         self.user_states: dict[int, dict] = {}
         self.task_runners: dict[int, asyncio.Task] = {}
@@ -538,12 +544,14 @@ class DmCollectorBot:
     async def _show_accounts_menu(self, query, page: int = 1) -> None:
         count = self.db.count_accounts()
         stats = self.db.get_account_status_counts()
+        restriction_stats = self.dm_repository.get_account_restriction_summary_counts()
         text = (
             f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
             f"当前存活账号：<code>{count}</code>\n"
-            f"可用：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n"
+            f"运行中：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n"
+            f"状态：无限制 <code>{restriction_stats['unrestricted']}</code> · 受限 <code>{restriction_stats['limited']}</code> · 冻结 <code>{restriction_stats['frozen']}</code> · 待检测 <code>{restriction_stats['unknown']}</code>\n"
             f"待清理无效：<code>{stats['invalid']}</code>\n\n"
-            f"上传 .session 后会立即做一次登录验证；损坏 / 封禁 / 失效账号会自动清掉。"
+            f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。"
         )
         keyboard = [
             [
@@ -551,7 +559,7 @@ class DmCollectorBot:
                 premium_button("账号列表", self.settings.emoji_list_id, callback_data=f"account:list:{page}"),
             ],
             [
-                premium_button("一键检测全部", self.settings.emoji_stats_id, callback_data="account:check_all"),
+                premium_button("一键检查状态", self.settings.emoji_stats_id, callback_data="account:check_all"),
                 premium_button("一键清理无效", self.settings.emoji_error_id, callback_data="account:purge_invalid"),
             ],
             [
@@ -577,11 +585,13 @@ class DmCollectorBot:
         else:
             for row in rows:
                 label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
-                lines.append(f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {status_badge(row['status'])}")
+                lines.append(
+                    f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {status_badge(row['status'])} · {restriction_badge(row['restriction_status'])}"
+                )
 
         keyboard: list[list] = [
             [
-                premium_button("一键检测全部", self.settings.emoji_stats_id, callback_data="account:check_all"),
+                premium_button("一键检查状态", self.settings.emoji_stats_id, callback_data="account:check_all"),
                 premium_button("一键清理无效", self.settings.emoji_error_id, callback_data="account:purge_invalid"),
             ]
         ]
@@ -622,14 +632,15 @@ class DmCollectorBot:
             await self._show_account_detail(query, account_id)
             return
         self.db.update_account_status(account_id, status="checking", last_error=None)
+        self.dm_repository.update_account_restriction(account_id, restriction_status="checking", restriction_reason="正在检测")
         await self._safe_edit(query, self._format_account_text(self.db.get_account(account_id)), self._build_account_detail_keyboard(account_id))
-        result = await self.collection_manager.verify_account(account)
+        result = await self.dm_account_checker.check_account_status(account)
         account = self.db.get_account(account_id)
         if not account:
             await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
             return
-        issue_text = self._humanize_account_issue(result.status, result.last_error)
-        if self._should_auto_purge_account(result.status, result.last_error):
+        issue_text = result.summary
+        if result.restriction_status == "session_invalid":
             label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
             self._purge_account_files(account)
             self.db.delete_account(account_id)
@@ -648,7 +659,10 @@ class DmCollectorBot:
             await self._safe_edit(query, self._not_found_text("当前没有可检测的账号。"), self._single_back_keyboard("menu:accounts"))
             return
 
-        kept_active = 0
+        unrestricted = 0
+        limited = 0
+        frozen = 0
+        unknown = 0
         deleted_broken: list[str] = []
         deleted_banned: list[str] = []
         kept_other_errors: list[str] = []
@@ -660,7 +674,7 @@ class DmCollectorBot:
 
         async def _verify_one(account_row):
             async with semaphore:
-                result = await self.collection_manager.verify_account(account_row)
+                result = await self.dm_account_checker.check_account_status(account_row)
                 refreshed = self.db.get_account(account_row["id"])
                 return account_row, refreshed, result
 
@@ -670,7 +684,10 @@ class DmCollectorBot:
                 total=total_checked,
                 processed=0,
                 current_label="准备开始",
-                kept_active=0,
+                unrestricted=0,
+                limited=0,
+                frozen=0,
+                unknown=0,
                 deleted_broken=0,
                 deleted_banned=0,
                 kept_other_errors=0,
@@ -690,10 +707,14 @@ class DmCollectorBot:
             processed += 1
             account = refreshed or original
             label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
-            issue_text = self._humanize_account_issue(result.status, result.last_error)
-            if result.status == "active":
-                kept_active += 1
-            elif self._should_auto_purge_account(result.status, result.last_error):
+            issue_text = result.summary
+            if result.restriction_status == "unrestricted":
+                unrestricted += 1
+            elif result.restriction_status in {"temp_mutual", "permanent_mutual", "geo_limited", "spam_limited", "restricted"}:
+                limited += 1
+            elif result.restriction_status == "frozen":
+                frozen += 1
+            elif result.restriction_status == "session_invalid":
                 if "损坏" in issue_text:
                     deleted_broken.append(str(label))
                 else:
@@ -702,6 +723,7 @@ class DmCollectorBot:
                     self._purge_account_files(refreshed)
                     self.db.delete_account(refreshed["id"])
             else:
+                unknown += 1
                 kept_other_errors.append(f"{label}｜{issue_text}")
 
             await self._safe_edit(
@@ -710,7 +732,10 @@ class DmCollectorBot:
                     total=total_checked,
                     processed=processed,
                     current_label=str(label),
-                    kept_active=kept_active,
+                    unrestricted=unrestricted,
+                    limited=limited,
+                    frozen=frozen,
+                    unknown=unknown,
                     deleted_broken=len(deleted_broken),
                     deleted_banned=len(deleted_banned),
                     kept_other_errors=len(kept_other_errors),
@@ -726,9 +751,12 @@ class DmCollectorBot:
 
         total_alive = self.db.count_accounts()
         lines = [
-            f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检测完成</b>",
+            f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检查状态完成</b>",
             f"总检测账号：<code>{total_checked}</code>",
-            f"保留可用：<code>{kept_active}</code>",
+            f"无限制：<code>{unrestricted}</code>",
+            f"受限：<code>{limited}</code>",
+            f"冻结：<code>{frozen}</code>",
+            f"待人工确认：<code>{unknown}</code>",
             f"自动删除损坏 session：<code>{len(deleted_broken)}</code>",
             f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
             f"当前列表保留：<code>{total_alive}</code>",
@@ -1302,12 +1330,17 @@ class DmCollectorBot:
             f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>账号详情</b>",
             f"编号：<code>#{display_code}</code>",
             f"名称：<code>{html.escape(str(title), quote=False)}</code>",
-            f"状态：{status_badge(account['status'])}",
+            f"运行：{status_badge(account['status'])}",
+            f"私信状态：{restriction_badge(account['restriction_status'])}",
             f"用户名：<code>{html.escape(str(account['username'] or '-'), quote=False)}</code>",
             f"手机号：<code>{html.escape(str(account['phone'] or '-'), quote=False)}</code>",
             f"User ID：<code>{account['tg_user_id'] or '-'}</code>",
             f"最近检测：<code>{account['last_checked_at'] or '-'}</code>",
         ]
+        if account["restriction_checked_at"]:
+            lines.append(f"状态检测：<code>{account['restriction_checked_at']}</code>")
+        if account["restriction_reason"]:
+            lines.append(f"状态结果：<code>{html.escape(str(account['restriction_reason']), quote=False)}</code>")
         if account["last_error"]:
             friendly = self._humanize_account_issue(account["status"], account["last_error"])
             lines.append(f"结果：<code>{html.escape(friendly, quote=False)}</code>")
@@ -1421,7 +1454,10 @@ class DmCollectorBot:
         total: int,
         processed: int,
         current_label: str,
-        kept_active: int,
+        unrestricted: int,
+        limited: int,
+        frozen: int,
+        unknown: int,
         deleted_broken: int,
         deleted_banned: int,
         kept_other_errors: int,
@@ -1429,16 +1465,19 @@ class DmCollectorBot:
     ) -> str:
         return "\n".join(
             [
-                f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>正在批量检测账号</b>",
+                f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>正在批量检查账号状态</b>",
                 f"进度：<code>{processed}/{total}</code> · 并发：<code>{parallel}</code>",
                 f"最近完成：<code>{html.escape(current_label[:36], quote=False)}</code>",
                 "",
-                f"已确认可用：<code>{kept_active}</code>",
+                f"无限制：<code>{unrestricted}</code>",
+                f"受限：<code>{limited}</code>",
+                f"冻结：<code>{frozen}</code>",
+                f"待确认：<code>{unknown}</code>",
                 f"已删损坏：<code>{deleted_broken}</code>",
                 f"已删封禁/失效：<code>{deleted_banned}</code>",
                 f"其他异常：<code>{kept_other_errors}</code>",
                 "",
-                "账号较多时会持续刷新这里，不是卡住。",
+                "账号较多时会持续刷新这里，包含 SpamBot 检测过程，不是卡住。",
             ]
         )
 

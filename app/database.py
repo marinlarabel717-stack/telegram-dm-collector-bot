@@ -25,6 +25,8 @@ class Database:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
+        from .dm_repository import ensure_dm_schema
+
         with self.lock:
             self.conn.executescript(
                 """
@@ -168,6 +170,7 @@ class Database:
                     self.conn.execute(statement)
                 except sqlite3.OperationalError:
                     pass
+            ensure_dm_schema(self.conn)
             self.conn.commit()
 
     # ---------- basic dm storage ----------

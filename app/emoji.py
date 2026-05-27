@@ -40,6 +40,19 @@ STATUS_META = {
     "queued": (DEFAULT_EMOJI_IDS["waiting"], "🕜", "排队中"),
 }
 
+RESTRICTION_META = {
+    "unknown": (DEFAULT_EMOJI_IDS["waiting"], "🕜", "待检测"),
+    "checking": (DEFAULT_EMOJI_IDS["stats"], "🧠", "检测中"),
+    "unrestricted": (DEFAULT_EMOJI_IDS["completed"], "🟢", "无限制"),
+    "temp_mutual": (DEFAULT_EMOJI_IDS["timeout"], "⏱️", "临时双向"),
+    "permanent_mutual": (DEFAULT_EMOJI_IDS["error"], "❌", "永久双向"),
+    "geo_limited": (DEFAULT_EMOJI_IDS["upload"], "📥", "地区限制"),
+    "frozen": (DEFAULT_EMOJI_IDS["progress"], "🎚️", "冻结"),
+    "spam_limited": (DEFAULT_EMOJI_IDS["error"], "❌", "官方限流"),
+    "restricted": (DEFAULT_EMOJI_IDS["error"], "❌", "受限"),
+    "session_invalid": (DEFAULT_EMOJI_IDS["error"], "❌", "已失效"),
+}
+
 
 def tg_emoji(emoji_id: str, alt: str) -> str:
     safe_id = html.escape(str(emoji_id), quote=True)
@@ -57,4 +70,9 @@ def premium_button(text: str, emoji_id: str, **kwargs) -> InlineKeyboardButton:
 
 def status_badge(status: str) -> str:
     emoji_id, alt, label = STATUS_META.get(status, STATUS_META["error"])
+    return f"{tg_emoji(emoji_id, alt)} <b>{label}</b>"
+
+
+def restriction_badge(status: str | None) -> str:
+    emoji_id, alt, label = RESTRICTION_META.get(status or "unknown", RESTRICTION_META["unknown"])
     return f"{tg_emoji(emoji_id, alt)} <b>{label}</b>"
