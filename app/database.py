@@ -336,6 +336,12 @@ class Database:
                 "SELECT * FROM accounts ORDER BY updated_at DESC, id DESC"
             ).fetchall()
 
+    def list_invalid_accounts(self) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM accounts WHERE status NOT IN ('active','checking','collecting') ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
+
     def count_accounts(self) -> int:
         with self.lock:
             return self.conn.execute("SELECT COUNT(*) FROM accounts WHERE status IN ('active','checking','collecting')").fetchone()[0]
@@ -345,7 +351,10 @@ class Database:
             rows = self.conn.execute(
                 "SELECT status, COUNT(*) AS total FROM accounts WHERE status IN ('active','checking','collecting') GROUP BY status"
             ).fetchall()
-        result = {"active": 0, "checking": 0, "collecting": 0}
+            invalid_total = self.conn.execute(
+                "SELECT COUNT(*) FROM accounts WHERE status NOT IN ('active','checking','collecting')"
+            ).fetchone()[0]
+        result = {"active": 0, "checking": 0, "collecting": 0, "invalid": int(invalid_total)}
         for row in rows:
             result[str(row["status"])] = int(row["total"])
         return result

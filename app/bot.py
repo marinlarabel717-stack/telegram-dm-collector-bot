@@ -135,6 +135,9 @@ class DmCollectorBot:
         if data == "account:check_all":
             await self._check_all_accounts(query)
             return
+        if data == "account:purge_invalid":
+            await self._purge_invalid_accounts(query)
+            return
         if data.startswith("account:check:"):
             account_id = int(data.split(":")[-1])
             await self._check_account(query, account_id)
@@ -437,12 +440,16 @@ class DmCollectorBot:
         text = (
             f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
             f"当前存活账号：<code>{count}</code>\n"
-            f"可用：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n\n"
+            f"可用：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n"
+            f"待清理无效：<code>{stats['invalid']}</code>\n\n"
             f"上传 .session 后会立即做一次登录验证；损坏 / 封禁 / 失效账号会自动清掉。"
         )
         keyboard = [
             [premium_button("上传 session", self.settings.emoji_upload_id, callback_data="account:upload")],
-            [premium_button("批量检测", self.settings.emoji_stats_id, callback_data="account:check_all")],
+            [
+                premium_button("一键检测全部", self.settings.emoji_stats_id, callback_data="account:check_all"),
+                premium_button("一键清理无效", self.settings.emoji_error_id, callback_data="account:purge_invalid"),
+            ],
             [premium_button("账号列表", self.settings.emoji_list_id, callback_data=f"account:list:{page}")],
             [premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main")],
         ]
@@ -466,7 +473,12 @@ class DmCollectorBot:
                 label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
                 lines.append(f"• #{row['id']} {html.escape(str(label), quote=False)} · {status_badge(row['status'])}")
 
-        keyboard: list[list] = []
+        keyboard: list[list] = [
+            [
+                premium_button("一键检测全部", self.settings.emoji_stats_id, callback_data="account:check_all"),
+                premium_button("一键清理无效", self.settings.emoji_error_id, callback_data="account:purge_invalid"),
+            ]
+        ]
         for row in rows:
             label = row["username"] or row["phone"] or row["session_name"]
             keyboard.append([
@@ -572,6 +584,41 @@ class DmCollectorBot:
             lines.append("")
             lines.append("<b>暂未删除：其他异常</b>")
             for item in kept_other_errors[:8]:
+                lines.append(f"• {html.escape(item, quote=False)}")
+        await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup([
+            [premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1")],
+            [premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts")],
+        ]))
+
+    async def _purge_invalid_accounts(self, query) -> None:
+        rows = self.db.list_invalid_accounts()
+        if not rows:
+            text = (
+                f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>没有可清理的无效账号</b>\n"
+                f"当前列表里只剩存活账号。"
+            )
+            await self._safe_edit(query, text, InlineKeyboardMarkup([
+                [premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1")],
+                [premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts")],
+            ]))
+            return
+
+        deleted_labels: list[str] = []
+        for row in rows:
+            label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
+            deleted_labels.append(str(label))
+            self._purge_account_files(row)
+            self.db.delete_account(row["id"])
+
+        lines = [
+            f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>无效账号已清理</b>",
+            f"已删除数量：<code>{len(deleted_labels)}</code>",
+            f"当前保留存活：<code>{self.db.count_accounts()}</code>",
+        ]
+        if deleted_labels:
+            lines.append("")
+            lines.append("<b>本次已删除</b>")
+            for item in deleted_labels[:10]:
                 lines.append(f"• {html.escape(item, quote=False)}")
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup([
             [premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1")],
