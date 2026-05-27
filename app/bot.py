@@ -1024,12 +1024,11 @@ class DmCollectorBot:
         draft = state.setdefault("draft", {})
         filters_map = draft.setdefault("filters", {})
         if key == "premium_mode":
-            current = str(filters_map.get("premium_mode") or "all")
+            current = str(filters_map.get("premium_mode") or "premium_only")
             next_value = {
-                "all": "premium_only",
                 "premium_only": "non_premium_only",
-                "non_premium_only": "all",
-            }.get(current, "all")
+                "non_premium_only": "premium_only",
+            }.get(current, "premium_only")
             filters_map["premium_mode"] = next_value
         else:
             filters_map[key] = not bool(filters_map.get(key))
@@ -1409,7 +1408,7 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>设置筛选规则</b>",
             f"群组数：<code>{len(draft.get('channels') or [])}</code> · 时间范围：<code>{draft.get('days') or 1}</code> 天",
-            "普通项开启后会排除对应人群；会员项可切换为全部 / 仅会员 / 仅非会员。",
+            "普通项开启后会排除对应人群；会员项可切换为仅会员 / 非会员。",
             "",
             f"• 机器人：<code>{'过滤' if filters['exclude_bots'] else '保留'}</code>",
             f"• 管理员：<code>{'过滤' if filters['exclude_admins'] else '保留'}</code>",
@@ -1911,7 +1910,7 @@ class DmCollectorBot:
             "exclude_admins": False,
             "exclude_no_photo": False,
             "exclude_no_username": False,
-            "premium_mode": "all",
+            "premium_mode": "premium_only",
         }
         if isinstance(raw, str):
             try:
@@ -1922,8 +1921,8 @@ class DmCollectorBot:
             for key in ("exclude_bots", "exclude_admins", "exclude_no_photo", "exclude_no_username"):
                 if key in raw:
                     defaults[key] = bool(raw[key])
-            premium_mode = str(raw.get("premium_mode") or "all")
-            if premium_mode in {"all", "premium_only", "non_premium_only"}:
+            premium_mode = str(raw.get("premium_mode") or "premium_only")
+            if premium_mode in {"premium_only", "non_premium_only"}:
                 defaults["premium_mode"] = premium_mode
         return defaults
 
@@ -1941,16 +1940,14 @@ class DmCollectorBot:
         if filters["premium_mode"] == "premium_only":
             labels.append("仅会员")
         elif filters["premium_mode"] == "non_premium_only":
-            labels.append("仅非会员")
+            labels.append("非会员")
         return "、".join(labels) if labels else empty_label
 
     @staticmethod
     def _premium_mode_label(value: str | None) -> str:
         if value == "premium_only":
             return "仅会员"
-        if value == "non_premium_only":
-            return "仅非会员"
-        return "全部"
+        return "非会员"
 
     def _humanize_account_issue(self, status: str, last_error: str | None) -> str:
         raw = (last_error or "").strip()

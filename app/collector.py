@@ -600,7 +600,7 @@ class CollectionManager:
             "exclude_admins": False,
             "exclude_no_photo": False,
             "exclude_no_username": False,
-            "premium_mode": "all",
+            "premium_mode": "premium_only",
         }
         if not raw:
             return defaults
@@ -611,8 +611,8 @@ class CollectionManager:
         for key in ("exclude_bots", "exclude_admins", "exclude_no_photo", "exclude_no_username"):
             if key in loaded:
                 defaults[key] = bool(loaded[key])
-        premium_mode = str(loaded.get("premium_mode") or "all")
-        if premium_mode in {"all", "premium_only", "non_premium_only"}:
+        premium_mode = str(loaded.get("premium_mode") or "premium_only")
+        if premium_mode in {"premium_only", "non_premium_only"}:
             defaults["premium_mode"] = premium_mode
         return defaults
 
