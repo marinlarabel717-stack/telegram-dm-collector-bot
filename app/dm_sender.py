@@ -171,7 +171,7 @@ class DmSenderManager:
                             recipient_id=recipient_id,
                             action="send",
                             status="failed",
-                            message="官方限速，重试已耗尽",
+                            message=self._append_limit_progress("官方限速，重试已耗尽", success_count, policy),
                             raw_error=f"FloodWait {wait_seconds}s",
                         )
                         logger.warning(compose_log(f"限速重试耗尽｜等待={wait_seconds}s", task_id=task_id, account_id=account_id, recipient=target))
@@ -191,7 +191,7 @@ class DmSenderManager:
                         recipient_id=recipient_id,
                         action="send",
                         status="retry",
-                        message="官方限速，自动等待后重试",
+                        message=self._append_limit_progress("官方限速，自动等待后重试", success_count, policy),
                         raw_error=f"FloodWait {wait_seconds}s",
                     )
                     logger.warning(compose_log(f"命中限速｜等待={wait_seconds}s", task_id=task_id, account_id=account_id, recipient=target))
@@ -217,13 +217,16 @@ class DmSenderManager:
                         frequent_delta=1 if frequent_hit else 0,
                         last_error=error_message,
                     )
+                    log_message = error_message
+                    if frequent_hit:
+                        log_message = self._append_limit_progress(log_message, success_count, policy)
                     self.repository.add_send_log(
                         task_id=task_id,
                         account_id=account_id,
                         recipient_id=recipient_id,
                         action="send",
                         status="failed",
-                        message=error_message,
+                        message=log_message,
                         raw_error=self.collection_manager._short_error(exc),
                     )
                     logger.warning(compose_log(f"发送失败｜{error_code}｜{error_message}", task_id=task_id, account_id=account_id, recipient=target))
@@ -278,7 +281,7 @@ class DmSenderManager:
         return await client.send_message(entity, content)
 
     async def _dispatch_single_payload(self, client, entity, payload: dict, content_type: str, policy: DMTaskPolicy):
-        if content_type == "media":
+        if content_type in {"media", "post"}:
             media_path = Path(str(payload.get("media_path") or "")).expanduser()
             if not media_path.exists():
                 raise FileNotFoundError(f"媒体文件不存在: {media_path}")
@@ -432,3 +435,11 @@ class DmSenderManager:
     async def _emit_complete(self, task_id: int) -> None:
         if self.on_complete:
             await self.on_complete(task_id)
+
+    @staticmethod
+    def _append_limit_progress(message: str, success_count: int, policy: DMTaskPolicy) -> str:
+        limit = int(policy.per_account_success_limit or 0)
+        if limit <= 0:
+            return message
+        current = max(0, int(success_count or 0))
+        return f"{message}[{current}/{limit}]"

@@ -6,6 +6,7 @@ import html
 def content_type_label(content_type: str | None) -> str:
     mapping = {
         "text": "文本",
+        "post": "post 图文",
         "media": "媒体",
         "forward": "频道转发",
     }
@@ -19,11 +20,12 @@ def message_mode_label(message_mode: str | None, *, content_type: str | None = N
 def payload_preview(payload: dict | None, *, content_type: str | None = None, max_len: int = 240) -> str:
     payload = payload or {}
     kind = str(content_type or payload.get("content_type") or "text")
-    if kind == "media":
+    if kind in {"media", "post"}:
         media_kind = str(payload.get("media_kind") or "file")
         file_name = str(payload.get("file_name") or "未命名文件")
         caption = str(payload.get("caption") or "").strip()
-        summary = f"{media_kind}｜{file_name}"
+        summary_prefix = "图文" if kind == "post" else media_kind
+        summary = f"{summary_prefix}｜{file_name}"
         if caption:
             summary += f"｜说明：{caption}"
         if str(payload.get("mode") or "single") == "three_stage":

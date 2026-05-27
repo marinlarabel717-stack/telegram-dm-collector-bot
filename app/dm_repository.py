@@ -131,7 +131,7 @@ def ensure_dm_schema(conn: sqlite3.Connection) -> None:
 class DMExportPaths:
     success_txt: Path
     failed_txt: Path
-    failed_csv: Path
+    report_csv: Path
     pending_txt: Path
 
 
@@ -245,7 +245,7 @@ class DmRepository:
                 SELECT ta.*, a.session_file, a.session_name, a.username, a.phone, a.display_name, a.status AS account_runtime_status,
                        a.restriction_status, a.restriction_reason, a.last_error AS account_last_error
                 FROM dm_task_accounts ta
-                JOIN accounts a ON a.id = ta.account_id
+                LEFT JOIN accounts a ON a.id = ta.account_id
                 WHERE ta.task_id=?
                 ORDER BY ta.id ASC
                 """,
@@ -287,16 +287,45 @@ class DmRepository:
         with self.db.lock:
             return self.db.conn.execute(
                 """
-                SELECT l.*, r.normalized_input, a.username AS account_username, a.phone AS account_phone, a.display_name AS account_display_name
+                SELECT l.*, r.normalized_input, a.username AS account_username, a.phone AS account_phone, a.display_name AS account_display_name,
+                       ta.sent_success_count AS account_sent_success_count, ta.sent_fail_count AS account_sent_fail_count
                 FROM dm_send_logs l
                 LEFT JOIN dm_recipients r ON r.id = l.recipient_id
                 LEFT JOIN accounts a ON a.id = l.account_id
+                LEFT JOIN dm_task_accounts ta ON ta.task_id = l.task_id AND ta.account_id = l.account_id
                 WHERE l.task_id=?
                 ORDER BY l.id DESC
                 LIMIT ?
                 """,
                 (task_id, limit),
             ).fetchall()
+
+    def get_dm_task_failure_summary(self, task_id: int, *, limit: int = 8) -> list[sqlite3.Row]:
+        with self.db.lock:
+            return self.db.conn.execute(
+                """
+                SELECT COALESCE(NULLIF(error_message, ''), NULLIF(error_code, ''), '未知失败') AS reason, COUNT(*) AS total
+                FROM dm_task_recipients
+                WHERE task_id=? AND status='failed'
+                GROUP BY COALESCE(NULLIF(error_message, ''), NULLIF(error_code, ''), '未知失败')
+                ORDER BY total DESC, reason ASC
+                LIMIT ?
+                """,
+                (task_id, limit),
+            ).fetchall()
+
+    def clear_dm_finished_tasks(self) -> int:
+        with self.db.lock:
+            rows = self.db.conn.execute(
+                "SELECT id FROM dm_tasks WHERE status IN ('completed','stopped','error')"
+            ).fetchall()
+            task_ids = [int(row["id"]) for row in rows]
+            if not task_ids:
+                return 0
+            placeholders = ",".join("?" for _ in task_ids)
+            self.db.conn.execute(f"DELETE FROM dm_tasks WHERE id IN ({placeholders})", task_ids)
+            self.db.conn.commit()
+            return len(task_ids)
 
     def get_dm_task_processed_count(self, task_id: int) -> int:
         with self.db.lock:
@@ -555,10 +584,14 @@ class DmRepository:
         export_dir.mkdir(parents=True, exist_ok=True)
         success_txt = export_dir / f"dm_task_{task_id}_success.txt"
         failed_txt = export_dir / f"dm_task_{task_id}_failed.txt"
-        failed_csv = export_dir / f"dm_task_{task_id}_failed.csv"
+        report_csv = export_dir / f"dm_task_{task_id}_report.csv"
         pending_txt = export_dir / f"dm_task_{task_id}_pending.txt"
 
         with self.db.lock:
+            task_row = self.db.conn.execute(
+                "SELECT * FROM dm_tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
             success_rows = self.db.conn.execute(
                 """
                 SELECT r.normalized_input
@@ -589,13 +622,85 @@ class DmRepository:
                 """,
                 (task_id,),
             ).fetchall()
+            failure_summary_rows = self.db.conn.execute(
+                """
+                SELECT COALESCE(NULLIF(tr.error_message, ''), NULLIF(tr.error_code, ''), '未知失败') AS reason, COUNT(*) AS total
+                FROM dm_task_recipients tr
+                WHERE tr.task_id=? AND tr.status='failed'
+                GROUP BY COALESCE(NULLIF(tr.error_message, ''), NULLIF(tr.error_code, ''), '未知失败')
+                ORDER BY total DESC, reason ASC
+                """,
+                (task_id,),
+            ).fetchall()
+            account_rows = self.db.conn.execute(
+                """
+                SELECT ta.account_id,
+                       COALESCE(NULLIF(a.username, ''), NULLIF(a.phone, ''), NULLIF(a.display_name, ''), NULLIF(a.session_name, ''), '#' || ta.account_id) AS account_label,
+                       ta.sent_success_count,
+                       ta.sent_fail_count,
+                       ta.status,
+                       ta.last_error
+                FROM dm_task_accounts ta
+                JOIN accounts a ON a.id = ta.account_id
+                WHERE ta.task_id=?
+                ORDER BY ta.sent_success_count DESC, ta.account_id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+            log_rows = self.db.conn.execute(
+                """
+                SELECT l.created_at, l.action, l.status,
+                       COALESCE(NULLIF(a.username, ''), NULLIF(a.phone, ''), NULLIF(a.display_name, ''), NULLIF(a.session_name, ''), CASE WHEN l.account_id IS NOT NULL THEN '#' || l.account_id ELSE '-' END) AS account_label,
+                       COALESCE(r.normalized_input, '-') AS normalized_input,
+                       l.message,
+                       l.raw_error
+                FROM dm_send_logs l
+                LEFT JOIN accounts a ON a.id = l.account_id
+                LEFT JOIN dm_recipients r ON r.id = l.recipient_id
+                WHERE l.task_id=?
+                ORDER BY l.id ASC
+                """,
+                (task_id,),
+            ).fetchall()
 
         success_txt.write_text("\n".join(str(row["normalized_input"]) for row in success_rows), encoding="utf-8-sig")
         failed_txt.write_text("\n".join(str(row["normalized_input"]) for row in failed_rows), encoding="utf-8-sig")
         pending_txt.write_text("\n".join(str(row["normalized_input"]) for row in pending_rows), encoding="utf-8-sig")
-        with failed_csv.open("w", newline="", encoding="utf-8-sig") as fp:
+        with report_csv.open("w", newline="", encoding="utf-8-sig") as fp:
             writer = csv.writer(fp)
-            writer.writerow(["target", "error_code", "error_message", "retry_count"])
+            writer.writerow(["section", "field_1", "field_2", "field_3", "field_4", "field_5"])
+            if task_row is not None:
+                pending_count = max(
+                    0,
+                    int(task_row["total_targets"] or 0)
+                    - int(task_row["success_count"] or 0)
+                    - int(task_row["failed_count"] or 0)
+                    - int(task_row["skipped_count"] or 0),
+                )
+                writer.writerow(["overview", "task_id", task_id, "status", str(task_row["status"] or "-"), "-"])
+                writer.writerow(["overview", "success_count", int(task_row["success_count"] or 0), "failed_count", int(task_row["failed_count"] or 0), "-"])
+                writer.writerow(["overview", "pending_count", pending_count, "skipped_count", int(task_row["skipped_count"] or 0), "-"])
+                writer.writerow(["overview", "worker_count", int(task_row["worker_count"] or 0), "active_accounts", int(task_row["active_accounts"] or 0), "-"])
+            for row in failure_summary_rows:
+                writer.writerow(["failure_reason", row["reason"], int(row["total"]), "-", "-", "-"])
+            for row in account_rows:
+                writer.writerow([
+                    "account_stats",
+                    row["account_label"],
+                    int(row["sent_success_count"] or 0),
+                    int(row["sent_fail_count"] or 0),
+                    str(row["status"] or "-"),
+                    str(row["last_error"] or ""),
+                ])
             for row in failed_rows:
-                writer.writerow([row["normalized_input"], row["error_code"], row["error_message"], row["retry_count"]])
-        return DMExportPaths(success_txt=success_txt, failed_txt=failed_txt, failed_csv=failed_csv, pending_txt=pending_txt)
+                writer.writerow(["failed_target", row["normalized_input"], row["error_code"], row["error_message"], row["retry_count"], "-"])
+            for row in log_rows:
+                writer.writerow([
+                    "log",
+                    row["created_at"],
+                    row["account_label"],
+                    row["normalized_input"],
+                    f"{row['action']}:{row['status']}",
+                    str(row["message"] or row["raw_error"] or "-"),
+                ])
+        return DMExportPaths(success_txt=success_txt, failed_txt=failed_txt, report_csv=report_csv, pending_txt=pending_txt)
