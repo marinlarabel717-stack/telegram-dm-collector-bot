@@ -29,6 +29,7 @@ USERNAME_RE = re.compile(r"(?<![\w@])@([A-Za-z0-9_]{5,32})")
 INVITE_LINK_RE = re.compile(r"(?:https?://)?t\.me/(?:joinchat/|\+)([A-Za-z0-9_-]+)")
 GROUP_JOIN_BATCH_LIMIT = 5
 GROUP_JOIN_COOLDOWN_SECONDS = 300
+PROGRESS_FLUSH_EVERY_MESSAGES = 50
 
 
 @dataclass(slots=True)
@@ -310,6 +311,14 @@ class CollectionManager:
                     source_channel=channel,
                     source_message_id=getattr(message, "id", None),
                 )
+                if scanned_messages % PROGRESS_FLUSH_EVERY_MESSAGES == 0:
+                    await self._flush_task_progress(
+                        task_id,
+                        task_channel_id,
+                        scanned_messages=scanned_messages,
+                        hits=total_hits,
+                        unique_hits=inserted_hits,
+                    )
         except FloodWaitError as exc:
             status = "error"
             last_error = f"FloodWait {exc.seconds}s"
@@ -330,13 +339,7 @@ class CollectionManager:
             unique_hits=inserted_hits,
             last_error=last_error,
         )
-        self.db.increment_task_metrics(
-            task_id,
-            scanned_delta=scanned_messages,
-            hits_delta=total_hits,
-            finished_delta=1,
-            unique_total=unique_total,
-        )
+        self.db.sync_task_metrics(task_id, unique_total=unique_total)
         await self._emit_progress(task_id)
 
     async def _process_group(self, task_id: int, client: TelegramClient, account_id: int, task_channel) -> bool:
@@ -400,6 +403,15 @@ class CollectionManager:
                     has_photo=has_photo,
                     spoke_at=message_date.isoformat() if message_date else None,
                 )
+                if scanned_messages % PROGRESS_FLUSH_EVERY_MESSAGES == 0:
+                    await self._flush_task_progress(
+                        task_id,
+                        task_channel_id,
+                        scanned_messages=scanned_messages,
+                        hits=total_hits,
+                        unique_hits=inserted_hits,
+                        unique_total=self.db.count_unique_usernames(task_id),
+                    )
         except FloodWaitError as exc:
             status = "error"
             last_error = f"FloodWait {exc.seconds}s"
@@ -423,15 +435,28 @@ class CollectionManager:
             unique_hits=inserted_hits,
             last_error=last_error,
         )
-        self.db.increment_task_metrics(
-            task_id,
-            scanned_delta=scanned_messages,
-            hits_delta=total_hits,
-            finished_delta=1,
-            unique_total=unique_total,
-        )
+        self.db.sync_task_metrics(task_id, unique_total=unique_total)
         await self._emit_progress(task_id)
         return joined_now
+
+    async def _flush_task_progress(
+        self,
+        task_id: int,
+        task_channel_id: int,
+        *,
+        scanned_messages: int,
+        hits: int,
+        unique_hits: int,
+        unique_total: int | None = None,
+    ) -> None:
+        self.db.update_task_channel_progress(
+            task_channel_id,
+            scanned_messages=scanned_messages,
+            hits=hits,
+            unique_hits=unique_hits,
+        )
+        self.db.sync_task_metrics(task_id, unique_total=unique_total)
+        await self._emit_progress(task_id)
 
     def _build_client(self, session_file: Path) -> TelegramClient:
         session_base = str(session_file)

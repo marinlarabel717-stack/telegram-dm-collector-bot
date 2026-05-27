@@ -654,6 +654,30 @@ class Database:
             )
             self.conn.commit()
 
+    def update_task_channel_progress(
+        self,
+        task_channel_id: int,
+        *,
+        scanned_messages: int,
+        hits: int,
+        unique_hits: int,
+        last_error: str | None = None,
+    ) -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE collect_task_channels SET
+                    scanned_messages=?,
+                    hits=?,
+                    unique_hits=?,
+                    last_error=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (scanned_messages, hits, unique_hits, last_error, task_channel_id),
+            )
+            self.conn.commit()
+
     def increment_task_metrics(
         self,
         task_id: int,
@@ -688,6 +712,46 @@ class Database:
                     WHERE id=?
                     """,
                     (scanned_delta, hits_delta, finished_delta, unique_total, task_id),
+                )
+            self.conn.commit()
+
+    def sync_task_metrics(self, task_id: int, *, unique_total: int | None = None) -> None:
+        with self.lock:
+            stats = self.conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(scanned_messages), 0) AS total_scanned,
+                    COALESCE(SUM(hits), 0) AS total_hits,
+                    COALESCE(SUM(CASE WHEN status IN ('completed', 'error', 'stopped') THEN 1 ELSE 0 END), 0) AS finished_channels
+                FROM collect_task_channels
+                WHERE task_id=?
+                """,
+                (task_id,),
+            ).fetchone()
+            if unique_total is None:
+                self.conn.execute(
+                    """
+                    UPDATE collect_tasks SET
+                        total_messages_scanned=?,
+                        total_hits=?,
+                        finished_channels=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (stats["total_scanned"], stats["total_hits"], stats["finished_channels"], task_id),
+                )
+            else:
+                self.conn.execute(
+                    """
+                    UPDATE collect_tasks SET
+                        total_messages_scanned=?,
+                        total_hits=?,
+                        finished_channels=?,
+                        unique_hits=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (stats["total_scanned"], stats["total_hits"], stats["finished_channels"], unique_total, task_id),
                 )
             self.conn.commit()
 
