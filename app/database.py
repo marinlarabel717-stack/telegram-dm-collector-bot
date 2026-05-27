@@ -326,20 +326,20 @@ class Database:
     def list_accounts(self, *, limit: int = 20, offset: int = 0) -> list[sqlite3.Row]:
         with self.lock:
             return self.conn.execute(
-                "SELECT * FROM accounts WHERE status IN ('active','checking','collecting') ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM accounts WHERE status IN ('active','checking','collecting') ORDER BY id DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
 
     def list_all_accounts(self) -> list[sqlite3.Row]:
         with self.lock:
             return self.conn.execute(
-                "SELECT * FROM accounts ORDER BY updated_at DESC, id DESC"
+                "SELECT * FROM accounts ORDER BY id DESC"
             ).fetchall()
 
     def list_invalid_accounts(self) -> list[sqlite3.Row]:
         with self.lock:
             return self.conn.execute(
-                "SELECT * FROM accounts WHERE status NOT IN ('active','checking','collecting') ORDER BY updated_at DESC, id DESC"
+                "SELECT * FROM accounts WHERE status NOT IN ('active','checking','collecting') ORDER BY id DESC"
             ).fetchall()
 
     def count_accounts(self) -> int:
@@ -366,7 +366,7 @@ class Database:
     def get_active_accounts(self) -> list[sqlite3.Row]:
         with self.lock:
             return self.conn.execute(
-                "SELECT * FROM accounts WHERE status='active' ORDER BY updated_at DESC, id DESC"
+                "SELECT * FROM accounts WHERE status='active' ORDER BY id DESC"
             ).fetchall()
 
     def update_account_status(
