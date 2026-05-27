@@ -797,13 +797,13 @@ class DmCollectorBot:
         else:
             for task in tasks:
                 lines.append(
-                    f"\n• 任务 #{task['id']} · {status_badge(task['status'])} · 频道 <code>{task['finished_channels']}/{task['total_channels']}</code> · 去重 <code>{task['unique_hits']}</code>"
+                    f"\n• 任务 #{self._task_display_code(task)} · {status_badge(task['status'])} · 频道 <code>{task['finished_channels']}/{task['total_channels']}</code> · 去重 <code>{task['unique_hits']}</code>"
                 )
         keyboard = []
         row_buffer = []
         for task in tasks:
             row_buffer.append(
-                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}:{page}:tasks")
+                premium_button(f"查看任务 #{self._task_display_code(task)}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}:{page}:tasks")
             )
             if len(row_buffer) == 2:
                 keyboard.append(row_buffer)
@@ -848,13 +848,13 @@ class DmCollectorBot:
         else:
             for task in tasks:
                 lines.append(
-                    f"\n• 任务 #{task['id']} · {status_badge(task['status'])} · 去重 <code>{task['unique_hits']}</code>"
+                    f"\n• 任务 #{self._task_display_code(task)} · {status_badge(task['status'])} · 去重 <code>{task['unique_hits']}</code>"
                 )
         keyboard = []
         row_buffer = []
         for task in tasks:
             row_buffer.append(
-                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}:{page}:history")
+                premium_button(f"查看任务 #{self._task_display_code(task)}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}:{page}:history")
             )
             if len(row_buffer) == 2:
                 keyboard.append(row_buffer)
@@ -1102,8 +1102,9 @@ class DmCollectorBot:
             return self._not_found_text("任务不存在或已被删除。")
         channels = self.db.list_collect_task_channels(task_id)
         visible_channels = [item for item in channels if item["status"] != "completed"]
+        display_code = self._task_display_code(task)
         lines = [
-            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>任务 #{task_id}</b> <code>v{__version__}</code>",
+            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>任务 #{display_code}</b> <code>v{__version__}</code>",
             f"状态：{status_badge(task['status'])}",
             f"时间范围：最近 <code>{task['days_limit']}</code> 天",
             f"账号数：<code>{task['account_count']}</code> · 并发：<code>{task['worker_count']}</code>",
@@ -1382,6 +1383,15 @@ class DmCollectorBot:
         account_id = int(account_or_id["id"] if hasattr(account_or_id, "keys") else account_or_id)
         return self._account_display_map().get(account_id, account_id)
 
+    def _task_display_map(self) -> dict[int, int]:
+        rows = self.db.list_collect_tasks(limit=1000000, offset=0, history=True)
+        rows.sort(key=lambda row: int(row["id"]))
+        return {int(row["id"]): index for index, row in enumerate(rows, start=1)}
+
+    def _task_display_code(self, task_or_id) -> int:
+        task_id = int(task_or_id["id"] if hasattr(task_or_id, "keys") else task_or_id)
+        return self._task_display_map().get(task_id, task_id)
+
     # ---------- helpers ----------
     async def _send_dm_exports(self, chat_id: int) -> None:
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
@@ -1410,7 +1420,8 @@ class DmCollectorBot:
         path = task["result_file_path"]
         if not path or not Path(path).exists():
             path = str(self.db.export_task_usernames_txt(task_id, self.settings.export_dir))
-        caption_prefix = "采集结果已生成" if announce else f"任务 #{task_id} 结果导出"
+        display_code = self._task_display_code(task)
+        caption_prefix = "采集结果已生成" if announce else f"任务 #{display_code} 结果导出"
         with Path(path).open("rb") as fp:
             await self.application.bot.send_document(
                 chat_id=chat_id,
