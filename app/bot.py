@@ -157,7 +157,7 @@ class DmCollectorBot:
             await self._start_collect_wizard(query, update.effective_user.id)
             return
         if data == "collect:new:group":
-            await self._show_collect_group_placeholder(query)
+            await self._start_group_collect_wizard(query, update.effective_user.id)
             return
         if data == "collect:tasks":
             await self._show_task_list(query, page=1)
@@ -213,6 +213,13 @@ class DmCollectorBot:
             self._clear_state(update.effective_user.id)
             await self._safe_edit(query, self._build_welcome_text(update.effective_user.id), self._build_main_menu(update.effective_user.id))
             return
+        if data.startswith("wizard:gflt:toggle:"):
+            key = data.split(":")[-1]
+            await self._toggle_group_filter(query, update.effective_user.id, key)
+            return
+        if data == "wizard:gflt:done":
+            await self._wizard_finish_group_filters(query, update.effective_user.id)
+            return
         if data.startswith("wizard:days:"):
             days = int(data.split(":")[-1])
             await self._wizard_set_days(query, update.effective_user.id, days)
@@ -259,7 +266,7 @@ class DmCollectorBot:
         file_name = (document.file_name or "").lower()
         state = self.user_states.get(update.effective_user.id) or {}
         if file_name.endswith(".txt"):
-            await self._handle_channel_txt_upload(update, document, state)
+            await self._handle_target_txt_upload(update, document, state)
             return
         if not (file_name.endswith(".session") or file_name.endswith(".zip")):
             return
@@ -369,16 +376,18 @@ class DmCollectorBot:
             reply_markup=self._single_back_keyboard("account:list:1"),
         )
 
-    async def _handle_channel_txt_upload(self, update: Update, document, state: dict) -> None:
-        if state.get("mode") != "await_channels":
+    async def _handle_target_txt_upload(self, update: Update, document, state: dict) -> None:
+        mode = state.get("mode")
+        if mode not in {"await_channels", "await_group_targets"}:
             await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_idea_id, '💡')} 频道 txt 只在 <b>新建采集任务</b> 时使用。先点“新建采集任务”，再上传 txt。",
+                f"{tg_emoji(self.settings.emoji_idea_id, '💡')} 这个 txt 只在 <b>新建采集任务</b> 时使用。先点“新建采集任务”，再上传 txt。",
                 parse_mode=ParseMode.HTML,
             )
             return
 
+        processing_text = "已收到群组文件，正在读取并解析，请稍等……" if mode == "await_group_targets" else "已收到频道文件，正在读取并解析，请稍等……"
         await update.effective_message.reply_text(
-            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 已收到频道文件，正在读取并解析，请稍等……",
+            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} {processing_text}",
             parse_mode=ParseMode.HTML,
         )
         await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
@@ -388,18 +397,20 @@ class DmCollectorBot:
             text = bytes(raw_bytes).decode("utf-8")
         except UnicodeDecodeError:
             text = bytes(raw_bytes).decode("utf-8-sig", errors="ignore")
-        channels = self._parse_channels(text)
-        if not channels:
+        parser = self._parse_group_targets if mode == "await_group_targets" else self._parse_channels
+        targets = parser(text)
+        if not targets:
+            fail_text = "txt 里没识别到有效群组，请检查内容后重传。" if mode == "await_group_targets" else "txt 里没识别到有效频道，请检查内容后重传。"
             await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} txt 里没识别到有效频道，请检查内容后重传。",
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} {fail_text}",
                 parse_mode=ParseMode.HTML,
             )
             return
         draft = state.setdefault("draft", {})
-        draft["channels"] = channels
+        draft["channels"] = targets
         state["mode"] = "select_days"
         await update.effective_message.reply_text(
-            self._select_days_text(channels),
+            self._select_days_text(targets, task_type=draft.get("task_type", "channel")),
             parse_mode=ParseMode.HTML,
             reply_markup=self._build_days_keyboard(),
         )
@@ -428,7 +439,25 @@ class DmCollectorBot:
             draft["channels"] = channels
             state["mode"] = "select_days"
             await update.effective_message.reply_text(
-                self._select_days_text(channels),
+                self._select_days_text(channels, task_type=draft.get("task_type", "channel")),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._build_days_keyboard(),
+            )
+            return
+
+        if mode == "await_group_targets":
+            channels = self._parse_group_targets(text)
+            if not channels:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 没识别到有效群组，请按一行一个群链接或群用户名重新发送。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            draft = state.setdefault("draft", {})
+            draft["channels"] = channels
+            state["mode"] = "select_days"
+            await update.effective_message.reply_text(
+                self._select_days_text(channels, task_type=draft.get("task_type", "channel")),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._build_days_keyboard(),
             )
@@ -771,16 +800,16 @@ class DmCollectorBot:
 
     async def _show_collect_menu(self, query) -> None:
         text = (
-            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>采集用户</b>\n"
-            f"当前支持：采集频道用户名；采集群组入口已预留，功能稍后继续对。"
+            f"{tg_emoji(self.settings.emoji_welcome_id, '🌠')} <b>采集用户</b>\n"
+            f"当前支持：频道采集、群组发言用户采集、失败结果导出。"
         )
         keyboard = [
             [
                 premium_button("新建采集任务", self.settings.emoji_idea_id, callback_data="collect:new"),
-                premium_button("任务列表", self.settings.emoji_progress_id, callback_data="collect:tasks"),
+                premium_button("任务列表", self.settings.emoji_history_id, callback_data="collect:tasks"),
             ],
             [
-                premium_button("历史结果", self.settings.emoji_history_id, callback_data="menu:history"),
+                premium_button("历史结果", self.settings.emoji_export_id, callback_data="menu:history"),
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
             ],
         ]
@@ -799,19 +828,6 @@ class DmCollectorBot:
             [
                 premium_button("返回采集用户", self.settings.emoji_back_id, callback_data="menu:collect"),
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
-            ],
-        ]
-        await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
-
-    async def _show_collect_group_placeholder(self, query) -> None:
-        text = (
-            f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>采集群组</b>\n"
-            f"群组采集入口已经先加上了，具体采集逻辑等你下一条需求我再继续接。"
-        )
-        keyboard = [
-            [
-                premium_button("返回新建任务", self.settings.emoji_back_id, callback_data="collect:new"),
-                premium_button("返回采集用户", self.settings.emoji_home_id, callback_data="menu:collect"),
             ],
         ]
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
@@ -928,11 +944,8 @@ class DmCollectorBot:
                 except asyncio.CancelledError:
                     pass
         deleted = self.db.delete_collect_task(task_id)
-        if deleted and deleted["result_file_path"]:
-            try:
-                Path(str(deleted["result_file_path"])).unlink(missing_ok=True)
-            except Exception:
-                logger.exception("删除任务导出文件失败: %s", deleted["result_file_path"])
+        if deleted:
+            self._cleanup_task_export_files(deleted)
         total_after = self.db.count_collect_tasks(history=(source == 'history'))
         per_page = 6
         total_pages_after = max(1, ceil(total_after / per_page))
@@ -948,11 +961,7 @@ class DmCollectorBot:
             await self._show_task_list(query, page=1)
             return
         for row in rows:
-            if row['result_file_path']:
-                try:
-                    Path(str(row['result_file_path'])).unlink(missing_ok=True)
-                except Exception:
-                    logger.exception("删除任务导出文件失败: %s", row['result_file_path'])
+            self._cleanup_task_export_files(row)
         await self._show_task_list(query, page=1)
 
     async def _start_collect_wizard(self, query, user_id: int) -> None:
@@ -964,22 +973,74 @@ class DmCollectorBot:
                 self._single_back_keyboard("menu:accounts"),
             )
             return
-        self.user_states[user_id] = {"mode": "await_channels", "draft": {}}
+        self.user_states[user_id] = {"mode": "await_channels", "draft": {"task_type": "channel"}}
         await self._safe_edit(query, self._channels_prompt_text(), self._single_back_keyboard("wizard:cancel"))
+
+    async def _start_group_collect_wizard(self, query, user_id: int) -> None:
+        active_accounts = self.db.get_active_accounts()
+        if not active_accounts:
+            await self._safe_edit(
+                query,
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前没有可用账号，请先上传并验证 session。",
+                self._single_back_keyboard("menu:accounts"),
+            )
+            return
+        self.user_states[user_id] = {
+            "mode": "await_group_targets",
+            "draft": {
+                "task_type": "group",
+                "filters": {
+                    "exclude_bots": False,
+                    "exclude_admins": False,
+                    "exclude_no_photo": False,
+                    "exclude_no_username": False,
+                },
+            },
+        }
+        await self._safe_edit(query, self._group_targets_prompt_text(), self._single_back_keyboard("wizard:cancel"))
 
     async def _wizard_set_days(self, query, user_id: int, days: int, reply_message=None) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
         draft["days"] = days
-        state["mode"] = "select_accounts"
         active_accounts = self.db.get_active_accounts()
         draft.setdefault("account_ids", [row["id"] for row in active_accounts])
-        text = self._select_accounts_text(draft["channels"], days, draft["account_ids"])
-        markup = self._build_account_selection_keyboard(draft["account_ids"])
+        if draft.get("task_type") == "group":
+            state["mode"] = "select_group_filters"
+            text = self._group_filters_text(draft)
+            markup = self._build_group_filters_keyboard(draft)
+        else:
+            state["mode"] = "select_accounts"
+            text = self._select_accounts_text(draft["channels"], days, draft["account_ids"], task_type=draft.get("task_type", "channel"), filters=draft.get("filters"))
+            markup = self._build_account_selection_keyboard(draft["account_ids"])
         if query is not None:
             await self._safe_edit(query, text, markup)
         elif reply_message is not None:
             await reply_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    async def _toggle_group_filter(self, query, user_id: int, key: str) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        filters_map = draft.setdefault("filters", {})
+        filters_map[key] = not bool(filters_map.get(key))
+        state["mode"] = "select_group_filters"
+        await self._safe_edit(query, self._group_filters_text(draft), self._build_group_filters_keyboard(draft))
+
+    async def _wizard_finish_group_filters(self, query, user_id: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        state["mode"] = "select_accounts"
+        await self._safe_edit(
+            query,
+            self._select_accounts_text(
+                draft.get("channels", []),
+                int(draft.get("days") or 1),
+                draft.get("account_ids") or [],
+                task_type=draft.get("task_type", "channel"),
+                filters=draft.get("filters"),
+            ),
+            self._build_account_selection_keyboard(draft.get("account_ids") or []),
+        )
 
     async def _wizard_auto_accounts(self, query, user_id: int) -> None:
         active_accounts = self.db.get_active_accounts()
@@ -996,7 +1057,13 @@ class DmCollectorBot:
         else:
             selected.add(account_id)
         draft["account_ids"] = sorted(selected)
-        text = self._select_accounts_text(draft.get("channels", []), draft.get("days", 1), draft["account_ids"])
+        text = self._select_accounts_text(
+            draft.get("channels", []),
+            draft.get("days", 1),
+            draft["account_ids"],
+            task_type=draft.get("task_type", "channel"),
+            filters=draft.get("filters"),
+        )
         await self._safe_edit(query, text, self._build_account_selection_keyboard(draft["account_ids"]))
 
     async def _wizard_finish_accounts(self, query, user_id: int) -> None:
@@ -1043,6 +1110,8 @@ class DmCollectorBot:
             days_limit=days,
             account_ids=account_ids,
             worker_count=worker_count,
+            task_type=draft.get("task_type", "channel"),
+            filters_json=json.dumps(draft.get("filters") or {}, ensure_ascii=False),
         )
         text = self._format_task_text(task["id"])
         markup = self._build_task_keyboard(task["id"])
@@ -1092,10 +1161,10 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(self.settings.emoji_welcome_id, '🌠')} <b>DM Collector Bot</b> <code>v{__version__}</code>",
             f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} {html.escape(self.settings.welcome_text, quote=False)}",
-            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} 第一版已接入：账号上传 / 状态检测 / 多频道采集 / txt 去重导出。",
+            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} 当前已接入：账号上传 / 多频道采集 / 群组发言采集 / txt 去重导出。",
         ]
         if self._is_admin(user_id):
-            lines.append(f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} 你是管理员，可直接用下面按钮进入账号管理和采集中心。")
+            lines.append(f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} 你是管理员，可直接用下面按钮进入账号管理和采集用户。")
         return "\n\n".join(lines)
 
     def _build_stats_text(self) -> str:
@@ -1139,21 +1208,27 @@ class DmCollectorBot:
         channels = self.db.list_collect_task_channels(task_id)
         visible_channels = [item for item in channels if item["status"] != "completed"]
         display_code = self._task_display_code(task)
+        task_type = task["task_type"] or "channel"
+        unit = "群组" if task_type == "group" else "频道"
         lines = [
             f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>任务 #{display_code}</b> <code>v{__version__}</code>",
+            f"类型：<code>{'群组发言采集' if task_type == 'group' else '频道用户名采集'}</code>",
             f"状态：{status_badge(task['status'])}",
             f"时间范围：最近 <code>{task['days_limit']}</code> 天",
             f"账号数：<code>{task['account_count']}</code> · 并发：<code>{task['worker_count']}</code>",
-            f"频道进度：<code>{task['finished_channels']}/{task['total_channels']}</code>",
+            f"{unit}进度：<code>{task['finished_channels']}/{task['total_channels']}</code>",
             f"扫描消息：<code>{task['total_messages_scanned']}</code>",
             f"命中总数：<code>{task['total_hits']}</code>",
             f"去重数量：<code>{task['unique_hits']}</code>",
         ]
+        if task_type == "group":
+            filters_text = self._format_filter_summary(self._parse_group_filters(task["filters_json"]), empty_label="不过滤")
+            lines.append(f"筛选规则：<code>{html.escape(filters_text, quote=False)}</code>")
         if task["last_error"] and task["status"] in {"error", "stopped"}:
             lines.append(f"错误：<code>{html.escape(str(task['last_error']), quote=False)}</code>")
         if visible_channels:
             lines.append("")
-            lines.append("<b>频道子任务</b>")
+            lines.append(f"<b>{unit}子任务</b>")
             for item in visible_channels[:6]:
                 lines.append(
                     f"• {html.escape(item['channel'], quote=False)} · {status_badge(item['status'])} · 扫描 <code>{item['scanned_messages']}</code> · 去重 <code>{item['unique_hits']}</code>"
@@ -1170,7 +1245,7 @@ class DmCollectorBot:
 
     def _channels_prompt_text(self) -> str:
         return (
-            f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>新建采集任务</b>\n"
+            f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>新建频道采集</b>\n"
             f"你可以：\n"
             f"1. 直接发频道列表（一行一个）\n"
             f"2. 上传一个 <code>.txt</code> 频道文件\n\n"
@@ -1178,11 +1253,22 @@ class DmCollectorBot:
             f"<code>@channel</code>\n<code>https://t.me/channel</code>\n<code>t.me/channel</code>"
         )
 
-    def _select_days_text(self, channels: list[str]) -> str:
-        preview = "\n".join(f"• {html.escape(channel, quote=False)}" for channel in channels[:6])
+    def _group_targets_prompt_text(self) -> str:
         return (
-            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} <b>选择采集时间范围</b>\n"
-            f"频道数：<code>{len(channels)}</code>\n\n{preview}"
+            f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>新建群组发言采集</b>\n"
+            f"你可以：\n"
+            f"1. 直接发送群组链接/群用户名（一行一个）\n"
+            f"2. 上传一个 <code>.txt</code> 群组文件\n\n"
+            f"支持格式：\n"
+            f"<code>@publicgroup</code>\n<code>https://t.me/publicgroup</code>\n<code>https://t.me/+inviteHash</code>\n<code>https://t.me/joinchat/inviteHash</code>"
+        )
+
+    def _select_days_text(self, channels: list[str], *, task_type: str = "channel") -> str:
+        preview = "\n".join(f"• {html.escape(channel, quote=False)}" for channel in channels[:6])
+        unit = "群组" if task_type == "group" else "频道"
+        return (
+            f"{tg_emoji(self.settings.emoji_welcome_id, '🌠')} <b>选择采集时间范围</b>\n"
+            f"{unit}数：<code>{len(channels)}</code>\n\n{preview}"
         )
 
     def _format_check_all_progress_text(
@@ -1226,28 +1312,49 @@ class DmCollectorBot:
             f"请直接发送一个整数，例如 <code>{max_workers}</code>。"
         )
 
-    def _select_accounts_text(self, channels: list[str], days: int, selected_ids: list[int]) -> str:
+    def _select_accounts_text(self, channels: list[str], days: int, selected_ids: list[int], *, task_type: str = "channel", filters: dict | None = None) -> str:
         active = self.db.get_active_accounts()
+        unit = "群组" if task_type == "group" else "频道"
         lines = [
             f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>选择采集账号</b>",
-            f"频道数：<code>{len(channels)}</code> · 时间范围：<code>{days}</code> 天",
+            f"{unit}数：<code>{len(channels)}</code> · 时间范围：<code>{days}</code> 天",
             f"已选账号：<code>{len(selected_ids)}</code>",
-            "",
         ]
+        if task_type == "group":
+            lines.append(f"筛选规则：<code>{html.escape(self._format_filter_summary(filters), quote=False)}</code>")
+            lines.append("单号每轮最多新增 5 个群，剩余群会自动冷却后继续处理。")
+        lines.append("")
         for row in active:
             mark = "已选" if row["id"] in selected_ids else "未选"
             label = row["username"] or row["phone"] or row["session_name"]
             lines.append(f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {mark}")
         return "\n".join(lines)
 
+    def _group_filters_text(self, draft: dict) -> str:
+        filters = self._parse_group_filters(draft.get("filters"))
+        lines = [
+            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>设置筛选规则</b>",
+            f"群组数：<code>{len(draft.get('channels') or [])}</code> · 时间范围：<code>{draft.get('days') or 1}</code> 天",
+            "开启后会在采集发言用户时自动排除对应人群。",
+            "",
+            f"• 机器人：<code>{'过滤' if filters['exclude_bots'] else '保留'}</code>",
+            f"• 管理员：<code>{'过滤' if filters['exclude_admins'] else '保留'}</code>",
+            f"• 无头像：<code>{'过滤' if filters['exclude_no_photo'] else '保留'}</code>",
+            f"• 无用户名：<code>{'过滤' if filters['exclude_no_username'] else '保留（会导出 ID）'}</code>",
+        ]
+        return "\n".join(lines)
+
     def _select_workers_text(self, draft: dict) -> str:
         max_workers = self._max_worker_count(draft)
+        task_type = draft.get("task_type", "channel")
+        unit = "群组" if task_type == "group" else "频道"
+        tail = "单号遇到第 6 个新群时会自动冷却后继续，不会只跑 5 个就结束。" if task_type == "group" else "并发会按 账号数 / 频道数 / 上限 取最小值。"
         return (
-            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>设置并发</b>\n"
-            f"频道数：<code>{len(draft.get('channels') or [])}</code>\n"
+            f"{tg_emoji(self.settings.emoji_welcome_id, '🌠')} <b>设置并发</b>\n"
+            f"{unit}数：<code>{len(draft.get('channels') or [])}</code>\n"
             f"账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
             f"当前最多可设：<code>{max_workers}</code>\n"
-            f"并发会按 账号数 / 频道数 / 上限 取最小值。"
+            f"{tail}"
         )
 
     def _max_worker_count(self, draft: dict) -> int:
@@ -1258,14 +1365,22 @@ class DmCollectorBot:
     def _collect_confirm_text(self, draft: dict) -> str:
         channels = draft.get("channels") or []
         preview = "\n".join(f"• {html.escape(channel, quote=False)}" for channel in channels[:6])
-        return (
-            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>确认启动采集</b>\n"
-            f"频道数：<code>{len(channels)}</code>\n"
-            f"时间范围：<code>{draft.get('days')}</code> 天\n"
-            f"账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
-            f"并发：<code>{draft.get('worker_count')}</code>\n\n"
-            f"{preview}"
-        )
+        task_type = draft.get("task_type", "channel")
+        unit = "群组" if task_type == "group" else "频道"
+        lines = [
+            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>确认启动采集</b>",
+            f"类型：<code>{'群组发言采集' if task_type == 'group' else '频道用户名采集'}</code>",
+            f"{unit}数：<code>{len(channels)}</code>",
+            f"时间范围：<code>{draft.get('days')}</code> 天",
+            f"账号数：<code>{len(draft.get('account_ids') or [])}</code>",
+            f"并发：<code>{draft.get('worker_count')}</code>",
+        ]
+        if task_type == "group":
+            lines.append(f"筛选规则：<code>{html.escape(self._format_filter_summary(draft.get('filters')), quote=False)}</code>")
+            lines.append("导出文件：@用户名 / 无用户名 ID / 失败群原因")
+        lines.append("")
+        lines.append(preview)
+        return "\n".join(lines)
 
     def _not_found_text(self, message: str) -> str:
         return f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>{html.escape(message, quote=False)}</b>"
@@ -1306,15 +1421,33 @@ class DmCollectorBot:
         keyboard = [
             [
                 premium_button("1 天", self.settings.emoji_waiting_id, callback_data="wizard:days:1"),
-                premium_button("3 天", self.settings.emoji_waiting_id, callback_data="wizard:days:3"),
+                premium_button("3 天", self.settings.emoji_progress_id, callback_data="wizard:days:3"),
             ],
             [
-                premium_button("7 天", self.settings.emoji_waiting_id, callback_data="wizard:days:7"),
-                premium_button("15 天", self.settings.emoji_waiting_id, callback_data="wizard:days:15"),
+                premium_button("7 天", self.settings.emoji_history_id, callback_data="wizard:days:7"),
+                premium_button("15 天", self.settings.emoji_stats_id, callback_data="wizard:days:15"),
             ],
             [
                 premium_button("自定义", self.settings.emoji_idea_id, callback_data="wizard:days_custom"),
                 premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+            ],
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    def _build_group_filters_keyboard(self, draft: dict) -> InlineKeyboardMarkup:
+        filters = self._parse_group_filters(draft.get("filters"))
+        keyboard = [
+            [
+                premium_button(f"机器人：{'过滤' if filters['exclude_bots'] else '保留'}", self.settings.emoji_error_id, callback_data="wizard:gflt:toggle:exclude_bots"),
+                premium_button(f"管理员：{'过滤' if filters['exclude_admins'] else '保留'}", self.settings.emoji_stats_id, callback_data="wizard:gflt:toggle:exclude_admins"),
+            ],
+            [
+                premium_button(f"无头像：{'过滤' if filters['exclude_no_photo'] else '保留'}", self.settings.emoji_upload_id, callback_data="wizard:gflt:toggle:exclude_no_photo"),
+                premium_button(f"无用户名：{'过滤' if filters['exclude_no_username'] else '保留'}", self.settings.emoji_inbox_id, callback_data="wizard:gflt:toggle:exclude_no_username"),
+            ],
+            [
+                premium_button("完成设置", self.settings.emoji_ok_id, callback_data="wizard:gflt:done"),
+                premium_button("取消", self.settings.emoji_back_id, callback_data="wizard:cancel"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -1351,12 +1484,22 @@ class DmCollectorBot:
         if max_workers not in available:
             available.append(max_workers)
         available = sorted(set(available))
+        icon_pool = [
+            self.settings.emoji_progress_id,
+            self.settings.emoji_waiting_id,
+            self.settings.emoji_history_id,
+            self.settings.emoji_stats_id,
+            self.settings.emoji_upload_id,
+            self.settings.emoji_list_id,
+            self.settings.emoji_all_id,
+            self.settings.emoji_start_id,
+        ]
 
         keyboard = []
         row_buffer = []
-        for value in available:
+        for index, value in enumerate(available):
             row_buffer.append(
-                premium_button(f"{value} 线程", self.settings.emoji_progress_id, callback_data=f"wizard:wrk:{value}")
+                premium_button(f"{value} 线程", icon_pool[index % len(icon_pool)], callback_data=f"wizard:wrk:{value}")
             )
             if len(row_buffer) == 2:
                 keyboard.append(row_buffer)
@@ -1400,7 +1543,7 @@ class DmCollectorBot:
         else:
             keyboard.append([
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
-                premium_button(back_label, self.settings.emoji_progress_id, callback_data=back_callback),
+                premium_button(back_label, self.settings.emoji_list_id, callback_data=back_callback),
             ])
         return InlineKeyboardMarkup(keyboard)
 
@@ -1453,11 +1596,32 @@ class DmCollectorBot:
         task = self.db.get_collect_task(task_id)
         if not task:
             return
+        display_code = self._task_display_code(task)
+        caption_prefix = "采集结果已生成" if announce else f"任务 #{display_code} 结果导出"
+        if (task["task_type"] or "channel") == "group":
+            outputs = self.db.export_group_task_files(task_id, self.settings.export_dir)
+            captions = {
+                "usernames": f"{caption_prefix} · 用户名",
+                "ids": f"任务 #{display_code} 结果导出 · ID",
+                "failed": f"任务 #{display_code} 结果导出 · 失败群",
+            }
+            for key in ["usernames", "ids", "failed"]:
+                with outputs[key].open("rb") as fp:
+                    await self.application.bot.send_document(
+                        chat_id=chat_id,
+                        document=fp,
+                        filename=outputs[key].name,
+                        caption=(
+                            f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>{captions[key]}</b>\n"
+                            f"去重数量：<code>{task['unique_hits']}</code>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+            return
+
         path = task["result_file_path"]
         if not path or not Path(path).exists():
             path = str(self.db.export_task_usernames_txt(task_id, self.settings.export_dir))
-        display_code = self._task_display_code(task)
-        caption_prefix = "采集结果已生成" if announce else f"任务 #{display_code} 结果导出"
         with Path(path).open("rb") as fp:
             await self.application.bot.send_document(
                 chat_id=chat_id,
@@ -1469,6 +1633,21 @@ class DmCollectorBot:
                 ),
                 parse_mode=ParseMode.HTML,
             )
+
+    def _cleanup_task_export_files(self, task) -> None:
+        path = task["result_file_path"]
+        if path:
+            try:
+                Path(str(path)).unlink(missing_ok=True)
+            except Exception:
+                logger.exception("删除任务导出文件失败: %s", path)
+        if hasattr(task, "keys") and task["task_type"] == "group":
+            for suffix in ("_ids.txt", "_failed_groups.txt"):
+                extra = self.settings.export_dir / f"task_{int(task['id'])}{suffix}"
+                try:
+                    extra.unlink(missing_ok=True)
+                except Exception:
+                    logger.exception("删除任务导出文件失败: %s", extra)
 
     async def _fanout_to_admins(self, update: Update) -> None:
         user = update.effective_user
@@ -1616,6 +1795,68 @@ class DmCollectorBot:
             seen.add(normalized.lower())
             result.append(normalized)
         return result
+
+    def _parse_group_targets(self, text: str) -> list[str]:
+        result = []
+        seen = set()
+        for raw_line in (text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            invite_match = re.search(r"(?:https?://)?t\.me/(?:joinchat/|\+)([A-Za-z0-9_-]+)", line)
+            if invite_match:
+                normalized = f"https://t.me/+{invite_match.group(1)}"
+            else:
+                candidate = line
+                if candidate.startswith("https://t.me/"):
+                    candidate = "@" + candidate.removeprefix("https://t.me/").split("/", 1)[0]
+                elif candidate.startswith("http://t.me/"):
+                    candidate = "@" + candidate.removeprefix("http://t.me/").split("/", 1)[0]
+                elif candidate.startswith("t.me/"):
+                    candidate = "@" + candidate.removeprefix("t.me/").split("/", 1)[0]
+                elif not candidate.startswith("@") and re.fullmatch(r"[A-Za-z0-9_]{5,64}", candidate):
+                    candidate = f"@{candidate}"
+                if not candidate.startswith("@"):
+                    continue
+                normalized = "@" + re.sub(r"[^A-Za-z0-9_]", "", candidate[1:])
+                if len(normalized) < 6:
+                    continue
+            if normalized.lower() in seen:
+                continue
+            seen.add(normalized.lower())
+            result.append(normalized)
+        return result
+
+    def _parse_group_filters(self, raw) -> dict[str, bool]:
+        defaults = {
+            "exclude_bots": False,
+            "exclude_admins": False,
+            "exclude_no_photo": False,
+            "exclude_no_username": False,
+        }
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = None
+        if isinstance(raw, dict):
+            for key in defaults:
+                if key in raw:
+                    defaults[key] = bool(raw[key])
+        return defaults
+
+    def _format_filter_summary(self, raw_filters, *, empty_label: str = "全部保留") -> str:
+        filters = self._parse_group_filters(raw_filters)
+        labels = []
+        if filters["exclude_bots"]:
+            labels.append("机器人")
+        if filters["exclude_admins"]:
+            labels.append("管理员")
+        if filters["exclude_no_photo"]:
+            labels.append("无头像")
+        if filters["exclude_no_username"]:
+            labels.append("无用户名")
+        return "、".join(labels) if labels else empty_label
 
     def _humanize_account_issue(self, status: str, last_error: str | None) -> str:
         raw = (last_error or "").strip()

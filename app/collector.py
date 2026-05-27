@@ -11,12 +11,24 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import (
+    FloodWaitError,
+    InviteHashExpiredError,
+    InviteHashInvalidError,
+    RPCError,
+    UserAlreadyParticipantError,
+)
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
+from telethon.tl.types import ChannelParticipantsAdmins, User
 
 from .config import Settings
 from .database import Database
 
 USERNAME_RE = re.compile(r"(?<![\w@])@([A-Za-z0-9_]{5,32})")
+INVITE_LINK_RE = re.compile(r"(?:https?://)?t\.me/(?:joinchat/|\+)([A-Za-z0-9_-]+)")
+GROUP_JOIN_BATCH_LIMIT = 5
+GROUP_JOIN_COOLDOWN_SECONDS = 300
 
 
 @dataclass(slots=True)
@@ -130,8 +142,9 @@ class CollectionManager:
                 queue.put_nowait(item)
 
             worker_count = min(task["worker_count"], len(active_workers), queue.qsize(), self.settings.max_collect_workers)
+            worker_fn = self._group_worker if (task["task_type"] or "channel") == "group" else self._worker
             workers = [
-                asyncio.create_task(self._worker(task_id, queue, active_workers[index]))
+                asyncio.create_task(worker_fn(task_id, queue, active_workers[index]))
                 for index in range(worker_count)
             ]
             await asyncio.gather(*workers, return_exceptions=True)
@@ -145,20 +158,32 @@ class CollectionManager:
             else:
                 self.db.mark_collect_task_status(task_id, "stopped")
 
-            output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
-            self.db.set_task_result_file(task_id, str(output_path))
+            if (task["task_type"] or "channel") == "group":
+                outputs = self.db.export_group_task_files(task_id, self.settings.export_dir)
+                self.db.set_task_result_file(task_id, str(outputs["usernames"]))
+            else:
+                output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
+                self.db.set_task_result_file(task_id, str(output_path))
             await self._emit_complete(task_id)
         except asyncio.CancelledError:
             self.db.stop_collect_task_now(task_id, reason="任务已停止，账号已释放")
-            output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
-            self.db.set_task_result_file(task_id, str(output_path))
+            if (task["task_type"] or "channel") == "group":
+                outputs = self.db.export_group_task_files(task_id, self.settings.export_dir)
+                self.db.set_task_result_file(task_id, str(outputs["usernames"]))
+            else:
+                output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
+                self.db.set_task_result_file(task_id, str(output_path))
             await self._emit_complete(task_id)
             return
         except Exception as exc:  # noqa: BLE001
             self.db.mark_collect_task_status(task_id, "error", last_error=self._short_error(exc))
             try:
-                output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
-                self.db.set_task_result_file(task_id, str(output_path))
+                if (task["task_type"] or "channel") == "group":
+                    outputs = self.db.export_group_task_files(task_id, self.settings.export_dir)
+                    self.db.set_task_result_file(task_id, str(outputs["usernames"]))
+                else:
+                    output_path = self.db.export_task_usernames_txt(task_id, self.settings.export_dir)
+                    self.db.set_task_result_file(task_id, str(output_path))
             except Exception:  # noqa: BLE001
                 pass
             await self._emit_complete(task_id)
@@ -185,6 +210,51 @@ class CollectionManager:
                     break
                 try:
                     await self._process_channel(task_id, client, account_id, task_channel)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.db.update_account_status(account_id, status="error", last_error=self._short_error(exc))
+        finally:
+            refreshed = self.db.get_account(account_id)
+            next_status = "active"
+            last_error = None
+            if refreshed:
+                last_error = refreshed["last_error"]
+                if refreshed["status"] in {"unauthorized", "error"}:
+                    next_status = refreshed["status"]
+            self.db.update_account_status(account_id, status=next_status, last_error=last_error)
+            if client is not None:
+                await client.disconnect()
+
+    async def _group_worker(self, task_id: int, queue: asyncio.Queue, account_row) -> None:
+        account_id = account_row["id"]
+        session_file = Path(account_row["session_file"])
+        client: TelegramClient | None = None
+        joined_since_cooldown = 0
+        try:
+            client = self._build_client(session_file)
+            await client.connect()
+            if not await client.is_user_authorized():
+                self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
+                return
+            self.db.update_account_status(account_id, status="collecting", last_error=None)
+
+            while not queue.empty():
+                if self.db.should_stop_task(task_id):
+                    break
+                if joined_since_cooldown >= GROUP_JOIN_BATCH_LIMIT:
+                    await self._sleep_with_stop(task_id, GROUP_JOIN_COOLDOWN_SECONDS)
+                    joined_since_cooldown = 0
+                try:
+                    task_channel = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    joined = await self._process_group(task_id, client, account_id, task_channel)
+                    if joined:
+                        joined_since_cooldown += 1
                 finally:
                     queue.task_done()
         except asyncio.CancelledError:
@@ -269,6 +339,100 @@ class CollectionManager:
         )
         await self._emit_progress(task_id)
 
+    async def _process_group(self, task_id: int, client: TelegramClient, account_id: int, task_channel) -> bool:
+        task_channel_id = task_channel["id"]
+        group_target = task_channel["channel"]
+        task = self.db.get_collect_task(task_id)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, task["days_limit"]))
+        filters = self._parse_filters(task["filters_json"])
+
+        scanned_messages = 0
+        total_hits = 0
+        inserted_hits = 0
+        last_error = None
+        status = "completed"
+        joined_now = False
+
+        self.db.start_task_channel(task_channel_id, account_id)
+        try:
+            entity, joined_now = await self._ensure_group_entity(client, group_target)
+            admin_ids = await self._load_admin_ids(client, entity)
+            async for message in client.iter_messages(entity):
+                if self.db.should_stop_task(task_id):
+                    status = "stopped"
+                    break
+
+                message_date = getattr(message, "date", None)
+                if message_date is not None:
+                    if message_date.tzinfo is None:
+                        message_date = message_date.replace(tzinfo=timezone.utc)
+                    if message_date < cutoff:
+                        break
+
+                scanned_messages += 1
+                sender = await message.get_sender()
+                if not isinstance(sender, User):
+                    continue
+
+                username = f"@{sender.username}" if getattr(sender, "username", None) else None
+                is_bot = bool(getattr(sender, "bot", False))
+                is_admin = int(getattr(sender, "id", 0)) in admin_ids
+                has_photo = bool(getattr(sender, "photo", None))
+                if filters["exclude_bots"] and is_bot:
+                    continue
+                if filters["exclude_admins"] and is_admin:
+                    continue
+                if filters["exclude_no_photo"] and not has_photo:
+                    continue
+                if filters["exclude_no_username"] and not username:
+                    continue
+
+                total_hits += 1
+                inserted_hits += self.db.add_collected_member(
+                    task_id,
+                    user_id=int(sender.id),
+                    username=username,
+                    display_name=self._display_name(sender),
+                    source_channel=group_target,
+                    source_message_id=getattr(message, "id", None),
+                    is_bot=is_bot,
+                    is_admin=is_admin,
+                    has_photo=has_photo,
+                    spoke_at=message_date.isoformat() if message_date else None,
+                )
+        except FloodWaitError as exc:
+            status = "error"
+            last_error = f"FloodWait {exc.seconds}s"
+            self.db.update_account_status(account_id, status="error", last_error=last_error)
+        except (InviteHashInvalidError, InviteHashExpiredError) as exc:
+            status = "error"
+            last_error = self._short_error(exc)
+        except RPCError as exc:
+            status = "error"
+            last_error = self._short_error(exc)
+        except Exception as exc:  # noqa: BLE001
+            status = "error"
+            last_error = self._short_error(exc)
+
+        unique_total = self.db.count_unique_usernames(task_id)
+        self.db.finish_task_channel(
+            task_channel_id,
+            status=status,
+            scanned_messages=scanned_messages,
+            hits=total_hits,
+            unique_hits=inserted_hits,
+            last_error=last_error,
+        )
+        self.db.increment_task_metrics(
+            task_id,
+            scanned_delta=scanned_messages,
+            hits_delta=total_hits,
+            finished_delta=1,
+            unique_total=unique_total,
+        )
+        await self._emit_progress(task_id)
+        return joined_now
+
     def _build_client(self, session_file: Path) -> TelegramClient:
         session_base = str(session_file)
         if session_base.endswith(".session"):
@@ -342,6 +506,81 @@ class CollectionManager:
         except sqlite3.DatabaseError as exc:
             raise ValueError(f"session 文件已损坏或不是有效 SQLite：{self._short_error(exc)}") from exc
         return compat_file
+
+    async def _ensure_group_entity(self, client: TelegramClient, target: str):
+        invite_hash = self._extract_invite_hash(target)
+        if invite_hash:
+            invite = await client(CheckChatInviteRequest(invite_hash))
+            if hasattr(invite, "chat"):
+                return invite.chat, False
+            updates = await client(ImportChatInviteRequest(invite_hash))
+            chats = list(getattr(updates, "chats", []) or [])
+            if not chats:
+                raise ValueError("加群成功，但没有拿到群实体")
+            return chats[0], True
+
+        normalized = target if target.startswith("@") else f"@{target.lstrip('@')}"
+        entity = await client.get_entity(normalized)
+        joined_now = False
+        try:
+            await client(JoinChannelRequest(entity))
+            joined_now = True
+        except UserAlreadyParticipantError:
+            joined_now = False
+        except RPCError as exc:
+            text = str(exc).lower()
+            if "user_already_participant" not in text:
+                raise
+        entity = await client.get_entity(normalized)
+        return entity, joined_now
+
+    async def _load_admin_ids(self, client: TelegramClient, entity) -> set[int]:
+        admin_ids: set[int] = set()
+        try:
+            async for admin in client.iter_participants(entity, filter=ChannelParticipantsAdmins):
+                admin_ids.add(int(admin.id))
+        except Exception:  # noqa: BLE001
+            return admin_ids
+        return admin_ids
+
+    async def _sleep_with_stop(self, task_id: int, seconds: int) -> None:
+        remaining = max(0, int(seconds))
+        while remaining > 0:
+            if self.db.should_stop_task(task_id):
+                return
+            await asyncio.sleep(min(5, remaining))
+            remaining -= 5
+
+    @staticmethod
+    def _extract_invite_hash(target: str) -> str | None:
+        match = INVITE_LINK_RE.search((target or "").strip())
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _display_name(user: User) -> str:
+        parts = [value for value in [getattr(user, "first_name", None), getattr(user, "last_name", None)] if value]
+        if parts:
+            return " ".join(parts)
+        return getattr(user, "username", None) or str(getattr(user, "id", "-"))
+
+    @staticmethod
+    def _parse_filters(raw: str | None) -> dict[str, bool]:
+        defaults = {
+            "exclude_bots": False,
+            "exclude_admins": False,
+            "exclude_no_photo": False,
+            "exclude_no_username": False,
+        }
+        if not raw:
+            return defaults
+        try:
+            loaded = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return defaults
+        for key in defaults:
+            if key in loaded:
+                defaults[key] = bool(loaded[key])
+        return defaults
 
     @staticmethod
     def _extract_usernames(text: str) -> list[str]:

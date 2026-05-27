@@ -79,10 +79,12 @@ class Database:
                 CREATE TABLE IF NOT EXISTS collect_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     requester_id INTEGER NOT NULL,
+                    task_type TEXT NOT NULL DEFAULT 'channel',
                     status TEXT NOT NULL DEFAULT 'queued',
                     days_limit INTEGER NOT NULL,
                     worker_count INTEGER NOT NULL DEFAULT 1,
                     account_count INTEGER NOT NULL DEFAULT 0,
+                    filters_json TEXT NOT NULL DEFAULT '{}',
                     channels_json TEXT NOT NULL,
                     account_ids_json TEXT NOT NULL,
                     total_channels INTEGER NOT NULL DEFAULT 0,
@@ -130,14 +132,42 @@ class Database:
                     UNIQUE(task_id, username)
                 );
 
+                CREATE TABLE IF NOT EXISTS collect_task_members (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT,
+                    display_name TEXT,
+                    source_channel TEXT,
+                    source_message_id INTEGER,
+                    message_count INTEGER NOT NULL DEFAULT 1,
+                    is_bot INTEGER NOT NULL DEFAULT 0,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    has_photo INTEGER NOT NULL DEFAULT 0,
+                    last_spoke_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (task_id) REFERENCES collect_tasks(id) ON DELETE CASCADE,
+                    UNIQUE(task_id, user_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(tg_user_id);
                 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
                 CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
                 CREATE INDEX IF NOT EXISTS idx_collect_tasks_status ON collect_tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_task_channels_task_id ON collect_task_channels(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_usernames_task_id ON collect_task_usernames(task_id);
+                CREATE INDEX IF NOT EXISTS idx_task_members_task_id ON collect_task_members(task_id);
                 """
             )
+            for statement in (
+                "ALTER TABLE collect_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'channel'",
+                "ALTER TABLE collect_tasks ADD COLUMN filters_json TEXT NOT NULL DEFAULT '{}'",
+            ):
+                try:
+                    self.conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
             self.conn.commit()
 
     # ---------- basic dm storage ----------
@@ -415,20 +445,24 @@ class Database:
         days_limit: int,
         account_ids: list[int],
         worker_count: int,
+        task_type: str = "channel",
+        filters_json: str | None = None,
     ) -> sqlite3.Row:
         with self.lock:
             self.conn.execute(
                 """
                 INSERT INTO collect_tasks (
-                    requester_id, days_limit, worker_count, account_count,
-                    channels_json, account_ids_json, total_channels
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    requester_id, task_type, days_limit, worker_count, account_count,
+                    filters_json, channels_json, account_ids_json, total_channels
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     requester_id,
+                    task_type,
                     days_limit,
                     worker_count,
                     len(account_ids),
+                    filters_json or "{}",
                     json.dumps(channels, ensure_ascii=False),
                     json.dumps(account_ids, ensure_ascii=False),
                     len(channels),
@@ -683,10 +717,89 @@ class Database:
 
     def count_unique_usernames(self, task_id: int) -> int:
         with self.lock:
+            task = self.conn.execute("SELECT task_type FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
+            if task and task["task_type"] == "group":
+                return self.conn.execute(
+                    "SELECT COUNT(*) FROM collect_task_members WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()[0]
             return self.conn.execute(
                 "SELECT COUNT(*) FROM collect_task_usernames WHERE task_id=?",
                 (task_id,),
             ).fetchone()[0]
+
+    def add_collected_member(
+        self,
+        task_id: int,
+        *,
+        user_id: int,
+        username: str | None,
+        display_name: str | None,
+        source_channel: str,
+        source_message_id: int | None,
+        is_bot: bool,
+        is_admin: bool,
+        has_photo: bool,
+        spoke_at: str | None,
+    ) -> int:
+        with self.lock:
+            existing = self.conn.execute(
+                "SELECT id FROM collect_task_members WHERE task_id=? AND user_id=?",
+                (task_id, user_id),
+            ).fetchone()
+            if existing:
+                self.conn.execute(
+                    """
+                    UPDATE collect_task_members SET
+                        username=COALESCE(?, username),
+                        display_name=COALESCE(?, display_name),
+                        source_channel=COALESCE(?, source_channel),
+                        source_message_id=COALESCE(?, source_message_id),
+                        message_count=message_count + 1,
+                        is_bot=?,
+                        is_admin=?,
+                        has_photo=?,
+                        last_spoke_at=COALESCE(?, last_spoke_at),
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE task_id=? AND user_id=?
+                    """,
+                    (
+                        username,
+                        display_name,
+                        source_channel,
+                        source_message_id,
+                        int(bool(is_bot)),
+                        int(bool(is_admin)),
+                        int(bool(has_photo)),
+                        spoke_at,
+                        task_id,
+                        user_id,
+                    ),
+                )
+                self.conn.commit()
+                return 0
+            self.conn.execute(
+                """
+                INSERT INTO collect_task_members (
+                    task_id, user_id, username, display_name, source_channel, source_message_id,
+                    message_count, is_bot, is_admin, has_photo, last_spoke_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    user_id,
+                    username,
+                    display_name,
+                    source_channel,
+                    source_message_id,
+                    int(bool(is_bot)),
+                    int(bool(is_admin)),
+                    int(bool(has_photo)),
+                    spoke_at,
+                ),
+            )
+            self.conn.commit()
+            return 1
 
     def set_task_result_file(self, task_id: int, result_file_path: str) -> None:
         with self.lock:
@@ -702,6 +815,7 @@ class Database:
             if not row:
                 return None
             self.conn.execute("DELETE FROM collect_task_usernames WHERE task_id=?", (task_id,))
+            self.conn.execute("DELETE FROM collect_task_members WHERE task_id=?", (task_id,))
             self.conn.execute("DELETE FROM collect_task_channels WHERE task_id=?", (task_id,))
             self.conn.execute("DELETE FROM collect_tasks WHERE id=?", (task_id,))
             self.conn.commit()
@@ -724,6 +838,7 @@ class Database:
             task_ids = [int(row['id']) for row in rows]
             placeholders = ','.join('?' for _ in task_ids)
             self.conn.execute(f"DELETE FROM collect_task_usernames WHERE task_id IN ({placeholders})", task_ids)
+            self.conn.execute(f"DELETE FROM collect_task_members WHERE task_id IN ({placeholders})", task_ids)
             self.conn.execute(f"DELETE FROM collect_task_channels WHERE task_id IN ({placeholders})", task_ids)
             self.conn.execute(f"DELETE FROM collect_tasks WHERE id IN ({placeholders})", task_ids)
             self.conn.commit()
@@ -733,10 +848,18 @@ class Database:
         export_dir.mkdir(parents=True, exist_ok=True)
         output = export_dir / f"task_{task_id}_usernames.txt"
         with self.lock:
-            usernames = self.conn.execute(
-                "SELECT username FROM collect_task_usernames WHERE task_id=? ORDER BY username ASC",
-                (task_id,),
-            ).fetchall()
+            task = self.conn.execute("SELECT task_type FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
+            task_type = task["task_type"] if task else "channel"
+            if task_type == "group":
+                usernames = self.conn.execute(
+                    "SELECT username FROM collect_task_members WHERE task_id=? AND username IS NOT NULL AND username != '' ORDER BY username ASC",
+                    (task_id,),
+                ).fetchall()
+            else:
+                usernames = self.conn.execute(
+                    "SELECT username FROM collect_task_usernames WHERE task_id=? ORDER BY username ASC",
+                    (task_id,),
+                ).fetchall()
             failed_channels = self.conn.execute(
                 """
                 SELECT channel, status, last_error
@@ -759,3 +882,52 @@ class Database:
         output.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
         self.set_task_result_file(task_id, str(output))
         return output
+
+    def export_group_task_files(self, task_id: int, export_dir: Path) -> dict[str, Path]:
+        export_dir.mkdir(parents=True, exist_ok=True)
+        usernames_path = export_dir / f"task_{task_id}_usernames.txt"
+        ids_path = export_dir / f"task_{task_id}_ids.txt"
+        failed_path = export_dir / f"task_{task_id}_failed_groups.txt"
+        with self.lock:
+            members = self.conn.execute(
+                """
+                SELECT user_id, username, display_name, source_channel, message_count, last_spoke_at
+                FROM collect_task_members
+                WHERE task_id=?
+                ORDER BY COALESCE(username, ''), user_id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+            failed_channels = self.conn.execute(
+                """
+                SELECT channel, status, last_error
+                FROM collect_task_channels
+                WHERE task_id=? AND status IN ('error', 'stopped')
+                ORDER BY id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+
+        usernames_lines = ["# 群组发言用户名结果", ""]
+        usernames_lines.extend(row["username"] for row in members if row["username"])
+        if len(usernames_lines) == 2:
+            usernames_lines.append("# 空")
+
+        ids_lines = ["# 群组发言用户 ID 结果（无用户名）", ""]
+        ids_lines.extend(str(row["user_id"]) for row in members if not row["username"])
+        if len(ids_lines) == 2:
+            ids_lines.append("# 空")
+
+        failed_lines = ["# 无法采集的群组", ""]
+        if failed_channels:
+            for row in failed_channels:
+                reason = row["last_error"] or ("任务已停止" if row["status"] == "stopped" else "未知原因")
+                failed_lines.append(f"{row['channel']} | {reason}")
+        else:
+            failed_lines.append("# 无失败群组")
+
+        usernames_path.write_text("\n".join(usernames_lines).strip() + "\n", encoding="utf-8")
+        ids_path.write_text("\n".join(ids_lines).strip() + "\n", encoding="utf-8")
+        failed_path.write_text("\n".join(failed_lines).strip() + "\n", encoding="utf-8")
+        self.set_task_result_file(task_id, str(usernames_path))
+        return {"usernames": usernames_path, "ids": ids_path, "failed": failed_path}
