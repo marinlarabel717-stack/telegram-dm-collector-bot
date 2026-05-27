@@ -382,13 +382,21 @@ class CollectionManager:
                 is_admin = int(getattr(sender, "id", 0)) in admin_ids
                 has_photo = bool(getattr(sender, "photo", None))
                 is_premium = bool(getattr(sender, "premium", False) or getattr(sender, "is_premium", False))
-                if filters["exclude_bots"] and is_bot:
+                if filters["bot_mode"] == "non_bot_only" and is_bot:
                     continue
-                if filters["exclude_admins"] and is_admin:
+                if filters["bot_mode"] == "bot_only" and not is_bot:
                     continue
-                if filters["exclude_no_photo"] and not has_photo:
+                if filters["admin_mode"] == "non_admin_only" and is_admin:
                     continue
-                if filters["exclude_no_username"] and not username:
+                if filters["admin_mode"] == "admin_only" and not is_admin:
+                    continue
+                if filters["photo_mode"] == "has_photo_only" and not has_photo:
+                    continue
+                if filters["photo_mode"] == "no_photo_only" and has_photo:
+                    continue
+                if filters["username_mode"] == "has_username_only" and not username:
+                    continue
+                if filters["username_mode"] == "no_username_only" and username:
                     continue
                 if filters["premium_mode"] == "premium_only" and not is_premium:
                     continue
@@ -596,10 +604,10 @@ class CollectionManager:
     @staticmethod
     def _parse_filters(raw: str | None) -> dict[str, object]:
         defaults = {
-            "exclude_bots": False,
-            "exclude_admins": False,
-            "exclude_no_photo": False,
-            "exclude_no_username": False,
+            "bot_mode": "non_bot_only",
+            "admin_mode": "non_admin_only",
+            "photo_mode": "has_photo_only",
+            "username_mode": "has_username_only",
             "premium_mode": "premium_only",
         }
         if not raw:
@@ -608,10 +616,32 @@ class CollectionManager:
             loaded = json.loads(raw)
         except Exception:  # noqa: BLE001
             return defaults
-        for key in ("exclude_bots", "exclude_admins", "exclude_no_photo", "exclude_no_username"):
-            if key in loaded:
-                defaults[key] = bool(loaded[key])
+        bot_mode = str(loaded.get("bot_mode") or "")
+        admin_mode = str(loaded.get("admin_mode") or "")
+        photo_mode = str(loaded.get("photo_mode") or "")
+        username_mode = str(loaded.get("username_mode") or "")
         premium_mode = str(loaded.get("premium_mode") or "premium_only")
+
+        if bot_mode in {"non_bot_only", "bot_only"}:
+            defaults["bot_mode"] = bot_mode
+        elif loaded.get("exclude_bots") is True:
+            defaults["bot_mode"] = "non_bot_only"
+
+        if admin_mode in {"non_admin_only", "admin_only"}:
+            defaults["admin_mode"] = admin_mode
+        elif loaded.get("exclude_admins") is True:
+            defaults["admin_mode"] = "non_admin_only"
+
+        if photo_mode in {"has_photo_only", "no_photo_only"}:
+            defaults["photo_mode"] = photo_mode
+        elif loaded.get("exclude_no_photo") is True:
+            defaults["photo_mode"] = "has_photo_only"
+
+        if username_mode in {"has_username_only", "no_username_only"}:
+            defaults["username_mode"] = username_mode
+        elif loaded.get("exclude_no_username") is True:
+            defaults["username_mode"] = "has_username_only"
+
         if premium_mode in {"premium_only", "non_premium_only"}:
             defaults["premium_mode"] = premium_mode
         return defaults

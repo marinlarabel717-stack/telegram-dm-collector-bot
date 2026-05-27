@@ -992,10 +992,11 @@ class DmCollectorBot:
             "draft": {
                 "task_type": "group",
                 "filters": {
-                    "exclude_bots": False,
-                    "exclude_admins": False,
-                    "exclude_no_photo": False,
-                    "exclude_no_username": False,
+                    "bot_mode": "non_bot_only",
+                    "admin_mode": "non_admin_only",
+                    "photo_mode": "has_photo_only",
+                    "username_mode": "has_username_only",
+                    "premium_mode": "premium_only",
                 },
             },
         }
@@ -1023,13 +1024,28 @@ class DmCollectorBot:
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
         filters_map = draft.setdefault("filters", {})
-        if key == "premium_mode":
-            current = str(filters_map.get("premium_mode") or "premium_only")
+        mode_defaults = {
+            "bot_mode": "non_bot_only",
+            "admin_mode": "non_admin_only",
+            "photo_mode": "has_photo_only",
+            "username_mode": "has_username_only",
+            "premium_mode": "premium_only",
+        }
+        if key in mode_defaults:
+            current = str(filters_map.get(key) or mode_defaults[key])
             next_value = {
+                "non_bot_only": "bot_only",
+                "bot_only": "non_bot_only",
+                "non_admin_only": "admin_only",
+                "admin_only": "non_admin_only",
+                "has_photo_only": "no_photo_only",
+                "no_photo_only": "has_photo_only",
+                "has_username_only": "no_username_only",
+                "no_username_only": "has_username_only",
                 "premium_only": "non_premium_only",
                 "non_premium_only": "premium_only",
-            }.get(current, "premium_only")
-            filters_map["premium_mode"] = next_value
+            }.get(current, mode_defaults[key])
+            filters_map[key] = next_value
         else:
             filters_map[key] = not bool(filters_map.get(key))
         state["mode"] = "select_group_filters"
@@ -1408,12 +1424,12 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>设置筛选规则</b>",
             f"群组数：<code>{len(draft.get('channels') or [])}</code> · 时间范围：<code>{draft.get('days') or 1}</code> 天",
-            "普通项开启后会排除对应人群；会员项可切换为仅会员 / 非会员。",
+            "所有项目都改成二态切换，点一下就在两种采集口径之间切换。",
             "",
-            f"• 机器人：<code>{'过滤' if filters['exclude_bots'] else '保留'}</code>",
-            f"• 管理员：<code>{'过滤' if filters['exclude_admins'] else '保留'}</code>",
-            f"• 无头像：<code>{'过滤' if filters['exclude_no_photo'] else '保留'}</code>",
-            f"• 无用户名：<code>{'过滤' if filters['exclude_no_username'] else '保留（会导出 ID）'}</code>",
+            f"• 机器人：<code>{self._bot_mode_label(filters.get('bot_mode'))}</code>",
+            f"• 管理员：<code>{self._admin_mode_label(filters.get('admin_mode'))}</code>",
+            f"• 头像：<code>{self._photo_mode_label(filters.get('photo_mode'))}</code>",
+            f"• 用户名：<code>{self._username_mode_label(filters.get('username_mode'))}</code>",
             f"• 会员：<code>{self._premium_mode_label(filters.get('premium_mode'))}</code>",
         ]
         return "\n".join(lines)
@@ -1512,12 +1528,12 @@ class DmCollectorBot:
         filters = self._parse_group_filters(draft.get("filters"))
         keyboard = [
             [
-                premium_button(f"机器人：{'过滤' if filters['exclude_bots'] else '保留'}", self.settings.emoji_error_id, callback_data="wizard:gflt:toggle:exclude_bots"),
-                premium_button(f"管理员：{'过滤' if filters['exclude_admins'] else '保留'}", self.settings.emoji_stats_id, callback_data="wizard:gflt:toggle:exclude_admins"),
+                premium_button(f"机器人：{self._bot_mode_label(filters.get('bot_mode'))}", self.settings.emoji_error_id, callback_data="wizard:gflt:toggle:bot_mode"),
+                premium_button(f"管理员：{self._admin_mode_label(filters.get('admin_mode'))}", self.settings.emoji_stats_id, callback_data="wizard:gflt:toggle:admin_mode"),
             ],
             [
-                premium_button(f"无头像：{'过滤' if filters['exclude_no_photo'] else '保留'}", self.settings.emoji_upload_id, callback_data="wizard:gflt:toggle:exclude_no_photo"),
-                premium_button(f"无用户名：{'过滤' if filters['exclude_no_username'] else '保留'}", self.settings.emoji_inbox_id, callback_data="wizard:gflt:toggle:exclude_no_username"),
+                premium_button(f"头像：{self._photo_mode_label(filters.get('photo_mode'))}", self.settings.emoji_upload_id, callback_data="wizard:gflt:toggle:photo_mode"),
+                premium_button(f"用户名：{self._username_mode_label(filters.get('username_mode'))}", self.settings.emoji_inbox_id, callback_data="wizard:gflt:toggle:username_mode"),
             ],
             [
                 premium_button(f"会员：{self._premium_mode_label(filters.get('premium_mode'))}", self.settings.emoji_all_id, callback_data="wizard:gflt:toggle:premium_mode"),
@@ -1904,12 +1920,12 @@ class DmCollectorBot:
             result.append(normalized)
         return result
 
-    def _parse_group_filters(self, raw) -> dict[str, bool]:
+    def _parse_group_filters(self, raw) -> dict[str, str]:
         defaults = {
-            "exclude_bots": False,
-            "exclude_admins": False,
-            "exclude_no_photo": False,
-            "exclude_no_username": False,
+            "bot_mode": "non_bot_only",
+            "admin_mode": "non_admin_only",
+            "photo_mode": "has_photo_only",
+            "username_mode": "has_username_only",
             "premium_mode": "premium_only",
         }
         if isinstance(raw, str):
@@ -1918,30 +1934,70 @@ class DmCollectorBot:
             except Exception:
                 raw = None
         if isinstance(raw, dict):
-            for key in ("exclude_bots", "exclude_admins", "exclude_no_photo", "exclude_no_username"):
-                if key in raw:
-                    defaults[key] = bool(raw[key])
+            bot_mode = str(raw.get("bot_mode") or "")
+            admin_mode = str(raw.get("admin_mode") or "")
+            photo_mode = str(raw.get("photo_mode") or "")
+            username_mode = str(raw.get("username_mode") or "")
             premium_mode = str(raw.get("premium_mode") or "premium_only")
+
+            if bot_mode in {"non_bot_only", "bot_only"}:
+                defaults["bot_mode"] = bot_mode
+            elif raw.get("exclude_bots") is True:
+                defaults["bot_mode"] = "non_bot_only"
+
+            if admin_mode in {"non_admin_only", "admin_only"}:
+                defaults["admin_mode"] = admin_mode
+            elif raw.get("exclude_admins") is True:
+                defaults["admin_mode"] = "non_admin_only"
+
+            if photo_mode in {"has_photo_only", "no_photo_only"}:
+                defaults["photo_mode"] = photo_mode
+            elif raw.get("exclude_no_photo") is True:
+                defaults["photo_mode"] = "has_photo_only"
+
+            if username_mode in {"has_username_only", "no_username_only"}:
+                defaults["username_mode"] = username_mode
+            elif raw.get("exclude_no_username") is True:
+                defaults["username_mode"] = "has_username_only"
+
             if premium_mode in {"premium_only", "non_premium_only"}:
                 defaults["premium_mode"] = premium_mode
         return defaults
 
     def _format_filter_summary(self, raw_filters, *, empty_label: str = "全部保留") -> str:
         filters = self._parse_group_filters(raw_filters)
-        labels = []
-        if filters["exclude_bots"]:
-            labels.append("机器人")
-        if filters["exclude_admins"]:
-            labels.append("管理员")
-        if filters["exclude_no_photo"]:
-            labels.append("无头像")
-        if filters["exclude_no_username"]:
-            labels.append("无用户名")
-        if filters["premium_mode"] == "premium_only":
-            labels.append("仅会员")
-        elif filters["premium_mode"] == "non_premium_only":
-            labels.append("非会员")
+        labels = [
+            self._bot_mode_label(filters.get("bot_mode")),
+            self._admin_mode_label(filters.get("admin_mode")),
+            self._photo_mode_label(filters.get("photo_mode")),
+            self._username_mode_label(filters.get("username_mode")),
+            self._premium_mode_label(filters.get("premium_mode")),
+        ]
         return "、".join(labels) if labels else empty_label
+
+    @staticmethod
+    def _bot_mode_label(value: str | None) -> str:
+        if value == "bot_only":
+            return "仅机器人"
+        return "非机器人"
+
+    @staticmethod
+    def _admin_mode_label(value: str | None) -> str:
+        if value == "admin_only":
+            return "仅管理员"
+        return "非管理员"
+
+    @staticmethod
+    def _photo_mode_label(value: str | None) -> str:
+        if value == "no_photo_only":
+            return "无头像"
+        return "仅有头像"
+
+    @staticmethod
+    def _username_mode_label(value: str | None) -> str:
+        if value == "no_username_only":
+            return "无用户名（导出 ID）"
+        return "仅有用户名"
 
     @staticmethod
     def _premium_mode_label(value: str | None) -> str:
