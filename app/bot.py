@@ -150,18 +150,28 @@ class DmCollectorBot:
             await self._start_collect_wizard(query, update.effective_user.id)
             return
         if data == "collect:tasks":
-            await self._show_task_list(query)
+            await self._show_task_list(query, page=1)
+            return
+        if data.startswith("collect:tasks:"):
+            page = int(data.split(":")[-1])
+            await self._show_task_list(query, page=page)
             return
         if data.startswith("task:view:"):
-            task_id = int(data.split(":")[-1])
-            await self._show_task_detail(query, task_id, force=True)
+            parts = data.split(":")
+            task_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await self._show_task_detail(query, task_id, page=page, force=True)
             return
         if data.startswith("task:refresh:"):
-            task_id = int(data.split(":")[-1])
-            await self._show_task_detail(query, task_id, force=True)
+            parts = data.split(":")
+            task_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await self._show_task_detail(query, task_id, page=page, force=True)
             return
         if data.startswith("task:stop:"):
-            task_id = int(data.split(":")[-1])
+            parts = data.split(":")
+            task_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 1
             self.db.stop_collect_task_now(task_id, reason="管理员手动停止任务，账号已释放")
             runner = self.task_runners.get(task_id)
             if runner and not runner.done():
@@ -170,7 +180,13 @@ class DmCollectorBot:
                     await runner
                 except asyncio.CancelledError:
                     pass
-            await self._show_task_detail(query, task_id, force=True)
+            await self._show_task_detail(query, task_id, page=page, force=True)
+            return
+        if data.startswith("task:delete:"):
+            parts = data.split(":")
+            task_id = int(parts[2])
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await self._delete_task(query, task_id, page=page)
             return
         if data.startswith("task:export:"):
             task_id = int(data.split(":")[-1])
@@ -744,9 +760,17 @@ class DmCollectorBot:
         ]
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
 
-    async def _show_task_list(self, query) -> None:
-        tasks = self.db.list_collect_tasks(limit=8)
-        lines = [f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>任务列表</b>"]
+    async def _show_task_list(self, query, page: int = 1) -> None:
+        per_page = 5
+        total = self.db.count_collect_tasks()
+        total_pages = max(1, ceil(total / per_page))
+        page = max(1, min(page, total_pages))
+        tasks = self.db.list_collect_tasks(limit=per_page, offset=(page - 1) * per_page)
+        lines = [
+            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>任务列表</b>",
+            f"页码：<code>{page}/{total_pages}</code>",
+            f"任务总数：<code>{total}</code>",
+        ]
         if not tasks:
             lines.append("\n还没有采集任务。")
         else:
@@ -755,25 +779,27 @@ class DmCollectorBot:
                     f"\n• 任务 #{task['id']} · {status_badge(task['status'])} · 频道 <code>{task['finished_channels']}/{task['total_channels']}</code> · 去重 <code>{task['unique_hits']}</code>"
                 )
         keyboard = []
-        row_buffer = []
         for task in tasks:
-            row_buffer.append(
-                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}")
-            )
-            if len(row_buffer) == 2:
-                keyboard.append(row_buffer)
-                row_buffer = []
-        if row_buffer:
-            keyboard.append(row_buffer)
+            keyboard.append([
+                premium_button(f"查看任务 #{task['id']}", self.settings.emoji_history_id, callback_data=f"task:view:{task['id']}:{page}"),
+                premium_button(f"删除 #{task['id']}", self.settings.emoji_error_id, callback_data=f"task:delete:{task['id']}:{page}"),
+            ])
+        nav = []
+        if page > 1:
+            nav.append(premium_button("上一页", self.settings.emoji_back_id, callback_data=f"collect:tasks:{page - 1}"))
+        if page < total_pages:
+            nav.append(premium_button("下一页", self.settings.emoji_next_id, callback_data=f"collect:tasks:{page + 1}"))
+        if nav:
+            keyboard.append(nav)
         keyboard.append([
             premium_button("返回采集中心", self.settings.emoji_back_id, callback_data="menu:collect"),
-            premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data="collect:tasks"),
+            premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data=f"collect:tasks:{page}"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
-    async def _show_task_detail(self, query, task_id: int, force: bool = False) -> None:
+    async def _show_task_detail(self, query, task_id: int, page: int = 1, force: bool = False) -> None:
         text = self._format_task_text(task_id)
-        await self._safe_edit(query, text, self._build_task_keyboard(task_id))
+        await self._safe_edit(query, text, self._build_task_keyboard(task_id, page=page))
 
     async def _show_history(self, query) -> None:
         tasks = self.db.list_collect_tasks(limit=8, history=True)
@@ -802,6 +828,32 @@ class DmCollectorBot:
             premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data="menu:history"),
         ])
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
+
+    async def _delete_task(self, query, task_id: int, page: int = 1) -> None:
+        task = self.db.get_collect_task(task_id)
+        if not task:
+            await self._show_task_list(query, page=page)
+            return
+        if task["status"] in {"queued", "running"}:
+            self.db.stop_collect_task_now(task_id, reason="管理员删除任务，账号已释放")
+            runner = self.task_runners.get(task_id)
+            if runner and not runner.done():
+                runner.cancel()
+                try:
+                    await runner
+                except asyncio.CancelledError:
+                    pass
+        deleted = self.db.delete_collect_task(task_id)
+        if deleted and deleted["result_file_path"]:
+            try:
+                Path(str(deleted["result_file_path"])).unlink(missing_ok=True)
+            except Exception:
+                logger.exception("删除任务导出文件失败: %s", deleted["result_file_path"])
+        total_after = self.db.count_collect_tasks()
+        per_page = 5
+        total_pages_after = max(1, ceil(total_after / per_page))
+        target_page = max(1, min(page, total_pages_after))
+        await self._show_task_list(query, page=target_page)
 
     async def _start_collect_wizard(self, query, user_id: int) -> None:
         active_accounts = self.db.get_active_accounts()
@@ -1224,23 +1276,27 @@ class DmCollectorBot:
         ]
         return InlineKeyboardMarkup(keyboard)
 
-    def _build_task_keyboard(self, task_id: int) -> InlineKeyboardMarkup:
+    def _build_task_keyboard(self, task_id: int, *, page: int = 1) -> InlineKeyboardMarkup:
         task = self.db.get_collect_task(task_id)
         keyboard = [
             [
-                premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"task:refresh:{task_id}"),
+                premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"task:refresh:{task_id}:{page}"),
                 premium_button("导出结果", self.settings.emoji_export_id, callback_data=f"task:export:{task_id}"),
+            ],
+            [
+                premium_button("删除任务", self.settings.emoji_error_id, callback_data=f"task:delete:{task_id}:{page}"),
+                premium_button("返回任务列表", self.settings.emoji_back_id, callback_data=f"collect:tasks:{page}"),
             ],
         ]
         if task and task["status"] in {"queued", "running"}:
-            keyboard.append([
-                premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"task:stop:{task_id}"),
-                premium_button("返回任务列表", self.settings.emoji_back_id, callback_data="collect:tasks"),
+            keyboard.insert(1, [
+                premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"task:stop:{task_id}:{page}"),
+                premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
             ])
         else:
             keyboard.append([
-                premium_button("返回任务列表", self.settings.emoji_back_id, callback_data="collect:tasks"),
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
+                premium_button("任务列表", self.settings.emoji_progress_id, callback_data=f"collect:tasks:{page}"),
             ])
         return InlineKeyboardMarkup(keyboard)
 

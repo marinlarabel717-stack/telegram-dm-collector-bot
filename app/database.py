@@ -446,13 +446,21 @@ class Database:
         with self.lock:
             return self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
 
-    def list_collect_tasks(self, *, limit: int = 10, history: bool = False) -> list[sqlite3.Row]:
+    def list_collect_tasks(self, *, limit: int = 10, offset: int = 0, history: bool = False) -> list[sqlite3.Row]:
         with self.lock:
             if history:
-                query = "SELECT * FROM collect_tasks ORDER BY id DESC LIMIT ?"
-                return self.conn.execute(query, (limit,)).fetchall()
-            query = "SELECT * FROM collect_tasks WHERE status IN ('queued','running','stopped','error','completed') ORDER BY id DESC LIMIT ?"
-            return self.conn.execute(query, (limit,)).fetchall()
+                query = "SELECT * FROM collect_tasks ORDER BY id DESC LIMIT ? OFFSET ?"
+                return self.conn.execute(query, (limit, offset)).fetchall()
+            query = "SELECT * FROM collect_tasks WHERE status IN ('queued','running','stopped','error','completed') ORDER BY id DESC LIMIT ? OFFSET ?"
+            return self.conn.execute(query, (limit, offset)).fetchall()
+
+    def count_collect_tasks(self, *, history: bool = False) -> int:
+        with self.lock:
+            if history:
+                return self.conn.execute("SELECT COUNT(*) FROM collect_tasks").fetchone()[0]
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM collect_tasks WHERE status IN ('queued','running','stopped','error','completed')"
+            ).fetchone()[0]
 
     def list_collect_task_channels(self, task_id: int) -> list[sqlite3.Row]:
         with self.lock:
@@ -687,6 +695,17 @@ class Database:
                 (result_file_path, task_id),
             )
             self.conn.commit()
+
+    def delete_collect_task(self, task_id: int) -> sqlite3.Row | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                return None
+            self.conn.execute("DELETE FROM collect_task_usernames WHERE task_id=?", (task_id,))
+            self.conn.execute("DELETE FROM collect_task_channels WHERE task_id=?", (task_id,))
+            self.conn.execute("DELETE FROM collect_tasks WHERE id=?", (task_id,))
+            self.conn.commit()
+            return row
 
     def export_task_usernames_txt(self, task_id: int, export_dir: Path) -> Path:
         export_dir.mkdir(parents=True, exist_ok=True)
