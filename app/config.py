@@ -6,6 +6,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .emoji import DEFAULT_EMOJI_IDS
+
 
 load_dotenv()
 
@@ -20,6 +22,11 @@ class Settings:
     auto_reply_enabled: bool
     auto_reply_text: str
     welcome_text: str
+    emoji_welcome_id: str
+    emoji_inbox_id: str
+    emoji_stats_id: str
+    emoji_export_id: str
+    emoji_success_id: str
 
 
 
@@ -62,4 +69,9 @@ def get_settings() -> Settings:
         auto_reply_enabled=_parse_bool(os.getenv("AUTO_REPLY_ENABLED"), False),
         auto_reply_text=os.getenv("AUTO_REPLY_TEXT", "消息已收到，我们会尽快查看。"),
         welcome_text=os.getenv("WELCOME_TEXT", "欢迎，直接给我发消息就行，我会自动记录你的资料和私信内容。"),
+        emoji_welcome_id=os.getenv("EMOJI_WELCOME_ID", DEFAULT_EMOJI_IDS["welcome"]),
+        emoji_inbox_id=os.getenv("EMOJI_INBOX_ID", DEFAULT_EMOJI_IDS["inbox"]),
+        emoji_stats_id=os.getenv("EMOJI_STATS_ID", DEFAULT_EMOJI_IDS["stats"]),
+        emoji_export_id=os.getenv("EMOJI_EXPORT_ID", DEFAULT_EMOJI_IDS["export"]),
+        emoji_success_id=os.getenv("EMOJI_SUCCESS_ID", DEFAULT_EMOJI_IDS["success"]),
     )
