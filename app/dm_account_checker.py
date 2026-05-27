@@ -92,12 +92,19 @@ class DmAccountChecker:
             if not await client.is_user_authorized():
                 raise RuntimeError("session 未登录")
             entity = await client.get_input_entity("SpamBot")
+            last_incoming_id = 0
+            async for message in client.iter_messages(entity, limit=10):
+                if message.out:
+                    continue
+                last_incoming_id = max(last_incoming_id, int(getattr(message, "id", 0) or 0))
             await client.send_message(entity, "/start")
 
-            for _ in range(10):
+            for _ in range(15):
                 await asyncio.sleep(1)
-                async for message in client.iter_messages(entity, limit=3):
+                async for message in client.iter_messages(entity, limit=10):
                     if message.out:
+                        continue
+                    if int(getattr(message, "id", 0) or 0) <= last_incoming_id:
                         continue
                     text = (getattr(message, "raw_text", None) or getattr(message, "message", None) or "").strip()
                     if text:
@@ -112,17 +119,17 @@ class DmAccountChecker:
         text = (reply_text or "").strip()
         lowered = text.lower()
 
-        if any(keyword in lowered for keyword in ["good news", "no limits are currently applied", "you can freely send messages", "目前没有任何限制", "目前没有限制", "没有限制"]):
+        if any(keyword in lowered for keyword in ["good news", "no limits are currently applied", "you can freely send messages", "free as a bird", "目前没有任何限制", "目前没有限制", "没有限制"]):
             return "unrestricted", "无限制"
         if "frozen" in lowered or "冻结" in text:
             return "frozen", "冻结"
         if any(keyword in lowered for keyword in ["some users in some regions", "some countries", "from some regions", "地区限制", "地理位置限制"]):
             return "geo_limited", "地理位置限制"
-        if any(keyword in lowered for keyword in ["mutual contact", "mutual contacts", "双向联系人", "双向"]):
+        if any(keyword in lowered for keyword in ["mutual contact", "mutual contacts", "people who are in your contacts", "双向联系人", "双向"]):
             if any(keyword in lowered for keyword in ["will be lifted", "temporarily", "temporary", "until", "暂时", "临时"]):
                 return "temp_mutual", "临时双向"
             return "permanent_mutual", "永久双向"
-        if any(keyword in lowered for keyword in ["too many", "spam", "limited", "限制", "can't send"]):
+        if any(keyword in lowered for keyword in ["too many", "spam", "limited", "can only send", "can't send", "cannot send", "限制"]):
             return "spam_limited", "官方限流"
         return "unknown", "待人工确认"
 

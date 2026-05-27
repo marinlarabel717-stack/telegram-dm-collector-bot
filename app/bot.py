@@ -1041,6 +1041,9 @@ class DmCollectorBot:
                 premium_button("导出受限", self.settings.emoji_timeout_id, callback_data="account:export:limited"),
             ],
             [
+                premium_button("导出全部账号", self.settings.emoji_export_id, callback_data="account:export:all"),
+            ],
+            [
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
                 premium_button("刷新页面", self.settings.emoji_refresh_id, callback_data="menu:accounts"),
             ],
@@ -1075,6 +1078,9 @@ class DmCollectorBot:
             [
                 premium_button("导出无限制", self.settings.emoji_success_id, callback_data="account:export:unrestricted"),
                 premium_button("导出受限", self.settings.emoji_timeout_id, callback_data="account:export:limited"),
+            ],
+            [
+                premium_button("导出全部账号", self.settings.emoji_export_id, callback_data="account:export:all"),
             ],
         ]
         row_buffer = []
@@ -3217,6 +3223,7 @@ class DmCollectorBot:
     # ---------- helpers ----------
     def _account_export_bucket_label(self, bucket: str) -> str:
         return {
+            "all": "全部账号",
             "unrestricted": "无限制",
             "limited": "受限",
             "invalid": "失效/封禁",
@@ -3230,7 +3237,9 @@ class DmCollectorBot:
         for row in rows:
             restriction = str(row["restriction_status"] or "unknown")
             runtime_status = str(row["status"] or "active")
-            if bucket == "unrestricted" and restriction == "unrestricted":
+            if bucket == "all":
+                matched.append(row)
+            elif bucket == "unrestricted" and restriction == "unrestricted":
                 matched.append(row)
             elif bucket == "limited" and restriction in limited_statuses:
                 matched.append(row)
