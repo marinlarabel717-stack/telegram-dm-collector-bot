@@ -761,7 +761,7 @@ class DmCollectorBot:
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
 
     async def _show_task_list(self, query, page: int = 1) -> None:
-        per_page = 5
+        per_page = 6
         total = self.db.count_collect_tasks()
         total_pages = max(1, ceil(total / per_page))
         page = max(1, min(page, total_pages))
@@ -850,7 +850,7 @@ class DmCollectorBot:
             except Exception:
                 logger.exception("删除任务导出文件失败: %s", deleted["result_file_path"])
         total_after = self.db.count_collect_tasks()
-        per_page = 5
+        per_page = 6
         total_pages_after = max(1, ceil(total_after / per_page))
         target_page = max(1, min(page, total_pages_after))
         await self._show_task_list(query, page=target_page)
