@@ -551,8 +551,28 @@ class DmCollectorBot:
         deleted_broken: list[str] = []
         deleted_banned: list[str] = []
         kept_other_errors: list[str] = []
+        total_checked = len(rows)
 
-        for row in rows:
+        for index, row in enumerate(rows, start=1):
+            current_label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
+            await self._safe_edit(
+                query,
+                self._format_check_all_progress_text(
+                    total=total_checked,
+                    processed=index - 1,
+                    current_label=str(current_label),
+                    kept_active=kept_active,
+                    deleted_broken=len(deleted_broken),
+                    deleted_banned=len(deleted_banned),
+                    kept_other_errors=len(kept_other_errors),
+                ),
+                InlineKeyboardMarkup([
+                    [
+                        premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
+                        premium_button("账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                    ],
+                ]),
+            )
             result = await self.collection_manager.verify_account(row)
             refreshed = self.db.get_account(row["id"])
             account = refreshed or row
@@ -573,7 +593,6 @@ class DmCollectorBot:
             kept_other_errors.append(f"{label}｜{issue_text}")
 
         total_alive = self.db.count_accounts()
-        total_checked = len(rows)
         lines = [
             f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检测完成</b>",
             f"总检测账号：<code>{total_checked}</code>",
@@ -948,6 +967,33 @@ class DmCollectorBot:
         return (
             f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} <b>选择采集时间范围</b>\n"
             f"频道数：<code>{len(channels)}</code>\n\n{preview}"
+        )
+
+    def _format_check_all_progress_text(
+        self,
+        *,
+        total: int,
+        processed: int,
+        current_label: str,
+        kept_active: int,
+        deleted_broken: int,
+        deleted_banned: int,
+        kept_other_errors: int,
+    ) -> str:
+        current_index = min(processed + 1, total)
+        return "\n".join(
+            [
+                f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>正在批量检测账号</b>",
+                f"进度：<code>{processed}/{total}</code>",
+                f"当前检测：<code>{current_index}/{total}</code> · <code>{html.escape(current_label[:36], quote=False)}</code>",
+                "",
+                f"已确认可用：<code>{kept_active}</code>",
+                f"已删损坏：<code>{deleted_broken}</code>",
+                f"已删封禁/失效：<code>{deleted_banned}</code>",
+                f"其他异常：<code>{kept_other_errors}</code>",
+                "",
+                "账号较多时会逐个更新这里，不是卡住。",
+            ]
         )
 
     def _custom_days_prompt_text(self) -> str:
