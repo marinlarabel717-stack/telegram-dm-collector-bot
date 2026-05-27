@@ -10,7 +10,7 @@ from telethon.errors import FloodWaitError, RPCError
 from .collector import CollectionManager
 from .database import Database
 from .dm_logging import compose_log
-from .dm_policy import DMTaskPolicy
+from .dm_policy import DMTaskPolicy, DelayWindow, RetryPolicy
 from .dm_repository import DmRepository
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,8 @@ class DmSenderManager:
         client = None
         success_count = int(account_row["sent_success_count"] or 0)
         frequent_errors = int(account_row["frequent_error_count"] or 0)
+        payload = json.loads(str(self.repository.get_dm_task(task_id)["payload_json"] or "{}"))
+        message_parts = self._build_message_parts(payload)
         self.repository.update_dm_task_account(task_id, account_id, status="running", last_error=None)
         try:
             client = self.collection_manager._build_client(session_file)
@@ -98,6 +100,8 @@ class DmSenderManager:
                     break
                 if policy.should_rotate_account(success_count):
                     logger.info(compose_log(f"达到单号上限｜success={success_count}", task_id=task_id, account_id=account_id))
+                    if not policy.auto_switch_account:
+                        self.repository.request_dm_task_stop(task_id)
                     break
                 try:
                     recipient = queue.get_nowait()
@@ -105,39 +109,95 @@ class DmSenderManager:
                     break
                 recipient_id = int(recipient["recipient_id"])
                 target = str(recipient["normalized_input"])
+                retry_count = int(recipient["retry_count"] or 0)
                 self.repository.mark_dm_recipient_sending(task_id, recipient_id, account_id)
                 try:
                     entity = await client.get_input_entity(target)
-                    if policy.typing_simulation:
-                        async with client.action(entity, "typing"):
-                            await asyncio.sleep(min(2.5, max(0.5, policy.delay_window.next_delay() / 3)))
-                    payload = json.loads(str(self.repository.get_dm_task(task_id)["payload_json"] or "{}"))
-                    text = str(payload.get("text") or "").strip()
-                    await client.send_message(entity, text)
+                    await self._send_message_parts(client, entity, message_parts, policy)
                     success_count += 1
                     self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
                     self.repository.update_dm_task_account(task_id, account_id, success_delta=1, last_error=None)
-                    self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="success", message=target)
+                    self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="success", message="发送成功")
                     logger.info(compose_log("发送成功", task_id=task_id, account_id=account_id, recipient=target))
                 except FloodWaitError as exc:
                     wait_seconds = int(getattr(exc, "seconds", 0) or 0)
-                    self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="pending", error_code="flood_wait", error_message=f"FloodWait {wait_seconds}s", increment_retry=True)
-                    self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="retry", message=target, raw_error=f"FloodWait {wait_seconds}s")
+                    if retry_count + 1 > policy.retry_policy.max_retries:
+                        self.repository.mark_dm_recipient_result(
+                            task_id,
+                            recipient_id,
+                            account_id=account_id,
+                            status="failed",
+                            error_code="flood_wait",
+                            error_message=f"FloodWait {wait_seconds}s，重试已耗尽",
+                            increment_retry=True,
+                        )
+                        self.repository.update_dm_task_account(task_id, account_id, fail_delta=1, last_error=f"FloodWait {wait_seconds}s")
+                        self.repository.add_send_log(
+                            task_id=task_id,
+                            account_id=account_id,
+                            recipient_id=recipient_id,
+                            action="send",
+                            status="failed",
+                            message="官方限速，重试已耗尽",
+                            raw_error=f"FloodWait {wait_seconds}s",
+                        )
+                        logger.warning(compose_log(f"限速重试耗尽｜等待={wait_seconds}s", task_id=task_id, account_id=account_id, recipient=target))
+                        continue
+                    self.repository.mark_dm_recipient_result(
+                        task_id,
+                        recipient_id,
+                        account_id=account_id,
+                        status="pending",
+                        error_code="flood_wait",
+                        error_message=f"FloodWait {wait_seconds}s",
+                        increment_retry=True,
+                    )
+                    self.repository.add_send_log(
+                        task_id=task_id,
+                        account_id=account_id,
+                        recipient_id=recipient_id,
+                        action="send",
+                        status="retry",
+                        message="官方限速，自动等待后重试",
+                        raw_error=f"FloodWait {wait_seconds}s",
+                    )
                     logger.warning(compose_log(f"命中限速｜等待={wait_seconds}s", task_id=task_id, account_id=account_id, recipient=target))
                     await asyncio.sleep(max(wait_seconds, 1))
                     queue.put_nowait(recipient)
                 except Exception as exc:  # noqa: BLE001
-                    short = self.collection_manager._short_error(exc)
-                    lowered = short.lower()
-                    frequent_hit = "too many requests" in lowered or "peerflood" in lowered or "user is restricted" in lowered
-                    frequent_errors += 1 if frequent_hit else 0
-                    final_status = "failed"
-                    self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status=final_status, error_code="send_failed", error_message=short, increment_retry=True)
-                    self.repository.update_dm_task_account(task_id, account_id, fail_delta=1, frequent_delta=1 if frequent_hit else 0, last_error=short)
-                    self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="failed", message=target, raw_error=short)
-                    logger.warning(compose_log(f"发送失败｜{short}", task_id=task_id, account_id=account_id, recipient=target))
+                    error_code, error_message, frequent_hit = self._classify_send_error(exc)
+                    if frequent_hit:
+                        frequent_errors += 1
+                    self.repository.mark_dm_recipient_result(
+                        task_id,
+                        recipient_id,
+                        account_id=account_id,
+                        status="failed",
+                        error_code=error_code,
+                        error_message=error_message,
+                        increment_retry=True,
+                    )
+                    self.repository.update_dm_task_account(
+                        task_id,
+                        account_id,
+                        fail_delta=1,
+                        frequent_delta=1 if frequent_hit else 0,
+                        last_error=error_message,
+                    )
+                    self.repository.add_send_log(
+                        task_id=task_id,
+                        account_id=account_id,
+                        recipient_id=recipient_id,
+                        action="send",
+                        status="failed",
+                        message=error_message,
+                        raw_error=self.collection_manager._short_error(exc),
+                    )
+                    logger.warning(compose_log(f"发送失败｜{error_code}｜{error_message}", task_id=task_id, account_id=account_id, recipient=target))
                     if policy.should_stop_account_for_frequent(frequent_errors):
                         logger.warning(compose_log(f"达到频繁阈值，停止该账号｜count={frequent_errors}", task_id=task_id, account_id=account_id))
+                        if not policy.auto_switch_account:
+                            self.repository.request_dm_task_stop(task_id)
                         break
                 finally:
                     queue.task_done()
@@ -165,6 +225,28 @@ class DmSenderManager:
             if client is not None:
                 await client.disconnect()
 
+    async def _send_message_parts(self, client, entity, parts: list[str], policy: DMTaskPolicy) -> None:
+        for index, part in enumerate(parts):
+            if policy.typing_simulation:
+                async with client.action(entity, "typing"):
+                    await asyncio.sleep(min(2.5, max(0.5, policy.delay_window.next_delay() / 3)))
+            await client.send_message(entity, part)
+            if index < len(parts) - 1:
+                await asyncio.sleep(min(3.0, max(0.8, policy.delay_window.next_delay() / 4)))
+
+    @staticmethod
+    def _build_message_parts(payload: dict) -> list[str]:
+        mode = str(payload.get("mode") or "single")
+        if mode == "three_stage":
+            return [
+                part for part in (
+                    str(payload.get("greeting") or "").strip(),
+                    str(payload.get("body") or "").strip(),
+                    str(payload.get("closing") or "").strip(),
+                ) if part
+            ]
+        return [str(payload.get("text") or "").strip()]
+
     def _policy_from_task(self, task) -> DMTaskPolicy:
         raw = str(task["policy_json"] or "{}")
         data = json.loads(raw)
@@ -173,7 +255,36 @@ class DmSenderManager:
             auto_switch_account=bool(data.get("auto_switch_account", True)),
             auto_stop_when_accounts_exhausted=bool(data.get("auto_stop_when_accounts_exhausted", True)),
             typing_simulation=bool(data.get("typing_simulation", True)),
+            delay_window=DelayWindow(
+                min_seconds=float(data.get("delay_min") or 8),
+                max_seconds=float(data.get("delay_max") or 15),
+            ),
+            retry_policy=RetryPolicy(
+                max_retries=int(data.get("max_retries") or 3),
+                stop_account_after_user_frequent=int(data.get("stop_account_after_user_frequent") or 30),
+            ),
         )
+
+    def _classify_send_error(self, exc: Exception) -> tuple[str, str, bool]:
+        short = self.collection_manager._short_error(exc)
+        lowered = short.lower()
+        if "peerflood" in lowered:
+            return "peer_flood", "官方判定发送过于频繁", True
+        if "privacy" in lowered or "privacyrestricted" in lowered or "user is not mutual contact" in lowered:
+            return "privacy_restricted", "对方隐私限制，无法私信", False
+        if "username not occupied" in lowered or "cannot find" in lowered or "no user has" in lowered or "entity not found" in lowered:
+            return "user_not_found", "用户不存在或无法解析", False
+        if "bot method invalid" in lowered or "bot invalid" in lowered:
+            return "bot_target", "目标不是可私信的普通用户", False
+        if "user is blocked" in lowered or "you blocked" in lowered:
+            return "blocked", "对方已拉黑或账号关系异常", False
+        if "too many requests" in lowered or "retry after" in lowered:
+            return "too_many_requests", "请求过于频繁", True
+        if "user is restricted" in lowered or "mutual" in lowered:
+            return "mutual_limit", "账号存在双向或发送限制", True
+        if "frozen" in lowered:
+            return "frozen", "账号疑似冻结", True
+        return "send_failed", short or exc.__class__.__name__, False
 
     async def _emit_progress(self, task_id: int) -> None:
         if self.on_progress:

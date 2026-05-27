@@ -267,6 +267,45 @@ class DmRepository:
             )
             return self.db.conn.execute(query, params).fetchall()
 
+    def get_dm_task_current_recipient(self, task_id: int) -> sqlite3.Row | None:
+        with self.db.lock:
+            return self.db.conn.execute(
+                """
+                SELECT tr.*, r.normalized_input, r.input_type, a.username AS account_username, a.phone AS account_phone, a.display_name AS account_display_name
+                FROM dm_task_recipients tr
+                JOIN dm_recipients r ON r.id = tr.recipient_id
+                LEFT JOIN accounts a ON a.id = tr.assigned_account_id
+                WHERE tr.task_id=? AND tr.status='sending'
+                ORDER BY tr.updated_at DESC, tr.id DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+
+    def list_dm_recent_logs(self, task_id: int, *, limit: int = 5) -> list[sqlite3.Row]:
+        with self.db.lock:
+            return self.db.conn.execute(
+                """
+                SELECT l.*, r.normalized_input, a.username AS account_username, a.phone AS account_phone, a.display_name AS account_display_name
+                FROM dm_send_logs l
+                LEFT JOIN dm_recipients r ON r.id = l.recipient_id
+                LEFT JOIN accounts a ON a.id = l.account_id
+                WHERE l.task_id=?
+                ORDER BY l.id DESC
+                LIMIT ?
+                """,
+                (task_id, limit),
+            ).fetchall()
+
+    def get_dm_task_processed_count(self, task_id: int) -> int:
+        with self.db.lock:
+            return int(
+                self.db.conn.execute(
+                    "SELECT COUNT(*) FROM dm_task_recipients WHERE task_id=? AND status IN ('sending','success','failed','skipped')",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+
     def create_or_get_recipients(self, targets: Iterable[ParsedTarget]) -> list[int]:
         recipient_ids: list[int] = []
         with self.db.lock:
