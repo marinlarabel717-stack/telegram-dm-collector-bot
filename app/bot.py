@@ -4,6 +4,7 @@ import asyncio
 import html
 import re
 import time
+import zipfile
 from math import ceil
 from pathlib import Path
 
@@ -201,39 +202,74 @@ class DmCollectorBot:
             return
 
         document = update.effective_message.document
-        if not document or not (document.file_name or "").lower().endswith(".session"):
+        if not document:
+            return
+
+        file_name = (document.file_name or "").lower()
+        if not (file_name.endswith(".session") or file_name.endswith(".zip")):
             await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 目前只支持上传 <code>.session</code> 文件。",
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 目前支持上传 <code>.session</code> 或包含 <code>.session + .json</code> 的 <code>.zip</code> 文件。",
                 parse_mode=ParseMode.HTML,
             )
             return
 
-        safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", Path(document.file_name).name)
-        target = self.settings.session_dir / safe_name
-        if target.exists():
-            target = self.settings.session_dir / f"{target.stem}_{int(time.time())}.session"
-
         await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
-        tg_file = await document.get_file()
-        await tg_file.download_to_drive(custom_path=str(target))
+        try:
+            session_files = await self._save_uploaded_session_files(document)
+        except zipfile.BadZipFile:
+            await update.effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 这个 zip 看起来不是有效压缩包，请重新打包后再传。",
+                parse_mode=ParseMode.HTML,
+            )
+            return
 
-        result = await self.collection_manager.verify_session_file(target)
-        account = self.db.upsert_account(
-            session_name=target.stem,
-            session_file=str(target),
-            tg_user_id=result.tg_user_id,
-            phone=result.phone,
-            username=result.username,
-            display_name=result.display_name,
-            status=result.status,
-            last_error=result.last_error,
-        )
+        if not session_files:
+            await update.effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 压缩包里没找到可用的 <code>.session</code> 文件。",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        imported_accounts = []
+        for session_file in session_files:
+            result = await self.collection_manager.verify_session_file(session_file)
+            account = self.db.upsert_account(
+                session_name=session_file.stem,
+                session_file=str(session_file),
+                tg_user_id=result.tg_user_id,
+                phone=result.phone,
+                username=result.username,
+                display_name=result.display_name,
+                status=result.status,
+                last_error=result.last_error,
+            )
+            imported_accounts.append(account)
+
         self._clear_state(update.effective_user.id)
+        if len(imported_accounts) == 1:
+            await update.effective_message.reply_text(
+                self._format_account_text(imported_accounts[0]),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=self._build_account_detail_keyboard(imported_accounts[0]["id"]),
+            )
+            return
+
+        lines = [
+            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>批量导入完成</b>",
+            f"导入账号数：<code>{len(imported_accounts)}</code>",
+            "",
+        ]
+        for account in imported_accounts[:10]:
+            label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+            lines.append(f"• #{account['id']} {html.escape(str(label), quote=False)} · {status_badge(account['status'])}")
+        if len(imported_accounts) > 10:
+            lines.append(f"… 其余 <code>{len(imported_accounts) - 10}</code> 个账号已写入列表")
         await update.effective_message.reply_text(
-            self._format_account_text(account),
+            "\n".join(lines),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
-            reply_markup=self._build_account_detail_keyboard(account["id"]),
+            reply_markup=self._single_back_keyboard("account:list:1"),
         )
 
     async def handle_admin_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -642,9 +678,9 @@ class DmCollectorBot:
     def _upload_prompt_text(self) -> str:
         return (
             f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>上传 session</b>\n"
-            f"请直接发送一个 <code>.session</code> 文件给我。\n\n"
+            f"请直接发送一个 <code>.session</code> 文件，或发送包含 <code>.session + .json</code> 的 <code>.zip</code> 压缩包。\n\n"
             f"收到后会自动：\n"
-            f"1. 保存文件\n2. 验证是否已登录\n3. 写入账号列表"
+            f"1. 保存/解压文件\n2. 验证是否已登录\n3. 写入账号列表"
         )
 
     def _channels_prompt_text(self) -> str:
@@ -923,6 +959,55 @@ class DmCollectorBot:
             if "Message is not modified" in str(exc):
                 return
             raise
+
+    async def _save_uploaded_session_files(self, document) -> list[Path]:
+        original_name = Path(document.file_name or f"upload_{int(time.time())}")
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", original_name.name)
+        temp_target = self.settings.session_dir / f"upload_{int(time.time())}_{safe_name}"
+        tg_file = await document.get_file()
+        await tg_file.download_to_drive(custom_path=str(temp_target))
+
+        if temp_target.suffix.lower() == ".session":
+            final_session = self._unique_session_path(temp_target.name)
+            temp_target.replace(final_session)
+            return [final_session]
+
+        session_files: list[Path] = []
+        archive_sessions: list[tuple[str, bytes]] = []
+        extracted_json: dict[str, bytes] = {}
+        try:
+            with zipfile.ZipFile(temp_target) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    entry_name = Path(info.filename).name
+                    if not entry_name:
+                        continue
+                    suffix = Path(entry_name).suffix.lower()
+                    if suffix == ".json":
+                        extracted_json[Path(entry_name).stem.lower()] = zf.read(info)
+                    elif suffix == ".session":
+                        archive_sessions.append((entry_name, zf.read(info)))
+
+                for entry_name, content in archive_sessions:
+                    final_session = self._unique_session_path(entry_name)
+                    final_session.write_bytes(content)
+                    sidecar = extracted_json.get(Path(entry_name).stem.lower())
+                    if sidecar is not None:
+                        final_session.with_suffix(".json").write_bytes(sidecar)
+                    session_files.append(final_session)
+            return session_files
+        finally:
+            temp_target.unlink(missing_ok=True)
+
+    def _unique_session_path(self, file_name: str) -> Path:
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", Path(file_name).name)
+        if not safe_name.lower().endswith(".session"):
+            safe_name = f"{Path(safe_name).stem}.session"
+        target = self.settings.session_dir / safe_name
+        if not target.exists():
+            return target
+        return self.settings.session_dir / f"{target.stem}_{int(time.time() * 1000)}.session"
 
     def _parse_channels(self, text: str) -> list[str]:
         result = []
