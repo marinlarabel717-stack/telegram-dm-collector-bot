@@ -66,13 +66,17 @@ class DmSenderManager:
         for row in recipients:
             queue.put_nowait(row)
 
+        account_queue: asyncio.Queue = asyncio.Queue()
+        for row in accounts:
+            account_queue.put_nowait(row)
+
         worker_count = min(int(task["worker_count"] or 1), len(accounts), queue.qsize())
         self.repository.mark_dm_task_status(task_id, "running")
         await self._emit_progress(task_id)
         logger.info(compose_log(f"启动｜目标={queue.qsize()}｜账号={len(accounts)}｜并发={worker_count}", task_id=task_id))
 
         workers = [
-            asyncio.create_task(self._account_worker(task_id, queue, accounts[index], active_policy))
+            asyncio.create_task(self._account_slot_worker(task_id, queue, account_queue, active_policy, slot_index=index + 1))
             for index in range(worker_count)
         ]
         try:
@@ -109,6 +113,19 @@ class DmSenderManager:
         if restriction_status in {"session_invalid", "frozen"}:
             return False, restriction_reason or f"限制状态={restriction_status}"
         return True, ""
+
+    async def _account_slot_worker(self, task_id: int, queue: asyncio.Queue, account_queue: asyncio.Queue, policy: DMTaskPolicy, *, slot_index: int) -> None:
+        while not queue.empty() and not self.repository.should_stop_dm_task(task_id):
+            try:
+                account_row = account_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            account_id = int(account_row["account_id"])
+            logger.info(compose_log(f"槽位接管账号｜slot={slot_index}", task_id=task_id, account_id=account_id))
+            try:
+                await self._account_worker(task_id, queue, account_row, policy)
+            finally:
+                account_queue.task_done()
 
     async def _account_worker(self, task_id: int, queue: asyncio.Queue, account_row, policy: DMTaskPolicy) -> None:
         account_id = int(account_row["account_id"])
