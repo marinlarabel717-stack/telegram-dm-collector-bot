@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telethon import TelegramClient
@@ -12,6 +14,7 @@ from .dm_logging import compose_log
 from .dm_repository import DmRepository
 
 logger = logging.getLogger(__name__)
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 @dataclass(slots=True)
@@ -113,10 +116,11 @@ class DmAccountChecker:
             if client is not None:
                 await client.disconnect()
 
-    @staticmethod
-    def _parse_spambot_reply(reply_text: str) -> tuple[str, str]:
+    @classmethod
+    def _parse_spambot_reply(cls, reply_text: str) -> tuple[str, str]:
         text = (reply_text or "").strip()
         lowered = text.lower()
+        restriction_until = cls._extract_restriction_until(text)
 
         if any(keyword in lowered for keyword in ["good news", "no limits are currently applied", "you can freely send messages", "free as a bird", "目前没有任何限制", "目前没有限制", "没有限制"]):
             return "unrestricted", "无限制"
@@ -135,12 +139,71 @@ class DmAccountChecker:
         ]):
             return "geo_limited", "地理限制"
         if any(keyword in lowered for keyword in ["mutual contact", "mutual contacts", "people who are in your contacts", "双向联系人", "双向"]):
-            if any(keyword in lowered for keyword in ["will be lifted", "temporarily", "temporary", "until", "暂时", "临时"]):
-                return "temp_mutual", "临时双向"
+            if restriction_until is not None or any(keyword in lowered for keyword in ["will be lifted", "temporarily", "temporary", "until", "暂时", "临时"]):
+                return "temp_mutual", cls._format_temp_mutual_summary(restriction_until)
             return "permanent_mutual", "永久双向"
         if any(keyword in lowered for keyword in ["too many", "spam", "limited", "can only send", "can't send", "cannot send", "限制"]):
-            return "spam_limited", "官方限流"
+            if restriction_until is not None:
+                return "temp_mutual", cls._format_temp_mutual_summary(restriction_until)
+            return "permanent_mutual", "永久双向"
         return "unknown", "待人工确认"
+
+    @staticmethod
+    def _format_temp_mutual_summary(restriction_until: datetime | None) -> str:
+        if restriction_until is None:
+            return "临时双向"
+        local_dt = restriction_until.astimezone(BEIJING_TZ)
+        return f"临时双向（北京时间 {local_dt.strftime('%Y-%m-%d %H:%M:%S')} 解除）"
+
+    @classmethod
+    def _extract_restriction_until(cls, text: str) -> datetime | None:
+        if not text:
+            return None
+
+        patterns: list[tuple[str, tuple[str, ...]]] = [
+            (
+                r"(\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:utc)?)",
+                ("%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%d %H:%M UTC", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"),
+            ),
+            (
+                r"(\d{1,2}[./-]\d{1,2}[./-]\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:utc)?)",
+                ("%d-%m-%Y %H:%M:%S UTC", "%d-%m-%Y %H:%M UTC", "%d.%m.%Y %H:%M:%S UTC", "%d.%m.%Y %H:%M UTC", "%d/%m/%Y %H:%M:%S UTC", "%d/%m/%Y %H:%M UTC", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M"),
+            ),
+            (
+                r"((?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},\s*\d{4},?\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:utc)?)",
+                ("%B %d, %Y %H:%M:%S UTC", "%B %d, %Y %H:%M UTC", "%b %d, %Y %H:%M:%S UTC", "%b %d, %Y %H:%M UTC", "%B %d, %Y, %H:%M:%S UTC", "%B %d, %Y, %H:%M UTC", "%b %d, %Y, %H:%M:%S UTC", "%b %d, %Y, %H:%M UTC", "%B %d, %Y %H:%M:%S", "%B %d, %Y %H:%M", "%b %d, %Y %H:%M:%S", "%b %d, %Y %H:%M"),
+            ),
+            (
+                r"(\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{4},?\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:utc)?)",
+                ("%d %B %Y %H:%M:%S UTC", "%d %B %Y %H:%M UTC", "%d %b %Y %H:%M:%S UTC", "%d %b %Y %H:%M UTC", "%d %B %Y, %H:%M:%S UTC", "%d %B %Y, %H:%M UTC", "%d %b %Y, %H:%M:%S UTC", "%d %b %Y, %H:%M UTC", "%d %B %Y %H:%M:%S", "%d %B %Y %H:%M", "%d %b %Y %H:%M:%S", "%d %b %Y %H:%M"),
+            ),
+        ]
+
+        normalized = text.replace("Sept", "Sep").replace("sept", "sep")
+        for pattern, formats in patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = re.sub(r"\s+", " ", match.group(1).strip())
+            parsed = cls._parse_candidate_datetime(candidate, formats)
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _parse_candidate_datetime(candidate: str, formats: tuple[str, ...]) -> datetime | None:
+        value = candidate.strip().replace("，", ",").replace(" at ", " ")
+        value = re.sub(r"\butc\b", "UTC", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s+", " ", value)
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+            if "%Z" in fmt or value.endswith("UTC"):
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=timezone.utc)
+        return None
 
     @staticmethod
     def _humanize_session_issue(status: str, last_error: str | None) -> str:

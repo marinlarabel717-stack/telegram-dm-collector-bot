@@ -1265,7 +1265,7 @@ class DmCollectorBot:
             for row in rows:
                 label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
                 lines.append(
-                    f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {status_badge(row['status'])} · {restriction_badge(row['restriction_status'])}"
+                    f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {status_badge(row['status'])} · {self._format_account_restriction_summary(row, compact=True)}"
                 )
 
         keyboard: list[list] = [
@@ -2952,7 +2952,7 @@ class DmCollectorBot:
             f"编号：<code>#{display_code}</code>",
             f"名称：<code>{html.escape(str(title), quote=False)}</code>",
             f"运行：{status_badge(account['status'])}",
-            f"私信状态：{restriction_badge(account['restriction_status'])}",
+            f"私信状态：{self._format_account_restriction_summary(account)}",
             f"用户名：<code>{html.escape(str(account['username'] or '-'), quote=False)}</code>",
             f"手机号：<code>{html.escape(str(account['phone'] or '-'), quote=False)}</code>",
             f"User ID：<code>{account['tg_user_id'] or '-'}</code>",
@@ -2961,14 +2961,44 @@ class DmCollectorBot:
         ]
         if account["restriction_checked_at"]:
             lines.append(f"状态检测：<code>{account['restriction_checked_at']}</code>")
-        if account["restriction_reason"]:
-            lines.append(f"状态结果：<code>{html.escape(str(account['restriction_reason']), quote=False)}</code>")
+        reason = str(account["restriction_reason"] or "").strip()
+        if reason:
+            lines.append(f"状态结果：<code>{html.escape(reason, quote=False)}</code>")
+        if account["restriction_raw_reply"]:
+            lines.append(f"SpamBot：<code>{html.escape(str(account['restriction_raw_reply']), quote=False)[:500]}</code>")
         if account["last_error"]:
             friendly = self._humanize_account_issue(account["status"], account["last_error"])
             lines.append(f"结果：<code>{html.escape(friendly, quote=False)}</code>")
             if friendly != account["last_error"]:
                 lines.append(f"原始错误：<code>{html.escape(str(account['last_error']), quote=False)}</code>")
         return "\n".join(lines)
+
+    def _format_account_restriction_summary(self, account, *, compact: bool = False) -> str:
+        badge = restriction_badge(account["restriction_status"])
+        reason = str(account["restriction_reason"] or "").strip()
+        if not reason:
+            return badge
+        status = str(account["restriction_status"] or "")
+        if compact:
+            if status == "temp_mutual" and "解除" in reason:
+                detail = reason.replace("临时双向", "").strip("（）() ")
+                if detail:
+                    return f"{badge} · <code>{html.escape(detail, quote=False)}</code>"
+            default_reasons = {
+                "unrestricted": "无限制",
+                "temp_mutual": "临时双向",
+                "permanent_mutual": "永久双向",
+                "geo_limited": "地理限制",
+                "frozen": "冻结",
+                "spam_limited": "官方限流",
+                "restricted": "受限",
+                "checking": "正在检测 SpamBot 状态",
+                "unknown": "待人工确认",
+                "session_invalid": "已失效",
+            }
+            if reason == default_reasons.get(status):
+                return badge
+        return f"{badge}（<code>{html.escape(reason, quote=False)}</code>）"
 
     def _format_task_text(self, task_id: int) -> str:
         task = self.db.get_collect_task(task_id)
