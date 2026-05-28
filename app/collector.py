@@ -23,7 +23,7 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
 from telethon.tl.types import ChannelParticipantsAdmins, User
 
-from .account_proxy import build_telethon_proxy
+from .account_proxy import build_telethon_proxy, format_account_proxy_label
 from .config import Settings
 from .database import Database
 
@@ -76,8 +76,7 @@ class CollectionManager:
     async def verify_session_file(self, session_file: Path, *, account_row=None) -> SessionCheckResult:
         client: TelegramClient | None = None
         try:
-            client = self._build_client(session_file, account_row=account_row)
-            await client.connect()
+            client = await self.connect_client(session_file, account_row=account_row)
             authorized = await client.is_user_authorized()
             if not authorized:
                 return SessionCheckResult(
@@ -255,8 +254,7 @@ class CollectionManager:
         client: TelegramClient | None = None
         try:
             logger.info("%s%s 频道 worker 启动｜session=%s", self._task_tag(task_id), self._account_tag(account_id), session_file.name)
-            client = self._build_client(session_file, account_row=account_row)
-            await client.connect()
+            client = await self.connect_client(session_file, account_row=account_row)
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
                 logger.warning("%s%s 未授权，跳过", self._task_tag(task_id), self._account_tag(account_id))
@@ -299,8 +297,7 @@ class CollectionManager:
         joined_since_cooldown = 0
         try:
             logger.info("%s%s 群组 worker 启动｜session=%s", self._task_tag(task_id), self._account_tag(account_id), session_file.name)
-            client = self._build_client(session_file, account_row=account_row)
-            await client.connect()
+            client = await self.connect_client(session_file, account_row=account_row)
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
                 logger.warning("%s%s 未授权，跳过", self._task_tag(task_id), self._account_tag(account_id))
@@ -585,11 +582,11 @@ class CollectionManager:
         self.db.sync_task_metrics(task_id, unique_total=unique_total)
         await self._emit_progress(task_id)
 
-    def _build_client(self, session_file: Path, *, account_row=None) -> TelegramClient:
+    def _build_client(self, session_file: Path, *, account_row=None, proxy_row=None) -> TelegramClient:
         session_base = str(session_file)
         if session_base.endswith(".session"):
             session_base = session_base[:-8]
-        proxy = build_telethon_proxy(self.db.get_global_proxy())
+        proxy = build_telethon_proxy(proxy_row)
         try:
             return TelegramClient(session_base, self.settings.api_id, self.settings.api_hash, proxy=proxy)
         except ValueError as exc:
@@ -600,6 +597,45 @@ class CollectionManager:
             if compat_base.endswith(".session"):
                 compat_base = compat_base[:-8]
             return TelegramClient(compat_base, self.settings.api_id, self.settings.api_hash, proxy=proxy)
+
+    async def connect_client(self, session_file: Path, *, account_row=None) -> TelegramClient:
+        proxy_pool = self.db.get_global_proxies()
+        if not proxy_pool:
+            client = self._build_client(session_file, account_row=account_row, proxy_row=None)
+            await client.connect()
+            return client
+
+        attempt_pool = proxy_pool if len(proxy_pool) > 1 else proxy_pool * 3
+        last_exc: Exception | None = None
+        for proxy_row in attempt_pool:
+            client: TelegramClient | None = None
+            try:
+                client = self._build_client(session_file, account_row=account_row, proxy_row=proxy_row)
+                await client.connect()
+                return client
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                if not self._is_proxy_timeout_error(exc):
+                    raise
+                logger.warning("代理连接超时｜%s｜%s", session_file.name, format_account_proxy_label(proxy_row))
+                continue
+        if last_exc is not None:
+            raise RuntimeError(
+                "代理连接超时：已自动切换代理重试；如果只有一条代理，则已重试 3 次仍未连上"
+            ) from last_exc
+        raise RuntimeError("代理连接失败")
+
+    @staticmethod
+    def _is_proxy_timeout_error(exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+            return True
+        text = str(exc or "").lower()
+        return any(keyword in text for keyword in ("timeout", "timed out", "time out"))
 
     def _build_compat_session_file(self, session_file: Path) -> Path:
         compat_file = session_file.with_name(f"{session_file.stem}.compat.session")

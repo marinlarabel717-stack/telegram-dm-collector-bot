@@ -866,8 +866,7 @@ class DmCollectorBot:
 
         client = None
         try:
-            client = self.collection_manager._build_client(Path(account["session_file"]), account_row=account)
-            await client.connect()
+            client = await self.collection_manager.connect_client(Path(account["session_file"]), account_row=account)
             if not await client.is_user_authorized():
                 return None, "预览账号 session 已失效"
             post = await self._fetch_channel_post_message(client, link)
@@ -1153,7 +1152,7 @@ class DmCollectorBot:
             f"状态：无限制 <code>{restriction_stats['unrestricted']}</code> · 地理限制 <code>{restriction_stats['geo_limited']}</code> · 受限 <code>{restriction_stats['limited']}</code> · 冻结 <code>{restriction_stats['frozen']}</code> · 待检测 <code>{restriction_stats['unknown']}</code>\n"
             f"代理池：<code>{html.escape(summarize_proxy_pool(global_proxies), quote=False)}</code>\n"
             f"待清理无效：<code>{stats['invalid']}</code>\n\n"
-            f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。现在所有账号统一走全局代理。"
+            f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。代理池有内容时统一走代理；为空时直接走直连。"
         )
         keyboard = [
             [
@@ -1254,6 +1253,7 @@ class DmCollectorBot:
             "支持直接发送单条代理，或上传 <code>.txt</code> 批量导入。",
             "格式支持：<code>ip:端口:账号:密码</code>，也支持带 <code>http://</code> / <code>socks5://</code> 前缀。",
             "未带类型时，我会自动检测是 HTTP 还是 SOCKS5；检测失败的不会保留。",
+            "代理池为空时自动走直连，不需要额外开关。",
         ]
         keyboard = InlineKeyboardMarkup([
             [
@@ -1282,7 +1282,7 @@ class DmCollectorBot:
             f"请直接发送代理文本，或上传 <code>.txt</code> 文件。\n"
             f"支持：<code>ip:端口:账号:密码</code>\n"
             f"也支持：<code>http://账号:密码@ip:端口</code> / <code>socks5://账号:密码@ip:端口</code>\n"
-            f"未写类型时，我会自动识别；不可用代理会自动删除。"
+            f"未写类型时，我会自动识别；不可用代理会自动删除。代理池为空时默认直连。"
         )
         await self._safe_edit(query, text, self._single_back_keyboard("account:proxy:manage"))
 
@@ -2010,8 +2010,7 @@ class DmCollectorBot:
 
         client = None
         try:
-            client = self.collection_manager._build_client(Path(str(account["session_file"])), account_row=account)
-            await client.connect()
+            client = await self.collection_manager.connect_client(Path(str(account["session_file"])), account_row=account)
             if not await client.is_user_authorized():
                 raise RuntimeError("预览账号 session 未登录")
             _, inline_result = await fetch_postbot_inline_result(client, post_code)
@@ -2037,8 +2036,7 @@ class DmCollectorBot:
         client = None
         preview_message = None
         try:
-            client = self.collection_manager._build_client(Path(str(account["session_file"])), account_row=account)
-            await client.connect()
+            client = await self.collection_manager.connect_client(Path(str(account["session_file"])), account_row=account)
             if not await client.is_user_authorized():
                 raise RuntimeError("预览账号 session 未登录")
 
@@ -2066,8 +2064,7 @@ class DmCollectorBot:
 
         client = None
         try:
-            client = self.collection_manager._build_client(Path(account["session_file"]), account_row=account)
-            await client.connect()
+            client = await self.collection_manager.connect_client(Path(account["session_file"]), account_row=account)
             if not await client.is_user_authorized():
                 raise RuntimeError("预览账号 session 已失效")
             post = await self._fetch_channel_post_message(client, forward_link)
@@ -3174,7 +3171,7 @@ class DmCollectorBot:
         mapping = {
             "peer_flood": "官方判定发送过于频繁",
             "privacy_restricted": "对方隐私限制，无法私信",
-            "user_not_found": "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户",
+            "user_not_found": "用户不存在",
             "bot_target": "目标不是可私信的普通用户",
             "blocked": "对方已拉黑或关系异常",
             "too_many_requests": "请求过于频繁",
@@ -3202,9 +3199,9 @@ class DmCollectorBot:
             ("forward", "当前目标不允许转发该帖子内容"),
             ("media", "当前聊天不允许发送媒体"),
             ("inline bot", "PostBot 内联结果获取失败"),
-            ("entity not found", "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户"),
-            ("nobody is using this username", "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户"),
-            ("username is unacceptable", "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户"),
+            ("entity not found", "用户不存在"),
+            ("nobody is using this username", "用户不存在"),
+            ("username is unacceptable", "用户不存在"),
             ("session 未登录", "session 已失效或未登录"),
         ]
         for needle, friendly in phrase_map:

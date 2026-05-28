@@ -202,8 +202,7 @@ class DmSenderManager:
         content_type = str((task["content_type"] if task else None) or payload.get("content_type") or "text")
         self.repository.update_dm_task_account(task_id, account_id, status="running", last_error=None)
         try:
-            client = self.collection_manager._build_client(session_file, account_row=account_row)
-            await client.connect()
+            client = await self.collection_manager.connect_client(session_file, account_row=account_row)
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
                 self.repository.update_dm_task_account(task_id, account_id, status="error", last_error="session 未登录")
@@ -537,7 +536,7 @@ class DmSenderManager:
         if "inline bot" in lowered or "bot response timeout" in lowered or "next_offset_invalid" in lowered:
             return "postbot_failed", "PostBot 内联结果获取失败", False
         if "username not occupied" in lowered or "cannot find" in lowered or "no user has" in lowered or "entity not found" in lowered or "nobody is using this username" in lowered or "username is unacceptable" in lowered:
-            return "user_not_found", "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户", False
+            return "user_not_found", "用户不存在", False
         if "bot method invalid" in lowered or "bot invalid" in lowered:
             return "bot_target", "目标不是可私信的普通用户", False
         if "user is blocked" in lowered or "you blocked" in lowered:

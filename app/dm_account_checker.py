@@ -87,8 +87,7 @@ class DmAccountChecker:
     async def _fetch_spambot_reply(self, account_row) -> str:
         client: TelegramClient | None = None
         try:
-            client = self.collection_manager._build_client(Path(account_row["session_file"]), account_row=account_row)
-            await client.connect()
+            client = await self.collection_manager.connect_client(Path(account_row["session_file"]), account_row=account_row)
             if not await client.is_user_authorized():
                 raise RuntimeError("session 未登录")
             entity = await client.get_input_entity("SpamBot")

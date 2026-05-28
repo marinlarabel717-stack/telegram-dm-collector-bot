@@ -55,7 +55,7 @@ DM_REPORT_SECTION_LABELS = {
 DM_ERROR_LABELS = {
     "peer_flood": "官方判定发送过于频繁",
     "privacy_restricted": "对方隐私限制，无法私信",
-    "user_not_found": "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户",
+    "user_not_found": "用户不存在",
     "bot_target": "目标不是可私信的普通用户",
     "blocked": "对方已拉黑或关系异常",
     "too_many_requests": "请求过于频繁",
