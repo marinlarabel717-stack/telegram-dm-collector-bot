@@ -1576,10 +1576,12 @@ class DmCollectorBot:
         draft = state.get("draft") or {}
         current = self._sync_dm_worker_count(draft)
         max_workers = self._dm_max_worker_count(draft)
+        presets = [1, 5, 10, 15, 20, 30, 40, 50]
         if current >= max_workers:
             next_value = 1
         else:
-            next_value = min(max_workers, current + 10)
+            next_preset = next((value for value in presets if value > current), presets[0])
+            next_value = min(max_workers, next_preset)
         draft["worker_count"] = next_value
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
