@@ -412,6 +412,12 @@ class DmCollectorBot:
         if data == "dm:wizard:pin_delay:cycle":
             await self._dm_wizard_cycle_pin_delay(query, update.effective_user.id)
             return
+        if data == "dm:wizard:delete:toggle":
+            await self._dm_wizard_toggle_delete_dialog(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:delete_delay:input":
+            await self._dm_wizard_start_delete_delay_input(query, update.effective_user.id)
+            return
         if data == "dm:wizard:preview":
             await self._dm_wizard_preview(query, update.effective_user.id)
             return
@@ -1066,6 +1072,32 @@ class DmCollectorBot:
             await self._handle_dm_forward_input(update, state)
             return
 
+        if mode == "await_dm_delete_delay":
+            draft = state.setdefault("draft", {})
+            policy = draft.setdefault("policy", {})
+            try:
+                seconds = int(text)
+            except ValueError:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请输入整数秒数，例如 30。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            if seconds < 0 or seconds > 86400:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 秒数请填 0 到 86400 之间。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            policy["delete_dialog_delay_seconds"] = seconds
+            state["mode"] = "dm_config"
+            await update.effective_message.reply_text(
+                self._dm_config_text(draft),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._build_dm_config_keyboard(draft),
+            )
+            return
+
         if mode == "await_custom_days":
             try:
                 days = int(text)
@@ -1656,6 +1688,8 @@ class DmCollectorBot:
                     "stage2_delay_seconds": 3,
                     "pin_after_send": False,
                     "pin_delay_seconds": 3,
+                    "delete_dialog_after_send": False,
+                    "delete_dialog_delay_seconds": 10,
                     "auto_switch_account": True,
                     "auto_stop_when_accounts_exhausted": True,
                     "typing_simulation": True,
@@ -1826,6 +1860,22 @@ class DmCollectorBot:
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else 3
         policy["pin_delay_seconds"] = next_value
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
+    async def _dm_wizard_toggle_delete_dialog(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        policy = draft.setdefault("policy", {})
+        next_value = not bool(policy.get("delete_dialog_after_send", False))
+        policy["delete_dialog_after_send"] = next_value
+        if next_value and "delete_dialog_delay_seconds" not in policy:
+            policy["delete_dialog_delay_seconds"] = 10
+        await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
+    async def _dm_wizard_start_delete_delay_input(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        state["mode"] = "await_dm_delete_delay"
+        await self._safe_edit(query, self._dm_delete_delay_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
 
     async def _dm_wizard_toggle_typing(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
@@ -3029,6 +3079,8 @@ class DmCollectorBot:
         stage2_label = f"{int(policy.get('stage2_delay_seconds', 3))}秒"
         pin_label = "开启" if policy.get("pin_after_send", False) else "关闭"
         pin_delay_label = f"{int(policy.get('pin_delay_seconds', 3))}秒"
+        delete_label = "开启" if policy.get("delete_dialog_after_send", False) else "关闭"
+        delete_delay_label = f"{int(policy.get('delete_dialog_delay_seconds', 10))}秒"
         too_many_requests_label = int(policy.get("stop_account_after_too_many_requests", 40))
         lines = [
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>发送配置</b>",
@@ -3042,6 +3094,7 @@ class DmCollectorBot:
             f"打字状态：<code>{typing_label}</code>",
             f"账号策略：<code>{switch_label}</code>",
             f"自动置顶：<code>{pin_label}</code> · 延迟：<code>{pin_delay_label}</code>",
+            f"删除对话框：<code>{delete_label}</code> · 延迟：<code>{delete_delay_label}</code>",
         ]
         if draft.get("message_mode") == "three_stage":
             lines.append(f"三段间隔：<code>第1段后 {stage1_label} / 第2段后 {stage2_label}</code>")
@@ -3066,6 +3119,7 @@ class DmCollectorBot:
             f"打字状态：<code>{'开启' if policy.get('typing_simulation', True) else '关闭'}</code>",
             f"账号策略：<code>{'开启补号（所选账号用完后，会继续从账号列表补号）' if policy.get('auto_switch_account', True) else '关闭补号（只使用本次所选账号）'}</code>",
             f"自动置顶：<code>{'开启' if policy.get('pin_after_send', False) else '关闭'}</code> · 延迟：<code>{int(policy.get('pin_delay_seconds', 3))}秒</code>",
+            f"删除对话框：<code>{'开启' if policy.get('delete_dialog_after_send', False) else '关闭'}</code> · 延迟：<code>{int(policy.get('delete_dialog_delay_seconds', 10))}秒</code>",
         ]
         if draft.get("message_mode") == "three_stage":
             lines.append(f"三段间隔：<code>第1段后 {int(policy.get('stage1_delay_seconds', 5))}秒 / 第2段后 {int(policy.get('stage2_delay_seconds', 3))}秒</code>")
@@ -3122,6 +3176,9 @@ class DmCollectorBot:
         ])
         if draft_mode := policy.get("pin_after_send", False):
             lines.append(f"自动置顶：<code>{'开启' if draft_mode else '关闭'}</code> · 延迟 <code>{int(policy.get('pin_delay_seconds', 3))}秒</code>")
+        lines.append(
+            f"删除对话框：<code>{'开启' if policy.get('delete_dialog_after_send', False) else '关闭'}</code> · 延迟 <code>{int(policy.get('delete_dialog_delay_seconds', 10))}秒</code>"
+        )
         if content_type == "forward" and payload.get("forward_preview_error"):
             lines.append(f"帖子预览：<code>抓取失败｜{html.escape(str(payload.get('forward_preview_error'))[:120], quote=False)}</code>")
         if task["last_error"]:
@@ -3282,6 +3339,16 @@ class DmCollectorBot:
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>自定义并发线程</b>\n"
             f"当前最多可设：<code>{max_workers}</code>\n"
             f"请直接发送一个整数，例如 <code>{max_workers}</code>。"
+        )
+
+    def _dm_delete_delay_prompt_text(self, draft: dict) -> str:
+        policy = draft.get("policy") or {}
+        current = int(policy.get("delete_dialog_delay_seconds", 10))
+        return (
+            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} <b>设置删除延迟</b>\n"
+            f"当前延迟：<code>{current}</code> 秒\n"
+            f"请直接发送秒数。\n"
+            f"<code>0</code> = 发送后立刻删除自己的聊天框消息。"
         )
 
     def _select_accounts_text(self, channels: list[str], days: int, selected_ids: list[int], *, task_type: str = "channel", filters: dict | None = None) -> str:
@@ -3516,6 +3583,10 @@ class DmCollectorBot:
             [
                 premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),
                 premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:pin_delay:cycle"),
+            ],
+            [
+                premium_button(f"删对话框：{'开' if policy.get('delete_dialog_after_send', False) else '关'}", self.settings.emoji_error_id, callback_data="dm:wizard:delete:toggle"),
+                premium_button(f"删除延迟：{int(policy.get('delete_dialog_delay_seconds', 10))}秒", self.settings.emoji_timeout_id, callback_data="dm:wizard:delete_delay:input"),
             ],
         ]
         if draft.get("message_mode") == "three_stage":

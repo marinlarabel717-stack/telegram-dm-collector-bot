@@ -233,8 +233,17 @@ class DmSenderManager:
                 self.repository.mark_dm_recipient_sending(task_id, recipient_id, account_id)
                 try:
                     entity = await client.get_input_entity(target)
-                    sent_message = await self._dispatch_payload(client, entity, payload, content_type, policy)
-                    await self._apply_post_send_actions(client, entity, sent_message, policy, task_id=task_id, account_id=account_id, recipient_id=recipient_id)
+                    sent_message, sent_messages = await self._dispatch_payload(client, entity, payload, content_type, policy)
+                    await self._apply_post_send_actions(
+                        client,
+                        entity,
+                        sent_message,
+                        sent_messages,
+                        policy,
+                        task_id=task_id,
+                        account_id=account_id,
+                        recipient_id=recipient_id,
+                    )
                     success_count += 1
                     post_attempt_delay = policy.delay_window.next_delay()
                     self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
@@ -433,38 +442,44 @@ class DmSenderManager:
         if content_type == "post":
             post_code = str(payload.get("body") or payload.get("post_code") or payload.get("text") or "").strip()
             _, inline_result = await fetch_postbot_inline_result(client, post_code)
-            return self._normalize_sent_message(await inline_result.click(entity))
+            return await inline_result.click(entity)
         if content_type == "forward":
             forward_link = str(payload.get("forward_link") or "").strip()
             if forward_link:
                 source_peer, source_message_id = await self._resolve_channel_post_link(client, forward_link)
-                return self._normalize_sent_message(await client.forward_messages(entity, messages=source_message_id, from_peer=source_peer))
+                return await client.forward_messages(entity, messages=source_message_id, from_peer=source_peer)
             source_chat_id = payload.get("source_chat_id")
             source_message_id = payload.get("source_message_id")
             if not source_chat_id or not source_message_id:
                 raise ValueError("频道帖子链接不能为空")
             from_peer = await client.get_input_entity(int(source_chat_id))
-            return self._normalize_sent_message(await client.forward_messages(entity, messages=int(source_message_id), from_peer=from_peer))
+            return await client.forward_messages(entity, messages=int(source_message_id), from_peer=from_peer)
         main_text = str(payload.get("body") or payload.get("text") or "").strip()
         return await self._send_text_message(client, entity, main_text, policy)
 
     async def _dispatch_payload(self, client, entity, payload: dict, content_type: str, policy: DMTaskPolicy):
         mode = str(payload.get("mode") or "single")
         if mode != "three_stage":
-            return await self._dispatch_single_payload(client, entity, payload, content_type, policy)
+            main_result = await self._dispatch_single_payload(client, entity, payload, content_type, policy)
+            return self._normalize_sent_message(main_result), self._collect_sent_messages(main_result)
 
         greeting = str(payload.get("greeting") or "").strip()
         closing = str(payload.get("closing") or "").strip()
+        all_messages = []
         if greeting:
-            await self._send_text_message(client, entity, greeting, policy)
+            greeting_result = await self._send_text_message(client, entity, greeting, policy)
+            all_messages.extend(self._collect_sent_messages(greeting_result))
             await asyncio.sleep(max(0.0, float(policy.stage1_delay_seconds or 0)))
 
-        main_sent = await self._dispatch_single_payload(client, entity, payload, content_type, policy)
+        main_result = await self._dispatch_single_payload(client, entity, payload, content_type, policy)
+        main_sent = self._normalize_sent_message(main_result)
+        all_messages.extend(self._collect_sent_messages(main_result))
 
         if closing:
             await asyncio.sleep(max(0.0, float(policy.stage2_delay_seconds or 0)))
-            await self._send_text_message(client, entity, closing, policy)
-        return main_sent
+            closing_result = await self._send_text_message(client, entity, closing, policy)
+            all_messages.extend(self._collect_sent_messages(closing_result))
+        return main_sent, all_messages
 
     @staticmethod
     def _build_message_parts(payload: dict) -> list[str]:
@@ -505,6 +520,8 @@ class DmSenderManager:
             stage2_delay_seconds=float(data.get("stage2_delay_seconds") or 3),
             pin_after_send=bool(data.get("pin_after_send", False)),
             pin_delay_seconds=float(data.get("pin_delay_seconds") or 3),
+            delete_dialog_after_send=bool(data.get("delete_dialog_after_send", False)),
+            delete_dialog_delay_seconds=float(data.get("delete_dialog_delay_seconds") or 0),
             retry_policy=RetryPolicy(
                 max_retries=int(data.get("max_retries") or 3),
                 stop_account_after_user_frequent=int(data.get("stop_account_after_user_frequent") or 30),
@@ -691,19 +708,56 @@ class DmSenderManager:
             return False
         return True
 
-    async def _apply_post_send_actions(self, client, entity, sent_message, policy: DMTaskPolicy, *, task_id: int, account_id: int, recipient_id: int) -> None:
-        if not policy.pin_after_send or sent_message is None:
+    async def _apply_post_send_actions(self, client, entity, sent_message, sent_messages, policy: DMTaskPolicy, *, task_id: int, account_id: int, recipient_id: int) -> None:
+        elapsed = 0.0
+        if policy.pin_after_send and sent_message is not None:
+            try:
+                pin_delay = max(0.0, float(policy.pin_delay_seconds or 0))
+                if pin_delay > 0:
+                    await asyncio.sleep(pin_delay)
+                    elapsed += pin_delay
+                await client.pin_message(entity, sent_message, notify=False)
+                self.repository.add_send_log(
+                    task_id=task_id,
+                    account_id=account_id,
+                    recipient_id=recipient_id,
+                    action="pin",
+                    status="success",
+                    message=f"发送后 {int(policy.pin_delay_seconds or 0)} 秒已自动置顶",
+                )
+            except Exception as exc:  # noqa: BLE001
+                raw = self.collection_manager._short_error(exc)
+                _, friendly, _ = self._classify_send_error(exc)
+                self.repository.add_send_log(
+                    task_id=task_id,
+                    account_id=account_id,
+                    recipient_id=recipient_id,
+                    action="pin",
+                    status="failed",
+                    message=f"置顶失败｜{friendly}",
+                    raw_error=raw,
+                )
+
+        if not policy.delete_dialog_after_send:
             return
+
+        message_ids = self._extract_message_ids(sent_messages)
+        if not message_ids:
+            return
+
         try:
-            await asyncio.sleep(max(0.0, float(policy.pin_delay_seconds or 0)))
-            await client.pin_message(entity, sent_message, notify=False)
+            delete_delay = max(0.0, float(policy.delete_dialog_delay_seconds or 0))
+            remaining = max(0.0, delete_delay - elapsed)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            await client.delete_messages(entity, message_ids, revoke=False)
             self.repository.add_send_log(
                 task_id=task_id,
                 account_id=account_id,
                 recipient_id=recipient_id,
-                action="pin",
+                action="delete",
                 status="success",
-                message=f"发送后 {int(policy.pin_delay_seconds or 0)} 秒已自动置顶",
+                message=f"发送后 {int(policy.delete_dialog_delay_seconds or 0)} 秒已自动删除自己的聊天框消息",
             )
         except Exception as exc:  # noqa: BLE001
             raw = self.collection_manager._short_error(exc)
@@ -712,9 +766,9 @@ class DmSenderManager:
                 task_id=task_id,
                 account_id=account_id,
                 recipient_id=recipient_id,
-                action="pin",
+                action="delete",
                 status="failed",
-                message=f"置顶失败｜{friendly}",
+                message=f"删除对话框失败｜{friendly}",
                 raw_error=raw,
             )
 
@@ -723,6 +777,27 @@ class DmSenderManager:
         if isinstance(result, list):
             return result[-1] if result else None
         return result
+
+    @staticmethod
+    def _collect_sent_messages(result) -> list:
+        if result is None:
+            return []
+        if isinstance(result, list):
+            return [item for item in result if item is not None]
+        return [result]
+
+    @staticmethod
+    def _extract_message_ids(messages) -> list[int]:
+        message_ids: list[int] = []
+        for item in messages or []:
+            message_id = getattr(item, "id", None)
+            if message_id is None:
+                continue
+            try:
+                message_ids.append(int(message_id))
+            except (TypeError, ValueError):
+                continue
+        return message_ids
 
     async def _emit_progress(self, task_id: int) -> None:
         if self.on_progress:

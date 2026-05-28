@@ -29,6 +29,7 @@ DM_LOG_ACTION_LABELS = {
     "account_check": "账号检查",
     "send": "发送",
     "pin": "置顶",
+    "delete": "删除对话框",
 }
 
 DM_LOG_STATUS_LABELS = {
