@@ -713,22 +713,47 @@ class DmCollectorBot:
             reply_markup=self._build_dm_confirm_keyboard("dm:wizard:back:input"),
         )
 
-    async def _fetch_channel_post_preview(self, link: str, state: dict) -> tuple[str | None, str | None]:
-        parsed = parse_channel_post_link(link)
-        if not parsed:
-            return None, "链接格式无法解析"
-        draft = state.get("draft") or {}
+    def _pick_preview_account(self, draft: dict) -> tuple[dict | None, str | None]:
         account_ids = [int(item) for item in (draft.get("account_ids") or [])]
         if not account_ids:
             return None, "未选择预览账号"
-        account = None
         for account_id in account_ids:
             row = self.db.get_account(account_id)
             if row and row["status"] == "active":
-                account = row
-                break
-        if not account:
-            return None, "没有可用账号可抓取帖子预览"
+                return row, None
+        return None, "没有可用账号可抓取预览"
+
+    async def _fetch_channel_post_message(self, client, link: str):
+        parsed = parse_channel_post_link(link)
+        if not parsed:
+            raise ValueError("链接格式无法解析")
+        if parsed["kind"] == "public":
+            entity = await client.get_entity(f"@{parsed['username']}")
+        else:
+            entity = await client.get_entity(int(f"-100{parsed['channel_id']}"))
+        post = await client.get_messages(entity, ids=int(parsed["message_id"]))
+        if not post:
+            raise ValueError("帖子不存在或当前账号无权查看")
+        return post
+
+    @staticmethod
+    def _channel_post_preview_summary(post) -> str:
+        text = (getattr(post, "message", None) or getattr(post, "text", None) or getattr(post, "raw_text", None) or "").strip()
+        media_parts: list[str] = []
+        if getattr(post, "photo", None):
+            media_parts.append("图片")
+        if getattr(post, "video", None):
+            media_parts.append("视频")
+        if getattr(post, "document", None):
+            media_parts.append("文件")
+        media_label = f"[{'+'.join(media_parts)}] " if media_parts else ""
+        return (media_label + text).strip() or (media_label + "无正文，仅含媒体").strip() or "空消息"
+
+    async def _fetch_channel_post_preview(self, link: str, state: dict) -> tuple[str | None, str | None]:
+        draft = state.get("draft") or {}
+        account, error = self._pick_preview_account(draft)
+        if error:
+            return None, error
 
         client = None
         try:
@@ -736,25 +761,8 @@ class DmCollectorBot:
             await client.connect()
             if not await client.is_user_authorized():
                 return None, "预览账号 session 已失效"
-            entity = None
-            if parsed["kind"] == "public":
-                entity = await client.get_entity(f"@{parsed['username']}")
-            else:
-                entity = await client.get_entity(int(f"-100{parsed['channel_id']}"))
-            post = await client.get_messages(entity, ids=int(parsed["message_id"]))
-            if not post:
-                return None, "帖子不存在或当前账号无权查看"
-            text = (getattr(post, "message", None) or getattr(post, "text", None) or getattr(post, "raw_text", None) or "").strip()
-            media_parts: list[str] = []
-            if getattr(post, "photo", None):
-                media_parts.append("图片")
-            if getattr(post, "video", None):
-                media_parts.append("视频")
-            if getattr(post, "document", None):
-                media_parts.append("文件")
-            media_label = f"[{'+'.join(media_parts)}] " if media_parts else ""
-            summary = (media_label + text).strip() or (media_label + "无正文，仅含媒体").strip() or "空消息"
-            return summary[:180], None
+            post = await self._fetch_channel_post_message(client, link)
+            return self._channel_post_preview_summary(post)[:180], None
         except Exception as exc:  # noqa: BLE001
             logger.warning("抓取频道帖子预览失败: %s", self.collection_manager._short_error(exc))
             return None, self._humanize_dm_error(None, self.collection_manager._short_error(exc))
@@ -1751,12 +1759,16 @@ class DmCollectorBot:
             if post_code:
                 await self._send_postbot_preview(chat_id, post_code, draft=draft)
         elif content_type == "forward":
-            preview_text = str(payload.get("forward_message_preview") or "").strip() or str(payload.get("forward_preview") or "").strip() or "暂时无法抓到帖子摘要"
-            await self.application.bot.send_message(
-                chat_id=chat_id,
-                text=f"【频道帖子预览】\n{preview_text}",
-                disable_web_page_preview=True,
-            )
+            forward_link = str(payload.get("forward_link") or "").strip()
+            if forward_link:
+                await self._send_channel_post_preview(chat_id, forward_link, draft=draft)
+            else:
+                preview_text = str(payload.get("forward_message_preview") or "").strip() or str(payload.get("forward_preview") or "").strip() or "暂时无法抓到帖子摘要"
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"【频道帖子预览】\n{preview_text}",
+                    disable_web_page_preview=True,
+                )
         else:
             main_text = str(payload.get("body") or payload.get("text") or "").strip()
             if main_text:
@@ -1823,7 +1835,32 @@ class DmCollectorBot:
                         logger.debug("删除 PostBot 预览缓存消息失败", exc_info=True)
                 await client.disconnect()
 
-    async def _relay_preview_message_to_chat(self, chat_id: int, client, message) -> None:
+    async def _send_channel_post_preview(self, chat_id: int, forward_link: str, *, draft: dict | None = None) -> None:
+        draft = draft or {}
+        account, error = self._pick_preview_account(draft)
+        if error:
+            await self.application.bot.send_message(chat_id=chat_id, text=f"【频道帖子预览】\n{error}")
+            return
+
+        client = None
+        try:
+            client = self.collection_manager._build_client(Path(account["session_file"]))
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise RuntimeError("预览账号 session 已失效")
+            post = await self._fetch_channel_post_message(client, forward_link)
+            await self._relay_preview_message_to_chat(chat_id, client, post, fallback_title="【频道帖子预览】")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("发送频道帖子预览失败: %s", self.collection_manager._short_error(exc))
+            await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"【频道帖子预览】\n{self._humanize_dm_error(None, self.collection_manager._short_error(exc))}",
+            )
+        finally:
+            if client is not None:
+                await client.disconnect()
+
+    async def _relay_preview_message_to_chat(self, chat_id: int, client, message, *, fallback_title: str | None = None) -> None:
         text = (getattr(message, "raw_text", None) or getattr(message, "message", None) or "").strip()
         reply_markup = self._build_postbot_preview_markup(message)
         if getattr(message, "media", None):
@@ -1870,7 +1907,8 @@ class DmCollectorBot:
         if text:
             await self.application.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
             return
-        await self.application.bot.send_message(chat_id=chat_id, text="【预览失败】PostBot 没有返回可展示的消息内容")
+        title = fallback_title or "【预览失败】"
+        await self.application.bot.send_message(chat_id=chat_id, text=f"{title} 没有可展示的消息内容")
 
     @staticmethod
     def _normalize_preview_message(result):
