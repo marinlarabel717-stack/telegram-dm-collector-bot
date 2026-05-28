@@ -13,7 +13,7 @@ from math import ceil
 from pathlib import Path
 
 import logging
-from telegram import InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
@@ -145,6 +145,9 @@ class DmCollectorBot:
             return
 
         data = query.data or ""
+        if data.startswith("preview:noop"):
+            await query.answer("这是预览按钮。真实私信时会按原始按钮生效。", show_alert=False)
+            return
         await query.answer()
 
         if data == "menu:main":
@@ -1822,6 +1825,7 @@ class DmCollectorBot:
 
     async def _relay_preview_message_to_chat(self, chat_id: int, client, message) -> None:
         text = (getattr(message, "raw_text", None) or getattr(message, "message", None) or "").strip()
+        reply_markup = self._build_postbot_preview_markup(message)
         if getattr(message, "media", None):
             mime_type = None
             media_kind = "document"
@@ -1840,20 +1844,31 @@ class DmCollectorBot:
                     resolved_kind = self._detect_dm_preview_media_kind(media_path, media_kind, mime_type)
                     with media_path.open("rb") as fp:
                         if resolved_kind == "photo":
-                            await self.application.bot.send_photo(chat_id=chat_id, photo=fp, caption=text or None)
+                            await self.application.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=fp,
+                                caption=text or None,
+                                reply_markup=reply_markup,
+                            )
                             return
                         if resolved_kind == "video":
-                            await self.application.bot.send_video(chat_id=chat_id, video=fp, caption=text or None)
+                            await self.application.bot.send_video(
+                                chat_id=chat_id,
+                                video=fp,
+                                caption=text or None,
+                                reply_markup=reply_markup,
+                            )
                             return
                         await self.application.bot.send_document(
                             chat_id=chat_id,
                             document=fp,
                             filename=media_path.name,
                             caption=text or None,
+                            reply_markup=reply_markup,
                         )
                         return
         if text:
-            await self.application.bot.send_message(chat_id=chat_id, text=text)
+            await self.application.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
             return
         await self.application.bot.send_message(chat_id=chat_id, text="【预览失败】PostBot 没有返回可展示的消息内容")
 
@@ -1862,6 +1877,23 @@ class DmCollectorBot:
         if isinstance(result, list):
             return result[-1] if result else None
         return result
+
+    @staticmethod
+    def _build_postbot_preview_markup(message) -> InlineKeyboardMarkup | None:
+        rows = getattr(message, "buttons", None) or []
+        keyboard: list[list[InlineKeyboardButton]] = []
+        for row in rows:
+            button_row: list[InlineKeyboardButton] = []
+            for button in row or []:
+                text = str(getattr(button, "text", "") or "").strip() or "按钮"
+                url = getattr(button, "url", None)
+                if url:
+                    button_row.append(InlineKeyboardButton(text=text, url=str(url)))
+                    continue
+                button_row.append(InlineKeyboardButton(text=text, callback_data="preview:noop"))
+            if button_row:
+                keyboard.append(button_row)
+        return InlineKeyboardMarkup(keyboard) if keyboard else None
 
     @staticmethod
     def _detect_dm_preview_media_kind(path: Path, media_kind: str | None, mime_type: str | None = None) -> str:
