@@ -111,6 +111,17 @@ class DmCollectorBot:
         exc = context.error
         logger.exception("PTB update 处理失败: %s", exc)
 
+        callback_query = getattr(update, "callback_query", None)
+        if callback_query is not None:
+            try:
+                text = self._callback_error_alert_text(getattr(callback_query, "data", "") or "")
+                if text:
+                    await callback_query.answer(text, show_alert=False)
+                return
+            except Exception:  # noqa: BLE001
+                logger.exception("发送 callback 错误提示失败")
+                return
+
         effective_message = getattr(update, "effective_message", None)
         if not effective_message:
             return
@@ -121,6 +132,15 @@ class DmCollectorBot:
             )
         except Exception:  # noqa: BLE001
             logger.exception("发送统一错误提示失败")
+
+    @staticmethod
+    def _callback_error_alert_text(callback_data: str) -> str:
+        data = str(callback_data or "")
+        if data.startswith("account:check:"):
+            return "账号状态检查失败，请重试"
+        if data == "account:check_all":
+            return "批量检查状态失败，请重试"
+        return "操作失败，请重试"
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_chat or not update.effective_message:
@@ -1408,128 +1428,105 @@ class DmCollectorBot:
         if not account:
             await self._show_account_detail(query, account_id)
             return
-        self.db.update_account_status(account_id, status="checking", last_error=None)
-        self.dm_repository.update_account_restriction(account_id, restriction_status="checking", restriction_reason="正在检测")
-        await self._safe_edit(query, self._format_account_text(self.db.get_account(account_id)), self._build_account_detail_keyboard(account_id))
-        result = await self.dm_account_checker.check_account_status(account)
-        account = self.db.get_account(account_id)
-        if not account:
-            await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
-            return
-        issue_text = result.summary
-        if result.restriction_status in {"session_invalid", "frozen"}:
-            label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
-            bucket = "invalid" if result.restriction_status == "session_invalid" else "frozen"
-            backup_note = "已自动导出原始文件"
-            try:
-                await self._send_account_export(query.message.chat_id, [account], bucket, auto_delete=True)
-            except FileNotFoundError:
-                self._purge_account_files(account)
-                self.db.delete_account(account_id)
-                backup_note = "未找到可导出的原始文件，已直接删除账号"
-            text = (
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>账号已自动删除</b>\n"
-                f"名称：<code>{html.escape(str(label), quote=False)}</code>\n"
-                f"原因：<code>{html.escape(issue_text, quote=False)}</code>\n"
-                f"备份：<code>{backup_note}</code>"
+        previous_status = str(account["status"] or "active")
+        previous_last_error = account["last_error"]
+        previous_restriction_status = str(account["restriction_status"] or "unknown")
+        previous_restriction_reason = account["restriction_reason"]
+        previous_restriction_raw_reply = account["restriction_raw_reply"]
+        try:
+            self.db.update_account_status(account_id, status="checking", last_error=None)
+            self.dm_repository.update_account_restriction(account_id, restriction_status="checking", restriction_reason="正在检测")
+            await self._safe_edit(query, self._format_account_text(self.db.get_account(account_id)), self._build_account_detail_keyboard(account_id))
+            result = await self.dm_account_checker.check_account_status(account)
+            account = self.db.get_account(account_id)
+            if not account:
+                await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
+                return
+            issue_text = result.summary
+            if result.restriction_status in {"session_invalid", "frozen"}:
+                label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+                bucket = "invalid" if result.restriction_status == "session_invalid" else "frozen"
+                backup_note = "已自动导出原始文件"
+                try:
+                    await self._send_account_export(query.message.chat_id, [account], bucket, auto_delete=True)
+                except FileNotFoundError:
+                    self._purge_account_files(account)
+                    self.db.delete_account(account_id)
+                    backup_note = "未找到可导出的原始文件，已直接删除账号"
+                text = (
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>账号已自动删除</b>\n"
+                    f"名称：<code>{html.escape(str(label), quote=False)}</code>\n"
+                    f"原因：<code>{html.escape(issue_text, quote=False)}</code>\n"
+                    f"备份：<code>{backup_note}</code>"
+                )
+                await self._safe_edit(query, text, self._single_back_keyboard("account:list:1"))
+                return
+            await self._show_account_detail(query, account_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("单个账号状态检查失败: account_id=%s", account_id)
+            self.db.update_account_status(account_id, status=previous_status, last_error=previous_last_error)
+            self.dm_repository.update_account_restriction(
+                account_id,
+                restriction_status=previous_restriction_status,
+                restriction_reason=previous_restriction_reason,
+                raw_reply=previous_restriction_raw_reply,
             )
-            await self._safe_edit(query, text, self._single_back_keyboard("account:list:1"))
-            return
-        await self._show_account_detail(query, account_id)
+            account = self.db.get_account(account_id)
+            if account:
+                error_text = self._humanize_account_issue("error", str(exc))
+                text = (
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>账号状态检查失败</b>\n"
+                    f"账号：<code>{html.escape(str(account['username'] or account['phone'] or account['display_name'] or account['session_name']), quote=False)}</code>\n"
+                    f"原因：<code>{html.escape(error_text, quote=False)}</code>"
+                )
+                await self._safe_edit(query, text, self._build_account_detail_keyboard(account_id))
+            try:
+                await query.answer("账号状态检查失败，请重试", show_alert=False)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _check_all_accounts(self, query) -> None:
-        rows = self.db.list_all_accounts()
-        if not rows:
-            await self._safe_edit(query, self._not_found_text("当前没有可检测的账号。"), self._single_back_keyboard("menu:accounts"))
-            return
+        try:
+            rows = self.db.list_all_accounts()
+            if not rows:
+                await self._safe_edit(query, self._not_found_text("当前没有可检测的账号。"), self._single_back_keyboard("menu:accounts"))
+                return
 
-        unrestricted = 0
-        limited = 0
-        frozen = 0
-        unknown = 0
-        deleted_broken: list[str] = []
-        deleted_banned: list[str] = []
-        deleted_frozen: list[str] = []
-        removed_invalid_rows: list = []
-        removed_frozen_rows: list = []
-        kept_other_errors: list[str] = []
-        total_checked = len(rows)
-        processed = 0
-        parallel = min(10, total_checked)
+            unrestricted = 0
+            limited = 0
+            frozen = 0
+            unknown = 0
+            deleted_broken: list[str] = []
+            deleted_banned: list[str] = []
+            deleted_frozen: list[str] = []
+            removed_invalid_rows: list = []
+            removed_frozen_rows: list = []
+            kept_other_errors: list[str] = []
+            total_checked = len(rows)
+            processed = 0
+            parallel = min(10, total_checked)
 
-        semaphore = asyncio.Semaphore(parallel)
+            semaphore = asyncio.Semaphore(parallel)
 
-        async def _verify_one(account_row):
-            async with semaphore:
-                result = await self.dm_account_checker.check_account_status(account_row)
-                refreshed = self.db.get_account(account_row["id"])
-                return account_row, refreshed, result
-
-        await self._safe_edit(
-            query,
-            self._format_check_all_progress_text(
-                total=total_checked,
-                processed=0,
-                current_label="准备开始",
-                unrestricted=0,
-                limited=0,
-                frozen=0,
-                unknown=0,
-                deleted_broken=0,
-                deleted_banned=0,
-                kept_other_errors=0,
-                parallel=parallel,
-            ),
-            InlineKeyboardMarkup([
-                [
-                    premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
-                    premium_button("账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
-                ],
-            ]),
-        )
-
-        tasks = [asyncio.create_task(_verify_one(row)) for row in rows]
-        for finished in asyncio.as_completed(tasks):
-            original, refreshed, result = await finished
-            processed += 1
-            account = refreshed or original
-            label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
-            issue_text = result.summary
-            if result.restriction_status == "unrestricted":
-                unrestricted += 1
-            elif result.restriction_status in {"temp_mutual", "permanent_mutual", "geo_limited", "spam_limited", "restricted"}:
-                limited += 1
-            elif result.restriction_status == "frozen":
-                frozen += 1
-                deleted_frozen.append(str(label))
-                if refreshed:
-                    removed_frozen_rows.append(refreshed)
-                    self.db.delete_account(refreshed["id"])
-            elif result.restriction_status == "session_invalid":
-                if "损坏" in issue_text:
-                    deleted_broken.append(str(label))
-                else:
-                    deleted_banned.append(str(label))
-                if refreshed:
-                    removed_invalid_rows.append(refreshed)
-                    self.db.delete_account(refreshed["id"])
-            else:
-                unknown += 1
-                kept_other_errors.append(f"{label}｜{issue_text}")
+            async def _verify_one(account_row):
+                async with semaphore:
+                    result = await self.dm_account_checker.check_account_status(account_row)
+                    refreshed = self.db.get_account(account_row["id"])
+                    return account_row, refreshed, result
 
             await self._safe_edit(
                 query,
                 self._format_check_all_progress_text(
                     total=total_checked,
-                    processed=processed,
-                    current_label=str(label),
-                    unrestricted=unrestricted,
-                    limited=limited,
-                    frozen=frozen,
-                    unknown=unknown,
-                    deleted_broken=len(deleted_broken),
-                    deleted_banned=len(deleted_banned) + len(deleted_frozen),
-                    kept_other_errors=len(kept_other_errors),
+                    processed=0,
+                    current_label="准备开始",
+                    unrestricted=0,
+                    limited=0,
+                    frozen=0,
+                    unknown=0,
+                    deleted_broken=0,
+                    deleted_banned=0,
+                    kept_other_errors=0,
                     parallel=parallel,
                 ),
                 InlineKeyboardMarkup([
@@ -1540,68 +1537,136 @@ class DmCollectorBot:
                 ]),
             )
 
-        export_warnings: list[str] = []
-        if removed_invalid_rows:
-            try:
-                await self._send_account_export(query.message.chat_id, removed_invalid_rows, "invalid", auto_delete=True)
-            except FileNotFoundError:
-                for row in removed_invalid_rows:
-                    self._purge_account_files(row)
-                export_warnings.append("失效/封禁账号没有找到可导出的原始文件")
-        if removed_frozen_rows:
-            try:
-                await self._send_account_export(query.message.chat_id, removed_frozen_rows, "frozen", auto_delete=True)
-            except FileNotFoundError:
-                for row in removed_frozen_rows:
-                    self._purge_account_files(row)
-                export_warnings.append("冻结账号没有找到可导出的原始文件")
+            tasks = [asyncio.create_task(_verify_one(row)) for row in rows]
+            for finished in asyncio.as_completed(tasks):
+                original, refreshed, result = await finished
+                processed += 1
+                account = refreshed or original
+                label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+                issue_text = result.summary
+                if result.restriction_status == "unrestricted":
+                    unrestricted += 1
+                elif result.restriction_status in {"temp_mutual", "permanent_mutual", "geo_limited", "spam_limited", "restricted"}:
+                    limited += 1
+                elif result.restriction_status == "frozen":
+                    frozen += 1
+                    deleted_frozen.append(str(label))
+                    if refreshed:
+                        removed_frozen_rows.append(refreshed)
+                        self.db.delete_account(refreshed["id"])
+                elif result.restriction_status == "session_invalid":
+                    if "损坏" in issue_text:
+                        deleted_broken.append(str(label))
+                    else:
+                        deleted_banned.append(str(label))
+                    if refreshed:
+                        removed_invalid_rows.append(refreshed)
+                        self.db.delete_account(refreshed["id"])
+                else:
+                    unknown += 1
+                    kept_other_errors.append(f"{label}｜{issue_text}")
 
-        total_alive = self.db.count_accounts()
-        lines = [
-            f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检查状态完成</b>",
-            f"总检测账号：<code>{total_checked}</code>",
-            f"无限制：<code>{unrestricted}</code>",
-            f"受限：<code>{limited}</code>",
-            f"冻结：<code>{frozen}</code>",
-            f"待人工确认：<code>{unknown}</code>",
-            f"自动删除损坏 session：<code>{len(deleted_broken)}</code>",
-            f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
-            f"自动删除冻结：<code>{len(deleted_frozen)}</code>",
-            f"当前列表保留：<code>{total_alive}</code>",
-        ]
-        if total_alive == 0:
-            lines.append("\n<b>当前账号列表已清空，没有可用账号。</b>")
-        if deleted_broken:
-            lines.append("")
-            lines.append("<b>已删除：session 已损坏</b>")
-            for item in deleted_broken[:8]:
-                lines.append(f"• {html.escape(item, quote=False)}")
-        if deleted_banned:
-            lines.append("")
-            lines.append("<b>已删除：封禁 / 失效</b>")
-            for item in deleted_banned[:8]:
-                lines.append(f"• {html.escape(item, quote=False)}")
-        if deleted_frozen:
-            lines.append("")
-            lines.append("<b>已删除：冻结</b>")
-            for item in deleted_frozen[:8]:
-                lines.append(f"• {html.escape(item, quote=False)}")
-        if kept_other_errors:
-            lines.append("")
-            lines.append("<b>暂未删除：其他异常</b>")
-            for item in kept_other_errors[:8]:
-                lines.append(f"• {html.escape(item, quote=False)}")
-        if export_warnings:
-            lines.append("")
-            lines.append("<b>导出提示</b>")
-            for item in export_warnings:
-                lines.append(f"• {html.escape(item, quote=False)}")
-        await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup([
-            [
-                premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
-                premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
-            ],
-        ]))
+                await self._safe_edit(
+                    query,
+                    self._format_check_all_progress_text(
+                        total=total_checked,
+                        processed=processed,
+                        current_label=str(label),
+                        unrestricted=unrestricted,
+                        limited=limited,
+                        frozen=frozen,
+                        unknown=unknown,
+                        deleted_broken=len(deleted_broken),
+                        deleted_banned=len(deleted_banned) + len(deleted_frozen),
+                        kept_other_errors=len(kept_other_errors),
+                        parallel=parallel,
+                    ),
+                    InlineKeyboardMarkup([
+                        [
+                            premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
+                            premium_button("账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                        ],
+                    ]),
+                )
+
+            export_warnings: list[str] = []
+            if removed_invalid_rows:
+                try:
+                    await self._send_account_export(query.message.chat_id, removed_invalid_rows, "invalid", auto_delete=True)
+                except FileNotFoundError:
+                    for row in removed_invalid_rows:
+                        self._purge_account_files(row)
+                    export_warnings.append("失效/封禁账号没有找到可导出的原始文件")
+            if removed_frozen_rows:
+                try:
+                    await self._send_account_export(query.message.chat_id, removed_frozen_rows, "frozen", auto_delete=True)
+                except FileNotFoundError:
+                    for row in removed_frozen_rows:
+                        self._purge_account_files(row)
+                    export_warnings.append("冻结账号没有找到可导出的原始文件")
+
+            total_alive = self.db.count_accounts()
+            lines = [
+                f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检查状态完成</b>",
+                f"总检测账号：<code>{total_checked}</code>",
+                f"无限制：<code>{unrestricted}</code>",
+                f"受限：<code>{limited}</code>",
+                f"冻结：<code>{frozen}</code>",
+                f"待人工确认：<code>{unknown}</code>",
+                f"自动删除损坏 session：<code>{len(deleted_broken)}</code>",
+                f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
+                f"自动删除冻结：<code>{len(deleted_frozen)}</code>",
+                f"当前列表保留：<code>{total_alive}</code>",
+            ]
+            if total_alive == 0:
+                lines.append("\n<b>当前账号列表已清空，没有可用账号。</b>")
+            if deleted_broken:
+                lines.append("")
+                lines.append("<b>已删除：session 已损坏</b>")
+                for item in deleted_broken[:8]:
+                    lines.append(f"• {html.escape(item, quote=False)}")
+            if deleted_banned:
+                lines.append("")
+                lines.append("<b>已删除：封禁 / 失效</b>")
+                for item in deleted_banned[:8]:
+                    lines.append(f"• {html.escape(item, quote=False)}")
+            if deleted_frozen:
+                lines.append("")
+                lines.append("<b>已删除：冻结</b>")
+                for item in deleted_frozen[:8]:
+                    lines.append(f"• {html.escape(item, quote=False)}")
+            if kept_other_errors:
+                lines.append("")
+                lines.append("<b>暂未删除：其他异常</b>")
+                for item in kept_other_errors[:8]:
+                    lines.append(f"• {html.escape(item, quote=False)}")
+            if export_warnings:
+                lines.append("")
+                lines.append("<b>导出提示</b>")
+                for item in export_warnings:
+                    lines.append(f"• {html.escape(item, quote=False)}")
+            await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup([
+                [
+                    premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                    premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
+                ],
+            ]))
+        except Exception:  # noqa: BLE001
+            logger.exception("批量账号状态检查失败")
+            text = (
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>批量检查状态失败</b>\n"
+                f"请点一次刷新或稍后重试。"
+            )
+            await self._safe_edit(query, text, InlineKeyboardMarkup([
+                [
+                    premium_button("账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                    premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
+                ],
+            ]))
+            try:
+                await query.answer("批量检查状态失败，请重试", show_alert=False)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _purge_invalid_accounts(self, query) -> None:
         rows = self.db.list_invalid_accounts()
