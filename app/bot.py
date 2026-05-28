@@ -2812,7 +2812,7 @@ class DmCollectorBot:
         return "\n".join(lines)
 
     def _format_dm_task_progress_text(self, task_id: int) -> str:
-        return self._format_dm_task_text(task_id, include_stats=True)
+        return self._format_dm_task_text(task_id, include_stats=False)
 
     def _format_dm_task_detail_text(self, task_id: int) -> str:
         return self._format_dm_task_text(task_id, include_stats=False)
