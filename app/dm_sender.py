@@ -525,7 +525,7 @@ class DmSenderManager:
             )
         self.db.update_account_status(account_id, status=runtime_status, last_error=error_message)
         self.repository.update_dm_task_account(task_id, account_id, status=task_account_status, last_error=error_message)
-        if (not auto_switch_account) or self._task_has_no_other_usable_accounts(task_id, exclude_account_id=account_id):
+        if self._task_has_no_other_usable_accounts(task_id, exclude_account_id=account_id):
             summary = self._build_task_stop_summary(task_id)
             reason = f"{error_message}，且没有其他可用账号，任务已停止｜{summary}"
             current_task = self.repository.get_dm_task(task_id)
