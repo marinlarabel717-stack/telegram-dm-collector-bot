@@ -536,8 +536,8 @@ class DmSenderManager:
             return "forward_forbidden", "这个目标不允许转发该帖子内容", False
         if "inline bot" in lowered or "bot response timeout" in lowered or "next_offset_invalid" in lowered:
             return "postbot_failed", "PostBot 内联结果获取失败", False
-        if "username not occupied" in lowered or "cannot find" in lowered or "no user has" in lowered or "entity not found" in lowered:
-            return "user_not_found", "用户不存在或无法解析", False
+        if "username not occupied" in lowered or "cannot find" in lowered or "no user has" in lowered or "entity not found" in lowered or "nobody is using this username" in lowered or "username is unacceptable" in lowered:
+            return "user_not_found", "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户", False
         if "bot method invalid" in lowered or "bot invalid" in lowered:
             return "bot_target", "目标不是可私信的普通用户", False
         if "user is blocked" in lowered or "you blocked" in lowered:

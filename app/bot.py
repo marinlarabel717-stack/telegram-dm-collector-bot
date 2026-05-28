@@ -3174,7 +3174,7 @@ class DmCollectorBot:
         mapping = {
             "peer_flood": "官方判定发送过于频繁",
             "privacy_restricted": "对方隐私限制，无法私信",
-            "user_not_found": "用户不存在或无法解析",
+            "user_not_found": "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户",
             "bot_target": "目标不是可私信的普通用户",
             "blocked": "对方已拉黑或关系异常",
             "too_many_requests": "请求过于频繁",
@@ -3202,7 +3202,9 @@ class DmCollectorBot:
             ("forward", "当前目标不允许转发该帖子内容"),
             ("media", "当前聊天不允许发送媒体"),
             ("inline bot", "PostBot 内联结果获取失败"),
-            ("entity not found", "用户不存在或无法解析"),
+            ("entity not found", "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户"),
+            ("nobody is using this username", "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户"),
+            ("username is unacceptable", "这个用户名没人用，或者这个用户名本身不合法，所以没法找到对应用户"),
             ("session 未登录", "session 已失效或未登录"),
         ]
         for needle, friendly in phrase_map:
