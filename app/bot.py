@@ -3454,7 +3454,7 @@ class DmCollectorBot:
             return self._not_found_text("私信任务不存在或已被删除。")
         accounts = self.dm_repository.list_dm_task_accounts(task_id) if include_stats else []
         current = self.dm_repository.get_dm_task_current_recipient(task_id)
-        recent_logs = self.dm_repository.list_dm_recent_logs(task_id, limit=5)
+        recent_logs = self.dm_repository.list_dm_recent_logs(task_id, limit=20)
         failure_summary = self.dm_repository.get_dm_task_failure_summary(task_id, limit=6) if include_stats else []
         processed = self.dm_repository.get_dm_task_processed_count(task_id)
         pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
@@ -3500,11 +3500,21 @@ class DmCollectorBot:
             lines.append(f"帖子预览：<code>抓取失败｜{html.escape(str(payload.get('forward_preview_error'))[:120], quote=False)}</code>")
         if task["last_error"]:
             lines.append(f"最近错误：<code>{html.escape(self._humanize_dm_error(None, str(task['last_error'])), quote=False)}</code>")
+        display_logs = []
+        for row in recent_logs:
+            brief_detail = self._format_dm_log_detail_brief(row, policy)
+            if not brief_detail:
+                continue
+            display_logs.append((row, brief_detail))
+            if len(display_logs) >= 5:
+                break
         if current:
             account_label = current["account_username"] or current["account_phone"] or current["account_display_name"] or f"#{current['assigned_account_id']}"
             lines.append(f"当前账号：<code>{html.escape(str(account_label), quote=False)}</code>")
             lines.append(f"当前用户：<code>{html.escape(str(current['normalized_input']), quote=False)}</code>")
-        if recent_logs:
+        if display_logs:
+            lines.append(f"最近日志：<code>{self._format_beijing_timestamp(display_logs[0][0]['created_at'])}</code>")
+        elif recent_logs:
             lines.append(f"最近日志：<code>{self._format_beijing_timestamp(recent_logs[0]['created_at'])}</code>")
         lines.append("")
         lines.append(f"内容概览：<code>{body}</code>")
@@ -3530,16 +3540,15 @@ class DmCollectorBot:
             for row in failure_summary:
                 reason = self._humanize_dm_error(None, str(row["reason"] or "-"))
                 lines.append(f"• <code>{html.escape(reason, quote=False)[:80]}</code> · <code>{row['total']}</code>")
-        if recent_logs:
+        if display_logs:
             lines.append("")
-            lines.append("<b>本次私信任务日志（最新 5 条）</b>")
-            for row in recent_logs:
+            lines.append("<b>本次私信任务日志（简略 5 条）</b>")
+            for row, detail in display_logs:
                 account_label = row["account_username"] or row["account_phone"] or row["account_display_name"] or (row["account_id"] and f"#{row['account_id']}") or "-"
                 target = row["normalized_input"] or "-"
-                detail = self._format_dm_log_detail(row, policy)
                 timestamp = self._format_beijing_timestamp(row["created_at"], short=True)
                 lines.append(
-                    f"• [{html.escape(timestamp, quote=False)}] {html.escape(str(account_label), quote=False)} → {html.escape(str(target), quote=False)} · <code>{html.escape(detail, quote=False)[:80]}</code>"
+                    f"• [{html.escape(timestamp, quote=False)}] {html.escape(str(account_label), quote=False)} → {html.escape(str(target), quote=False)} · <code>{html.escape(detail, quote=False)[:60]}</code>"
                 )
         return "\n".join(lines)
 
@@ -4107,6 +4116,27 @@ class DmCollectorBot:
             return detail
         current = int(row["account_sent_success_count"] or 0)
         return f"{detail}[{current}/{limit}]"
+
+    def _format_dm_log_detail_brief(self, row, policy: dict) -> str | None:
+        detail = self._format_dm_log_detail(row, policy)
+        raw_message = str(row["message"] or "")
+        status = str(row["status"] or "")
+
+        if status == "success":
+            if "回复模式" in detail:
+                return "回复发送成功"
+            if "发送成功" in detail:
+                return "发送成功"
+            return detail
+        if status in {"failed", "retry", "stopped", "error"}:
+            return detail
+        if "准备发送招呼并等待对方回复" in raw_message:
+            return "已发送招呼，等待对方回复"
+        if any(keyword in raw_message for keyword in ("正在发送文本内容", "正在发送媒体内容", "正在抓取频道帖子并转发", "正在获取 PostBot 内联内容并发送")):
+            return "发送中"
+        if any(keyword in raw_message for keyword in ("正在连接 Telegram", "账号连接成功，开始处理目标", "正在解析目标")):
+            return None
+        return None
 
     # ---------- helpers ----------
     def _account_export_bucket_label(self, bucket: str) -> str:
