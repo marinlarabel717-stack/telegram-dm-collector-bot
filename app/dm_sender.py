@@ -114,6 +114,7 @@ class DmSenderManager:
         client = None
         success_count = int(account_row["sent_success_count"] or 0)
         frequent_errors = int(account_row["frequent_error_count"] or 0)
+        too_many_requests_hits = 0
         task = self.repository.get_dm_task(task_id)
         payload = json.loads(str(task["payload_json"] or "{}")) if task else {}
         content_type = str((task["content_type"] if task else None) or payload.get("content_type") or "text")
@@ -202,6 +203,8 @@ class DmSenderManager:
                     error_code, error_message, frequent_hit = self._classify_send_error(exc)
                     if frequent_hit:
                         frequent_errors += 1
+                    if error_code == "too_many_requests":
+                        too_many_requests_hits += 1
                     self.repository.mark_dm_recipient_result(
                         task_id,
                         recipient_id,
@@ -231,6 +234,23 @@ class DmSenderManager:
                         raw_error=self.collection_manager._short_error(exc),
                     )
                     logger.warning(compose_log(f"发送失败｜{error_code}｜{error_message}", task_id=task_id, account_id=account_id, recipient=target))
+                    if policy.should_stop_account_for_too_many_requests(too_many_requests_hits):
+                        logger.warning(
+                            compose_log(
+                                f"请求过于频繁次数达到阈值，停止该账号｜count={too_many_requests_hits}",
+                                task_id=task_id,
+                                account_id=account_id,
+                            )
+                        )
+                        self.repository.update_dm_task_account(
+                            task_id,
+                            account_id,
+                            status="stopped",
+                            last_error=f"请求过于频繁次数达到阈值（{too_many_requests_hits}/{policy.retry_policy.stop_account_after_too_many_requests}）",
+                        )
+                        if not policy.auto_switch_account:
+                            self.repository.request_dm_task_stop(task_id)
+                        break
                     if policy.should_stop_account_for_frequent(frequent_errors):
                         logger.warning(compose_log(f"达到频繁阈值，停止该账号｜count={frequent_errors}", task_id=task_id, account_id=account_id))
                         if not policy.auto_switch_account:
@@ -257,7 +277,11 @@ class DmSenderManager:
             current = self.repository.get_dm_task(task_id)
             row_after_run = next((row for row in self.repository.list_dm_task_accounts(task_id) if int(row["account_id"]) == account_id), None)
             current_account_status = str(row_after_run["status"] or "") if row_after_run else ""
-            if current_account_status == "error" or next_status in {"unauthorized", "error"}:
+            if current_account_status in {"error", "stopped"}:
+                final_task_account_status = current_account_status
+                if row_after_run and row_after_run["last_error"]:
+                    last_error = row_after_run["last_error"]
+            elif next_status in {"unauthorized", "error"}:
                 final_task_account_status = "error"
             elif current and self.repository.should_stop_dm_task(task_id):
                 final_task_account_status = "stopped"
@@ -375,6 +399,7 @@ class DmSenderManager:
             retry_policy=RetryPolicy(
                 max_retries=int(data.get("max_retries") or 3),
                 stop_account_after_user_frequent=int(data.get("stop_account_after_user_frequent") or 30),
+                stop_account_after_too_many_requests=int(data.get("stop_account_after_too_many_requests") or 40),
             ),
         )
 

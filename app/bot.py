@@ -373,6 +373,9 @@ class DmCollectorBot:
         if data == "dm:wizard:delay:cycle":
             await self._dm_wizard_cycle_delay(query, update.effective_user.id)
             return
+        if data == "dm:wizard:too_many_requests:cycle":
+            await self._dm_wizard_cycle_too_many_requests(query, update.effective_user.id)
+            return
         if data == "dm:wizard:worker:cycle":
             await self._dm_wizard_cycle_worker_count(query, update.effective_user.id)
             return
@@ -1453,6 +1456,7 @@ class DmCollectorBot:
                     "typing_simulation": True,
                     "max_retries": 3,
                     "stop_account_after_user_frequent": 30,
+                    "stop_account_after_too_many_requests": 40,
                 },
             },
         }
@@ -1555,6 +1559,16 @@ class DmCollectorBot:
         current = (int(policy.get("delay_min") or 8), int(policy.get("delay_max") or 15))
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else (8, 15)
         policy["delay_min"], policy["delay_max"] = next_value
+        await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
+    async def _dm_wizard_cycle_too_many_requests(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        policy = draft.setdefault("policy", {})
+        options = [10, 20, 30, 40, 50, 80]
+        current = int(policy.get("stop_account_after_too_many_requests") or 40)
+        next_value = options[(options.index(current) + 1) % len(options)] if current in options else 40
+        policy["stop_account_after_too_many_requests"] = next_value
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_worker_count(self, query, user_id: int) -> None:
@@ -2738,6 +2752,7 @@ class DmCollectorBot:
         stage2_label = f"{int(policy.get('stage2_delay_seconds', 3))}秒"
         pin_label = "开启" if policy.get("pin_after_send", False) else "关闭"
         pin_delay_label = f"{int(policy.get('pin_delay_seconds', 3))}秒"
+        too_many_requests_label = int(policy.get("stop_account_after_too_many_requests", 40))
         lines = [
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>发送配置</b>",
             f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>",
@@ -2745,6 +2760,7 @@ class DmCollectorBot:
             f"发送模式：<code>{mode_label}</code>",
             f"并发线程：<code>{worker_count}</code>",
             f"单号上限：<code>{int(policy.get('per_account_success_limit', 40))}</code>",
+            f"请求频繁停号：<code>{too_many_requests_label}次</code>",
             f"随机间隔：<code>{delay_label}</code>",
             f"打字状态：<code>{typing_label}</code>",
             f"账号策略：<code>{switch_label}</code>",
@@ -2768,6 +2784,7 @@ class DmCollectorBot:
             f"账号数：<code>{len(draft.get('account_ids') or [])}</code>",
             f"并发线程：<code>{worker_count}</code>",
             f"单号上限：<code>{policy.get('per_account_success_limit', 40)}</code>",
+            f"请求频繁停号：<code>{int(policy.get('stop_account_after_too_many_requests', 40))}次</code>",
             f"随机间隔：<code>{policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒</code>",
             f"打字状态：<code>{'开启' if policy.get('typing_simulation', True) else '关闭'}</code>",
             f"账号策略：<code>{'自动切号' if policy.get('auto_switch_account', True) else '单号用完即停'}</code>",
@@ -2816,7 +2833,7 @@ class DmCollectorBot:
             f"并发线程：<code>{task['worker_count'] or 1}</code>",
             f"内容类型：<code>{content_type_label(content_type)}</code>",
             f"发送模式：<code>{message_mode_label(task['message_mode'], content_type=content_type)}</code>",
-            f"发送配置：<code>上限 {policy.get('per_account_success_limit', 40)} / 间隔 {policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒 / {'打字开' if policy.get('typing_simulation', True) else '打字关'}</code>",
+            f"发送配置：<code>上限 {policy.get('per_account_success_limit', 40)} / 请求频繁 {policy.get('stop_account_after_too_many_requests', 40)}次停号 / 间隔 {policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒 / {'打字开' if policy.get('typing_simulation', True) else '打字关'}</code>",
         ])
         if draft_mode := policy.get("pin_after_send", False):
             lines.append(f"自动置顶：<code>{'开启' if draft_mode else '关闭'}</code> · 延迟 <code>{int(policy.get('pin_delay_seconds', 3))}秒</code>")
@@ -3204,9 +3221,10 @@ class DmCollectorBot:
             ],
             [
                 premium_button(f"间隔：{delay_label}", self.settings.emoji_timeout_id, callback_data="dm:wizard:delay:cycle"),
-                premium_button(f"打字：{'开' if policy.get('typing_simulation', True) else '关'}", self.settings.emoji_upload_id, callback_data="dm:wizard:typing:toggle"),
+                premium_button(f"频繁停号：{int(policy.get('stop_account_after_too_many_requests', 40))}", self.settings.emoji_error_id, callback_data="dm:wizard:too_many_requests:cycle"),
             ],
             [
+                premium_button(f"打字：{'开' if policy.get('typing_simulation', True) else '关'}", self.settings.emoji_upload_id, callback_data="dm:wizard:typing:toggle"),
                 premium_button(f"切号：{'开' if policy.get('auto_switch_account', True) else '关'}", self.settings.emoji_all_id, callback_data="dm:wizard:switch:toggle"),
                 premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),
                 premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:pin_delay:cycle"),

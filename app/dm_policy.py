@@ -19,6 +19,7 @@ class DelayWindow:
 class RetryPolicy:
     max_retries: int = 3
     stop_account_after_user_frequent: int = 30
+    stop_account_after_too_many_requests: int = 40
 
 
 @dataclass(slots=True)
@@ -39,3 +40,9 @@ class DMTaskPolicy:
 
     def should_stop_account_for_frequent(self, frequent_errors: int) -> bool:
         return frequent_errors >= self.retry_policy.stop_account_after_user_frequent
+
+    def should_stop_account_for_too_many_requests(self, too_many_requests_hits: int) -> bool:
+        return (
+            self.retry_policy.stop_account_after_too_many_requests > 0
+            and too_many_requests_hits >= self.retry_policy.stop_account_after_too_many_requests
+        )
