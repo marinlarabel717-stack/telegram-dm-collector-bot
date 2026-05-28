@@ -51,7 +51,7 @@ class DmAccountChecker:
         self.repository.update_account_restriction(account_id, restriction_status="checking", restriction_reason="正在检测 SpamBot 状态")
         logger.info(compose_log("开始检测 SpamBot 状态", account_id=account_id))
         try:
-            reply_text = await self._fetch_spambot_reply(Path(account_row["session_file"]))
+            reply_text = await self._fetch_spambot_reply(account_row)
             restriction_status, summary = self._parse_spambot_reply(reply_text)
             self.repository.update_account_restriction(
                 account_id,
@@ -84,10 +84,10 @@ class DmAccountChecker:
                 last_error=str(exc),
             )
 
-    async def _fetch_spambot_reply(self, session_file: Path) -> str:
+    async def _fetch_spambot_reply(self, account_row) -> str:
         client: TelegramClient | None = None
         try:
-            client = self.collection_manager._build_client(session_file)
+            client = self.collection_manager._build_client(Path(account_row["session_file"]), account_row=account_row)
             await client.connect()
             if not await client.is_user_authorized():
                 raise RuntimeError("session 未登录")

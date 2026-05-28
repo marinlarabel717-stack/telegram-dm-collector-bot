@@ -71,6 +71,11 @@ class Database:
                     phone TEXT,
                     username TEXT,
                     display_name TEXT,
+                    proxy_type TEXT,
+                    proxy_host TEXT,
+                    proxy_port INTEGER,
+                    proxy_username TEXT,
+                    proxy_password TEXT,
                     status TEXT NOT NULL DEFAULT 'queued',
                     last_error TEXT,
                     last_checked_at TEXT,
@@ -165,6 +170,11 @@ class Database:
             for statement in (
                 "ALTER TABLE collect_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'channel'",
                 "ALTER TABLE collect_tasks ADD COLUMN filters_json TEXT NOT NULL DEFAULT '{}'",
+                "ALTER TABLE accounts ADD COLUMN proxy_type TEXT",
+                "ALTER TABLE accounts ADD COLUMN proxy_host TEXT",
+                "ALTER TABLE accounts ADD COLUMN proxy_port INTEGER",
+                "ALTER TABLE accounts ADD COLUMN proxy_username TEXT",
+                "ALTER TABLE accounts ADD COLUMN proxy_password TEXT",
             ):
                 try:
                     self.conn.execute(statement)
@@ -438,6 +448,32 @@ class Database:
                 self.conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
                 self.conn.commit()
             return row
+
+    def update_account_proxy(
+        self,
+        account_id: int,
+        *,
+        proxy_type: str | None = None,
+        proxy_host: str | None = None,
+        proxy_port: int | None = None,
+        proxy_username: str | None = None,
+        proxy_password: str | None = None,
+    ) -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE accounts SET
+                    proxy_type=?,
+                    proxy_host=?,
+                    proxy_port=?,
+                    proxy_username=?,
+                    proxy_password=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (proxy_type, proxy_host, proxy_port, proxy_username, proxy_password, account_id),
+            )
+            self.conn.commit()
 
     # ---------- collection task storage ----------
     def create_collect_task(

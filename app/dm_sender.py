@@ -147,7 +147,7 @@ class DmSenderManager:
         content_type = str((task["content_type"] if task else None) or payload.get("content_type") or "text")
         self.repository.update_dm_task_account(task_id, account_id, status="running", last_error=None)
         try:
-            client = self.collection_manager._build_client(session_file)
+            client = self.collection_manager._build_client(session_file, account_row=account_row)
             await client.connect()
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")

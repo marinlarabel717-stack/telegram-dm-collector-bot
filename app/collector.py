@@ -23,6 +23,7 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import CheckChatInviteRequest, ImportChatInviteRequest
 from telethon.tl.types import ChannelParticipantsAdmins, User
 
+from .account_proxy import build_telethon_proxy
 from .config import Settings
 from .database import Database
 
@@ -72,10 +73,10 @@ class CollectionManager:
     def _target_tag(kind: str, value: str) -> str:
         return f"【{kind} {value}】"
 
-    async def verify_session_file(self, session_file: Path) -> SessionCheckResult:
+    async def verify_session_file(self, session_file: Path, *, account_row=None) -> SessionCheckResult:
         client: TelegramClient | None = None
         try:
-            client = self._build_client(session_file)
+            client = self._build_client(session_file, account_row=account_row)
             await client.connect()
             authorized = await client.is_user_authorized()
             if not authorized:
@@ -119,7 +120,7 @@ class CollectionManager:
                 await client.disconnect()
 
     async def verify_account(self, account_row) -> SessionCheckResult:
-        result = await self.verify_session_file(Path(account_row["session_file"]))
+        result = await self.verify_session_file(Path(account_row["session_file"]), account_row=account_row)
         self.db.update_account_status(
             account_row["id"],
             status=result.status,
@@ -254,7 +255,7 @@ class CollectionManager:
         client: TelegramClient | None = None
         try:
             logger.info("%s%s 频道 worker 启动｜session=%s", self._task_tag(task_id), self._account_tag(account_id), session_file.name)
-            client = self._build_client(session_file)
+            client = self._build_client(session_file, account_row=account_row)
             await client.connect()
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
@@ -298,7 +299,7 @@ class CollectionManager:
         joined_since_cooldown = 0
         try:
             logger.info("%s%s 群组 worker 启动｜session=%s", self._task_tag(task_id), self._account_tag(account_id), session_file.name)
-            client = self._build_client(session_file)
+            client = self._build_client(session_file, account_row=account_row)
             await client.connect()
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
@@ -584,12 +585,13 @@ class CollectionManager:
         self.db.sync_task_metrics(task_id, unique_total=unique_total)
         await self._emit_progress(task_id)
 
-    def _build_client(self, session_file: Path) -> TelegramClient:
+    def _build_client(self, session_file: Path, *, account_row=None) -> TelegramClient:
         session_base = str(session_file)
         if session_base.endswith(".session"):
             session_base = session_base[:-8]
+        proxy = build_telethon_proxy(account_row)
         try:
-            return TelegramClient(session_base, self.settings.api_id, self.settings.api_hash)
+            return TelegramClient(session_base, self.settings.api_id, self.settings.api_hash, proxy=proxy)
         except ValueError as exc:
             if "too many values to unpack" not in str(exc):
                 raise
@@ -597,7 +599,7 @@ class CollectionManager:
             compat_base = str(compat_session)
             if compat_base.endswith(".session"):
                 compat_base = compat_base[:-8]
-            return TelegramClient(compat_base, self.settings.api_id, self.settings.api_hash)
+            return TelegramClient(compat_base, self.settings.api_id, self.settings.api_hash, proxy=proxy)
 
     def _build_compat_session_file(self, session_file: Path) -> Path:
         compat_file = session_file.with_name(f"{session_file.stem}.compat.session")
