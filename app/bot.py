@@ -1477,7 +1477,7 @@ class DmCollectorBot:
     async def _show_dm_menu(self, query) -> None:
         text = (
             f"{tg_emoji(self.settings.emoji_start_id, '🎊')} <b>私信任务</b>\n"
-            f"当前支持：文本私信、媒体私信、频道帖子转发（通过链接定位原帖）、txt/手输用户名单、单号上限、自动切号、实时成功失败统计。"
+            f"当前支持：文本私信、媒体私信、频道帖子转发（通过链接定位原帖）、txt/手输用户名单、单号上限、自动补号、实时成功失败统计。"
         )
         keyboard = [
             [
@@ -3372,7 +3372,7 @@ class DmCollectorBot:
             ],
             [
                 premium_button(f"打字：{'开' if policy.get('typing_simulation', True) else '关'}", self.settings.emoji_upload_id, callback_data="dm:wizard:typing:toggle"),
-                premium_button(f"切号：{'开' if policy.get('auto_switch_account', True) else '关'}", self.settings.emoji_all_id, callback_data="dm:wizard:switch:toggle"),
+                premium_button(f"补号：{'开' if policy.get('auto_switch_account', True) else '关'}", self.settings.emoji_all_id, callback_data="dm:wizard:switch:toggle"),
             ],
             [
                 premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),

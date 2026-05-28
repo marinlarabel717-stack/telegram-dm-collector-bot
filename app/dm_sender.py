@@ -147,7 +147,7 @@ class DmSenderManager:
                     fallback_total_accounts=len(active_account_ids),
                     fallback_pending=pending,
                 )
-                reason_prefix = "当前所选账号已用尽，且未开启自动切号，任务已停止" if not active_policy.auto_switch_account else "所选账号与账号列表补位均已用尽，任务已停止"
+                reason_prefix = "当前所选账号已用尽，且未开启自动补号，任务已停止" if not active_policy.auto_switch_account else "所选账号与账号列表补位均已用尽，任务已停止"
                 self.repository.mark_dm_task_status(task_id, "stopped", last_error=f"{reason_prefix}｜{summary}")
             else:
                 self.repository.mark_dm_task_status(task_id, "completed")
