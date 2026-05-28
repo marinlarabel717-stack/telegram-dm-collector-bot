@@ -57,7 +57,7 @@ class DmSenderManager:
             return
         if not accounts:
             reason_text = "；".join(unavailable_reasons[:3]) if unavailable_reasons else "没有可用账号"
-            self.repository.mark_dm_task_status(task_id, "error", last_error=f"所选账号不可用｜{reason_text}")
+            self.repository.mark_dm_task_status(task_id, "stopped", last_error=f"没有可用账号，任务已停止｜{reason_text}")
             self.repository.sync_dm_task_metrics(task_id)
             await self._emit_complete(task_id)
             return
@@ -86,8 +86,10 @@ class DmSenderManager:
             self.repository.mark_dm_task_status(task_id, "error", last_error=self.collection_manager._short_error(exc))
         else:
             pending = self.repository.count_dm_pending_recipients(task_id)
+            current_task = self.repository.get_dm_task(task_id)
             if self.repository.should_stop_dm_task(task_id):
-                self.repository.mark_dm_task_status(task_id, "stopped", last_error="管理员手动停止任务")
+                stop_reason = str((current_task["last_error"] if current_task else "") or "").strip() or "管理员手动停止任务"
+                self.repository.mark_dm_task_status(task_id, "stopped", last_error=stop_reason)
             elif pending > 0:
                 self.repository.mark_dm_task_status(task_id, "stopped", last_error="账号已用尽，任务已停止")
             else:
@@ -200,6 +202,7 @@ class DmSenderManager:
                     await asyncio.sleep(max(wait_seconds, 1))
                     queue.put_nowait(recipient)
                 except Exception as exc:  # noqa: BLE001
+                    raw_error = self.collection_manager._short_error(exc)
                     error_code, error_message, frequent_hit = self._classify_send_error(exc)
                     if frequent_hit:
                         frequent_errors += 1
@@ -237,9 +240,21 @@ class DmSenderManager:
                         action="send",
                         status="failed",
                         message=log_message,
-                        raw_error=self.collection_manager._short_error(exc),
+                        raw_error=raw_error,
                     )
                     logger.warning(compose_log(f"发送失败｜{error_code}｜{error_message}", task_id=task_id, account_id=account_id, recipient=target))
+                    if self._is_account_terminal_error(error_code):
+                        stop_reason = self._handle_terminal_account_error(
+                            task_id,
+                            account_id,
+                            error_code=error_code,
+                            error_message=error_message,
+                            raw_error=raw_error,
+                            auto_switch_account=policy.auto_switch_account,
+                        )
+                        if stop_reason:
+                            logger.warning(compose_log(stop_reason, task_id=task_id, account_id=account_id))
+                        break
                     if policy.should_stop_account_for_too_many_requests(too_many_requests_hits):
                         logger.warning(
                             compose_log(
@@ -412,6 +427,10 @@ class DmSenderManager:
     def _classify_send_error(self, exc: Exception) -> tuple[str, str, bool]:
         short = self.collection_manager._short_error(exc)
         lowered = short.lower()
+        if "cannot send requests while disconnected" in lowered or ("disconnected" in lowered and "request" in lowered):
+            return "account_disconnected", "账号掉线了，连接已经断开，没法继续发请求", False
+        if any(keyword in lowered for keyword in ("auth key", "authkey", "unauthorized", "session revoked", "user deactivated", "input_user_deactivated", "phone number banned", "user_deactivated_ban", "deactivated", "banned", "revoked")):
+            return "session_invalid", "账号失效或被封禁了，当前 session 不能继续使用", False
         if "peerflood" in lowered:
             return "peer_flood", "官方判定发送过于频繁", True
         if "you can't write in this chat" in lowered or "chat_write_forbidden" in lowered or "settypingrequest" in lowered:
@@ -441,6 +460,69 @@ class DmSenderManager:
         if "frozen" in lowered:
             return "frozen", "账号疑似冻结", True
         return "send_failed", short or exc.__class__.__name__, False
+
+    def _is_account_terminal_error(self, error_code: str) -> bool:
+        return error_code in {"account_disconnected", "session_invalid", "frozen"}
+
+    def _handle_terminal_account_error(
+        self,
+        task_id: int,
+        account_id: int,
+        *,
+        error_code: str,
+        error_message: str,
+        raw_error: str,
+        auto_switch_account: bool,
+    ) -> str:
+        runtime_status = "error"
+        task_account_status = "error"
+        if error_code == "session_invalid":
+            runtime_status = "unauthorized"
+            self.repository.update_account_restriction(
+                account_id,
+                restriction_status="session_invalid",
+                restriction_reason=error_message,
+                raw_reply=raw_error,
+            )
+        elif error_code == "frozen":
+            runtime_status = "active"
+            task_account_status = "stopped"
+            self.repository.update_account_restriction(
+                account_id,
+                restriction_status="frozen",
+                restriction_reason=error_message,
+                raw_reply=raw_error,
+            )
+        self.db.update_account_status(account_id, status=runtime_status, last_error=error_message)
+        self.repository.update_dm_task_account(task_id, account_id, status=task_account_status, last_error=error_message)
+        if (not auto_switch_account) or self._task_has_no_other_usable_accounts(task_id, exclude_account_id=account_id):
+            reason = f"{error_message}，且没有其他可用账号，任务已停止"
+            current_task = self.repository.get_dm_task(task_id)
+            current_status = str((current_task["status"] if current_task else "") or "")
+            self.repository.mark_dm_task_status(
+                task_id,
+                current_status if current_status in {"queued", "running", "paused"} else "running",
+                last_error=reason,
+            )
+            self.repository.request_dm_task_stop(task_id)
+            return reason
+        return f"{error_message}，已停止当前账号并切到其他账号"
+
+    def _task_has_no_other_usable_accounts(self, task_id: int, *, exclude_account_id: int) -> bool:
+        for row in self.repository.list_dm_task_accounts(task_id):
+            if int(row["account_id"]) == exclude_account_id:
+                continue
+            task_status = str(row["status"] or "")
+            runtime_status = str(row["account_runtime_status"] or "")
+            restriction_status = str(row["restriction_status"] or "unknown")
+            if task_status not in {"queued", "running"}:
+                continue
+            if runtime_status in {"unauthorized", "error"}:
+                continue
+            if restriction_status in {"session_invalid", "frozen"}:
+                continue
+            return False
+        return True
 
     async def _apply_post_send_actions(self, client, entity, sent_message, policy: DMTaskPolicy, *, task_id: int, account_id: int, recipient_id: int) -> None:
         if not policy.pin_after_send or sent_message is None:

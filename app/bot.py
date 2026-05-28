@@ -3239,6 +3239,8 @@ class DmCollectorBot:
             [
                 premium_button(f"打字：{'开' if policy.get('typing_simulation', True) else '关'}", self.settings.emoji_upload_id, callback_data="dm:wizard:typing:toggle"),
                 premium_button(f"切号：{'开' if policy.get('auto_switch_account', True) else '关'}", self.settings.emoji_all_id, callback_data="dm:wizard:switch:toggle"),
+            ],
+            [
                 premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),
                 premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:pin_delay:cycle"),
             ],
