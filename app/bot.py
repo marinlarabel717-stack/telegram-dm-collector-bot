@@ -2981,6 +2981,9 @@ class DmCollectorBot:
         status = str(account["restriction_status"] or "")
         if compact:
             if status == "temp_mutual" and "解除" in reason:
+                short_time = self._short_restriction_expiry_text(reason)
+                if short_time:
+                    return f"{badge} · <code>{html.escape(short_time, quote=False)}</code>"
                 detail = reason.replace("临时双向", "").strip("（）() ")
                 if detail:
                     return f"{badge} · <code>{html.escape(detail, quote=False)}</code>"
@@ -2999,6 +3002,13 @@ class DmCollectorBot:
             if reason == default_reasons.get(status):
                 return badge
         return f"{badge}（<code>{html.escape(reason, quote=False)}</code>）"
+
+    def _short_restriction_expiry_text(self, reason: str) -> str | None:
+        match = re.search(r"北京时间\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})(?::\d{2})?\s*解除", str(reason or ""))
+        if not match:
+            return None
+        _, month, day, hour, minute = match.groups()
+        return f"{int(month)}-{int(day)} {hour}:{minute} 解除"
 
     def _format_task_text(self, task_id: int) -> str:
         task = self.db.get_collect_task(task_id)
