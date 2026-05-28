@@ -1932,13 +1932,26 @@ class DmCollectorBot:
 
     @staticmethod
     def _build_postbot_preview_markup(message) -> InlineKeyboardMarkup | None:
-        rows = getattr(message, "buttons", None) or []
+        rows: list[list] = []
+        raw_markup = getattr(message, "reply_markup", None)
+        if raw_markup and getattr(raw_markup, "rows", None):
+            for raw_row in getattr(raw_markup, "rows", None) or []:
+                raw_buttons = list(getattr(raw_row, "buttons", None) or [])
+                if raw_buttons:
+                    rows.append(raw_buttons)
+        elif getattr(message, "buttons", None):
+            for row in getattr(message, "buttons", None) or []:
+                normalized_row = list(row or [])
+                if normalized_row:
+                    rows.append(normalized_row)
+
         keyboard: list[list[InlineKeyboardButton]] = []
         for row in rows:
             button_row: list[InlineKeyboardButton] = []
             for button in row or []:
-                text = str(getattr(button, "text", "") or "").strip() or "按钮"
-                url = getattr(button, "url", None)
+                original = getattr(button, "button", button)
+                text = str(getattr(button, "text", None) or getattr(original, "text", "") or "").strip() or "按钮"
+                url = getattr(button, "url", None) or getattr(original, "url", None)
                 if url:
                     button_row.append(InlineKeyboardButton(text=text, url=str(url)))
                     continue
