@@ -123,7 +123,7 @@ class DmCollectorBot:
             try:
                 text = self._callback_error_alert_text(getattr(callback_query, "data", "") or "")
                 if text:
-                    await callback_query.answer(text, show_alert=False)
+                    await self._safe_answer_callback(callback_query, text, show_alert=False)
                 return
             except Exception:  # noqa: BLE001
                 logger.exception("发送 callback 错误提示失败")
@@ -148,6 +148,23 @@ class DmCollectorBot:
         if data == "account:check_all":
             return "批量检查状态失败，请重试"
         return "操作失败，请重试"
+
+    @staticmethod
+    def _is_expired_callback_error(exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return "query is too old" in text or "query id is invalid" in text or "response timeout expired" in text
+
+    async def _safe_answer_callback(self, query, text: str | None = None, *, show_alert: bool = False) -> bool:
+        if not query:
+            return False
+        try:
+            await query.answer(text, show_alert=show_alert)
+            return True
+        except BadRequest as exc:
+            if self._is_expired_callback_error(exc):
+                logger.info("callback 已过期，忽略 answer: data=%s", getattr(query, "data", None))
+                return False
+            raise
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_chat or not update.effective_message:
@@ -183,9 +200,9 @@ class DmCollectorBot:
 
         data = query.data or ""
         if data.startswith("preview:noop"):
-            await query.answer("这是预览按钮。真实私信时会按原始按钮生效。", show_alert=False)
+            await self._safe_answer_callback(query, "这是预览按钮。真实私信时会按原始按钮生效。", show_alert=False)
             return
-        await query.answer()
+        await self._safe_answer_callback(query)
 
         if data == "menu:main":
             self._clear_state(update.effective_user.id)
@@ -1384,12 +1401,12 @@ class DmCollectorBot:
     async def _clear_global_proxy(self, query) -> None:
         self.db.clear_global_proxy()
         await self._show_proxy_manage_menu(query)
-        await query.answer("代理池已清空", show_alert=False)
+        await self._safe_answer_callback(query, "代理池已清空", show_alert=False)
 
     async def _check_global_proxy_pool(self, query) -> None:
         proxies = self.db.get_global_proxies()
         if not proxies:
-            await query.answer("当前没有代理可检测", show_alert=True)
+            await self._safe_answer_callback(query, "当前没有代理可检测", show_alert=True)
             return
         await self._safe_edit(query, f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 正在检测代理可用性，请稍等……", self._single_back_keyboard("account:proxy:manage"))
         valid: list[dict] = []
@@ -1488,7 +1505,7 @@ class DmCollectorBot:
                 )
                 await self._safe_edit(query, text, self._build_account_detail_keyboard(account_id))
             try:
-                await query.answer("账号状态检查失败，请重试", show_alert=False)
+                await self._safe_answer_callback(query, "账号状态检查失败，请重试", show_alert=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1671,7 +1688,7 @@ class DmCollectorBot:
                 ],
             ]))
             try:
-                await query.answer("批量检查状态失败，请重试", show_alert=False)
+                await self._safe_answer_callback(query, "批量检查状态失败，请重试", show_alert=False)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1851,7 +1868,7 @@ class DmCollectorBot:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
         if not draft.get("account_ids"):
-            await query.answer("至少选择一个账号", show_alert=True)
+            await self._safe_answer_callback(query, "至少选择一个账号", show_alert=True)
             return
         self._sync_dm_worker_count(draft)
         state["mode"] = "dm_config"
@@ -1882,7 +1899,7 @@ class DmCollectorBot:
         draft = state.get("draft") or {}
         if (draft.get("content_type") or "text") == "reply":
             draft["message_mode"] = "three_stage"
-            await query.answer("回复模式固定走：先打招呼，再等对方回复后发送文案", show_alert=True)
+            await self._safe_answer_callback(query, "回复模式固定走：先打招呼，再等对方回复后发送文案", show_alert=True)
             await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
             return
         draft["message_mode"] = "three_stage" if draft.get("message_mode") == "single" else "single"
@@ -2059,7 +2076,7 @@ class DmCollectorBot:
         else:
             has_content = bool((draft.get("text") or "").strip()) if mode == "single" else bool((draft.get("body") or "").strip())
         if not raw_targets or not draft.get("account_ids") or not has_content:
-            await query.answer("任务信息不完整", show_alert=True)
+            await self._safe_answer_callback(query, "任务信息不完整", show_alert=True)
             return
 
         targets = [ParsedTarget(**item) for item in raw_targets]
@@ -2144,7 +2161,7 @@ class DmCollectorBot:
             await self._send_dm_preview(chat_id, payload, draft.get("content_type") or "text", draft=draft)
         except Exception as exc:  # noqa: BLE001
             logger.exception("私信预览失败")
-            await query.answer(f"预览失败：{self._humanize_dm_error(None, str(exc))[:120]}", show_alert=True)
+            await self._safe_answer_callback(query, f"预览失败：{self._humanize_dm_error(None, str(exc))[:120]}", show_alert=True)
 
     async def _send_dm_preview(self, chat_id: int, payload: dict, content_type: str, *, draft: dict | None = None) -> None:
         mode = str(payload.get("mode") or "single")
@@ -2444,7 +2461,7 @@ class DmCollectorBot:
 
     async def _clear_dm_tasks(self, query) -> None:
         cleared = self.dm_repository.clear_dm_finished_tasks()
-        await query.answer(f"已清空 {cleared} 个已结束任务", show_alert=False)
+        await self._safe_answer_callback(query, f"已清空 {cleared} 个已结束任务", show_alert=False)
         await self._show_dm_task_list(query, page=1)
 
     async def _show_dm_task_detail(self, query, task_id: int, page: int = 1) -> None:
@@ -4150,15 +4167,15 @@ class DmCollectorBot:
     async def _export_accounts_by_bucket(self, query, chat_id: int, bucket: str) -> None:
         rows = self._filter_account_rows_for_export(bucket)
         if not rows:
-            await query.answer(f"没有可导出的{self._account_export_bucket_label(bucket)}账号", show_alert=True)
+            await self._safe_answer_callback(query, f"没有可导出的{self._account_export_bucket_label(bucket)}账号", show_alert=True)
             return
         try:
             await self._send_account_export(chat_id, rows, bucket, auto_delete=True)
         except FileNotFoundError as exc:
-            await query.answer(str(exc), show_alert=True)
+            await self._safe_answer_callback(query, str(exc), show_alert=True)
             return
         await self._show_accounts_menu(query, page=1)
-        await query.answer("导出完成，顶部统计已刷新", show_alert=False)
+        await self._safe_answer_callback(query, "导出完成，顶部统计已刷新", show_alert=False)
 
     async def _send_dm_exports(self, chat_id: int) -> None:
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
@@ -4333,7 +4350,7 @@ class DmCollectorBot:
             f"这个功能目前只开放给管理员。"
         )
         if update.callback_query:
-            await update.callback_query.answer("无权限", show_alert=True)
+            await self._safe_answer_callback(update.callback_query, "无权限", show_alert=True)
         elif update.effective_message:
             await update.effective_message.reply_text(denied_text, parse_mode=ParseMode.HTML)
         return False
