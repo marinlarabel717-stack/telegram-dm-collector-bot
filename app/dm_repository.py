@@ -356,6 +356,14 @@ class DmRepository:
                 (task_id,),
             ).fetchall()
 
+    def ensure_dm_task_account(self, task_id: int, account_id: int) -> None:
+        with self.db.lock:
+            self.db.conn.execute(
+                "INSERT OR IGNORE INTO dm_task_accounts (task_id, account_id) VALUES (?, ?)",
+                (task_id, account_id),
+            )
+            self.db.conn.commit()
+
     def list_dm_task_recipients(self, task_id: int, *, statuses: Sequence[str] | None = None, limit: int | None = None) -> list[sqlite3.Row]:
         with self.db.lock:
             where = ["tr.task_id=?"]

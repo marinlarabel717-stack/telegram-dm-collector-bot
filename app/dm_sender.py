@@ -55,7 +55,24 @@ class DmSenderManager:
             self.repository.mark_dm_task_status(task_id, "completed")
             await self._emit_complete(task_id)
             return
-        if not accounts:
+        selected_account_ids = [int(row["account_id"]) for row in accounts]
+        fallback_account_ids: list[int] = []
+        if active_policy.auto_switch_account:
+            selected_account_id_set = set(selected_account_ids)
+            for row in self.db.get_active_accounts():
+                account_id = int(row["id"])
+                if account_id in selected_account_id_set:
+                    continue
+                if not self._account_can_send(row)[0]:
+                    continue
+                self.repository.ensure_dm_task_account(task_id, account_id)
+                fallback_account_ids.append(account_id)
+        task_accounts = self.repository.list_dm_task_accounts(task_id)
+        task_account_map = {int(row["account_id"]): row for row in task_accounts}
+        accounts = [task_account_map[account_id] for account_id in selected_account_ids if account_id in task_account_map]
+        fallback_accounts = [task_account_map[account_id] for account_id in fallback_account_ids if account_id in task_account_map]
+        account_seed_rows = accounts + fallback_accounts
+        if not account_seed_rows:
             reason_text = "；".join(unavailable_reasons[:3]) if unavailable_reasons else "没有可用账号"
             summary = self._build_task_stop_summary(task_id, fallback_total_accounts=len(task_accounts), fallback_pending=len(recipients))
             self.repository.mark_dm_task_status(task_id, "stopped", last_error=f"没有可用账号，任务已停止｜{summary}｜{reason_text}")
@@ -63,17 +80,14 @@ class DmSenderManager:
             await self._emit_complete(task_id)
             return
 
-        worker_count = min(int(task["worker_count"] or 1), len(accounts), len(recipients))
-        active_account_ids = {
-            int(row["account_id"]) for row in (accounts if active_policy.auto_switch_account else accounts[:worker_count])
-        }
+        worker_count = min(int(task["worker_count"] or 1), len(account_seed_rows), len(recipients))
+        active_account_ids = {int(row["account_id"]) for row in account_seed_rows}
 
         queue: asyncio.Queue = asyncio.Queue()
         for row in recipients:
             queue.put_nowait(row)
 
         account_queue: asyncio.Queue = asyncio.Queue()
-        account_seed_rows = accounts if active_policy.auto_switch_account else accounts[:worker_count]
         for row in account_seed_rows:
             account_queue.put_nowait(row)
 
@@ -133,7 +147,7 @@ class DmSenderManager:
                     fallback_total_accounts=len(active_account_ids),
                     fallback_pending=pending,
                 )
-                reason_prefix = "当前启用账号已用尽，且未开启自动切号，任务已停止" if not active_policy.auto_switch_account else "可用账号已用尽，任务已停止"
+                reason_prefix = "当前所选账号已用尽，且未开启自动切号，任务已停止" if not active_policy.auto_switch_account else "所选账号与账号列表补位均已用尽，任务已停止"
                 self.repository.mark_dm_task_status(task_id, "stopped", last_error=f"{reason_prefix}｜{summary}")
             else:
                 self.repository.mark_dm_task_status(task_id, "completed")
@@ -143,10 +157,11 @@ class DmSenderManager:
         await self._emit_complete(task_id)
 
     def _account_can_send(self, account_row) -> tuple[bool, str]:
-        runtime_status = str(account_row["account_runtime_status"] or "")
+        keys = set(account_row.keys()) if hasattr(account_row, "keys") else set()
+        runtime_status = str(account_row["account_runtime_status"] if "account_runtime_status" in keys else account_row["status"] or "")
         restriction_status = str(account_row["restriction_status"] or "unknown")
         restriction_reason = str(account_row["restriction_reason"] or "").strip()
-        account_last_error = str(account_row["account_last_error"] or "").strip()
+        account_last_error = str(account_row["account_last_error"] if "account_last_error" in keys else account_row["last_error"] or "").strip()
         if runtime_status != "active":
             return False, account_last_error or f"账号状态={runtime_status}"
         if restriction_status in {"session_invalid", "frozen"}:
