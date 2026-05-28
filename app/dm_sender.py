@@ -88,7 +88,11 @@ class DmSenderManager:
             if stop_reason == "管理员手动停止任务":
                 final_reason = stop_reason
             else:
-                final_reason = stop_reason or "任务运行被中断，可能是机器人重启或进程被打断"
+                final_reason = stop_reason or self._infer_task_stop_reason(
+                    task_id,
+                    fallback_total_accounts=len(task_accounts),
+                    fallback_pending=self.repository.count_dm_pending_recipients(task_id),
+                )
             self.repository.request_dm_task_stop(task_id)
             self.repository.mark_dm_task_status(task_id, "stopped", last_error=final_reason)
             raise
@@ -99,7 +103,12 @@ class DmSenderManager:
             pending = self.repository.count_dm_pending_recipients(task_id)
             current_task = self.repository.get_dm_task(task_id)
             if self.repository.should_stop_dm_task(task_id):
-                stop_reason = str((current_task["last_error"] if current_task else "") or "").strip() or "管理员手动停止任务"
+                stop_reason = str((current_task["last_error"] if current_task else "") or "").strip()
+                stop_reason = stop_reason or self._infer_task_stop_reason(
+                    task_id,
+                    fallback_total_accounts=len(task_accounts),
+                    fallback_pending=pending,
+                )
                 self.repository.mark_dm_task_status(task_id, "stopped", last_error=stop_reason)
             elif pending > 0:
                 summary = self._build_task_stop_summary(task_id, fallback_total_accounts=len(task_accounts), fallback_pending=pending)
@@ -162,7 +171,14 @@ class DmSenderManager:
                 if policy.should_rotate_account(success_count):
                     logger.info(compose_log(f"达到单号上限｜success={success_count}", task_id=task_id, account_id=account_id))
                     if not policy.auto_switch_account:
-                        self.repository.request_dm_task_stop(task_id)
+                        self._request_task_auto_stop(
+                            task_id,
+                            self._build_account_auto_stop_reason(
+                                task_id,
+                                account_id,
+                                f"达到单号上限（{success_count}/{policy.per_account_success_limit}），且未开启自动切号，任务已自动停止",
+                            ),
+                        )
                     break
                 try:
                     recipient = queue.get_nowait()
@@ -292,19 +308,36 @@ class DmSenderManager:
                                 account_id=account_id,
                             )
                         )
+                        reason_text = f"请求过于频繁次数达到阈值（{too_many_requests_hits}/{policy.retry_policy.stop_account_after_too_many_requests}）"
                         self.repository.update_dm_task_account(
                             task_id,
                             account_id,
                             status="stopped",
-                            last_error=f"请求过于频繁次数达到阈值（{too_many_requests_hits}/{policy.retry_policy.stop_account_after_too_many_requests}）",
+                            last_error=reason_text,
                         )
                         if not policy.auto_switch_account:
-                            self.repository.request_dm_task_stop(task_id)
+                            self._request_task_auto_stop(
+                                task_id,
+                                self._build_account_auto_stop_reason(
+                                    task_id,
+                                    account_id,
+                                    f"{reason_text}，且未开启自动切号，任务已自动停止",
+                                ),
+                            )
                         break
                     if policy.should_stop_account_for_frequent(frequent_errors):
                         logger.warning(compose_log(f"达到频繁阈值，停止该账号｜count={frequent_errors}", task_id=task_id, account_id=account_id))
+                        reason_text = f"账号频繁失败次数达到阈值（{frequent_errors}/{policy.retry_policy.stop_account_after_user_frequent}）"
+                        self.repository.update_dm_task_account(task_id, account_id, status="stopped", last_error=reason_text)
                         if not policy.auto_switch_account:
-                            self.repository.request_dm_task_stop(task_id)
+                            self._request_task_auto_stop(
+                                task_id,
+                                self._build_account_auto_stop_reason(
+                                    task_id,
+                                    account_id,
+                                    f"{reason_text}，且未开启自动切号，任务已自动停止",
+                                ),
+                            )
                         break
                 finally:
                     queue.task_done()
@@ -494,6 +527,62 @@ class DmSenderManager:
     def _is_account_terminal_error(self, error_code: str) -> bool:
         return error_code in {"account_disconnected", "session_invalid", "frozen"}
 
+    def _request_task_auto_stop(self, task_id: int, reason: str) -> str:
+        current_task = self.repository.get_dm_task(task_id)
+        current_status = str((current_task["status"] if current_task else "") or "")
+        self.repository.mark_dm_task_status(
+            task_id,
+            current_status if current_status in {"queued", "running", "paused"} else "running",
+            last_error=reason,
+        )
+        self.repository.request_dm_task_stop(task_id)
+        return reason
+
+    def _build_account_auto_stop_reason(
+        self,
+        task_id: int,
+        account_id: int,
+        reason_text: str,
+        *,
+        fallback_total_accounts: int | None = None,
+        fallback_pending: int | None = None,
+    ) -> str:
+        summary = self._build_task_stop_summary(
+            task_id,
+            fallback_total_accounts=fallback_total_accounts,
+            fallback_pending=fallback_pending,
+        )
+        return f"自动停止：账号 #{account_id} {reason_text}｜{summary}"
+
+    def _infer_task_stop_reason(
+        self,
+        task_id: int,
+        *,
+        fallback_total_accounts: int | None = None,
+        fallback_pending: int | None = None,
+    ) -> str:
+        task = self.repository.get_dm_task(task_id)
+        task_reason = str((task["last_error"] if task else "") or "").strip()
+        if task_reason:
+            return task_reason
+        account_rows = self.repository.list_dm_task_accounts(task_id)
+        for row in account_rows:
+            account_reason = str(row["last_error"] or "").strip()
+            if str(row["status"] or "") in {"stopped", "error"} and account_reason:
+                return self._build_account_auto_stop_reason(
+                    task_id,
+                    int(row["account_id"]),
+                    f"停止原因：{account_reason}",
+                    fallback_total_accounts=fallback_total_accounts,
+                    fallback_pending=fallback_pending,
+                )
+        summary = self._build_task_stop_summary(
+            task_id,
+            fallback_total_accounts=fallback_total_accounts,
+            fallback_pending=fallback_pending,
+        )
+        return f"任务已自动停止，但当前未拿到更具体的停止原因｜{summary}"
+
     def _handle_terminal_account_error(
         self,
         task_id: int,
@@ -526,16 +615,12 @@ class DmSenderManager:
         self.db.update_account_status(account_id, status=runtime_status, last_error=error_message)
         self.repository.update_dm_task_account(task_id, account_id, status=task_account_status, last_error=error_message)
         if self._task_has_no_other_usable_accounts(task_id, exclude_account_id=account_id):
-            summary = self._build_task_stop_summary(task_id)
-            reason = f"{error_message}，且没有其他可用账号，任务已停止｜{summary}"
-            current_task = self.repository.get_dm_task(task_id)
-            current_status = str((current_task["status"] if current_task else "") or "")
-            self.repository.mark_dm_task_status(
+            reason = self._build_account_auto_stop_reason(
                 task_id,
-                current_status if current_status in {"queued", "running", "paused"} else "running",
-                last_error=reason,
+                account_id,
+                f"{error_message}，且没有其他可用账号，任务已自动停止",
             )
-            self.repository.request_dm_task_stop(task_id)
+            self._request_task_auto_stop(task_id, reason)
             return reason
         return f"{error_message}，已停止当前账号并切到其他账号"
 
