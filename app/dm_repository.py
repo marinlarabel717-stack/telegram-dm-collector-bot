@@ -736,19 +736,10 @@ class DmRepository:
                 """,
                 (task_id,),
             ).fetchall()
-            failure_summary_rows = self.db.conn.execute(
-                """
-                SELECT COALESCE(NULLIF(tr.error_message, ''), NULLIF(tr.error_code, ''), '未知失败') AS reason, COUNT(*) AS total
-                FROM dm_task_recipients tr
-                WHERE tr.task_id=? AND tr.status='failed'
-                GROUP BY COALESCE(NULLIF(tr.error_message, ''), NULLIF(tr.error_code, ''), '未知失败')
-                ORDER BY total DESC, reason ASC
-                """,
-                (task_id,),
-            ).fetchall()
             account_rows = self.db.conn.execute(
                 """
                 SELECT ta.account_id,
+                       NULLIF(a.phone, '') AS account_phone,
                        COALESCE(NULLIF(a.username, ''), NULLIF(a.phone, ''), NULLIF(a.display_name, ''), NULLIF(a.session_name, ''), '#' || ta.account_id) AS account_label,
                        ta.sent_success_count,
                        ta.sent_fail_count,
@@ -764,6 +755,7 @@ class DmRepository:
             log_rows = self.db.conn.execute(
                 """
                 SELECT l.created_at, l.action, l.status,
+                       NULLIF(a.phone, '') AS account_phone,
                        COALESCE(NULLIF(a.username, ''), NULLIF(a.phone, ''), NULLIF(a.display_name, ''), NULLIF(a.session_name, ''), CASE WHEN l.account_id IS NOT NULL THEN '#' || l.account_id ELSE '-' END) AS account_label,
                        COALESCE(r.normalized_input, '-') AS normalized_input,
                        l.message,
@@ -782,8 +774,9 @@ class DmRepository:
         pending_txt.write_text("\n".join(str(row["normalized_input"]) for row in pending_rows), encoding="utf-8-sig")
         with report_csv.open("w", newline="", encoding="utf-8-sig") as fp:
             writer = csv.writer(fp)
-            writer.writerow(["分区", "字段1", "字段2", "字段3", "字段4", "字段5"])
+            writer.writerow(["本次私信日志统计"])
             if task_row is not None:
+                report_time = format_beijing_timestamp(task_row["started_at"] or task_row["created_at"])
                 pending_count = max(
                     0,
                     int(task_row["total_targets"] or 0)
@@ -791,37 +784,58 @@ class DmRepository:
                     - int(task_row["failed_count"] or 0)
                     - int(task_row["skipped_count"] or 0),
                 )
-                writer.writerow([dm_report_section_label("overview"), "任务ID", task_id, "任务状态", dm_task_status_label(task_row["status"]), "-"])
-                writer.writerow([dm_report_section_label("overview"), "成功数", int(task_row["success_count"] or 0), "失败数", int(task_row["failed_count"] or 0), "-"])
-                writer.writerow([dm_report_section_label("overview"), "待发送数", pending_count, "跳过数", int(task_row["skipped_count"] or 0), "-"])
-                writer.writerow([dm_report_section_label("overview"), "并发线程", int(task_row["worker_count"] or 0), "运行账号", int(task_row["active_accounts"] or 0), "-"])
-            for row in failure_summary_rows:
-                writer.writerow([dm_report_section_label("failure_reason"), dm_error_label(None, str(row["reason"] or "未知失败")), int(row["total"]), "-", "-", "-"])
-            for row in account_rows:
+                writer.writerow([])
+                writer.writerow(["顶部概览"])
+                writer.writerow(["时间", "线程数", "账号手机号", "成功数量", "失败数量", "失败原因"])
+                for row in account_rows:
+                    account_phone = str(row["account_phone"] or row["account_label"] or "-")
+                    writer.writerow([
+                        report_time,
+                        int(task_row["worker_count"] or 0),
+                        account_phone,
+                        int(row["sent_success_count"] or 0),
+                        int(row["sent_fail_count"] or 0),
+                        dm_error_label(None, str(row["last_error"] or "-")) if str(row["last_error"] or "").strip() else "-",
+                    ])
+
+                writer.writerow([])
+                writer.writerow(["任务汇总"])
+                writer.writerow(["任务ID", "任务状态", "总目标", "成功数", "失败数", "剩余目标", "跳过数", "运行账号"])
                 writer.writerow([
-                    dm_report_section_label("account_stats"),
-                    row["account_label"],
+                    task_id,
+                    dm_task_status_label(task_row["status"]),
+                    int(task_row["total_targets"] or 0),
+                    int(task_row["success_count"] or 0),
+                    int(task_row["failed_count"] or 0),
+                    pending_count,
+                    int(task_row["skipped_count"] or 0),
+                    int(task_row["active_accounts"] or 0),
+                ])
+
+            writer.writerow([])
+            writer.writerow(["各账号成功统计"])
+            writer.writerow(["账号手机号", "成功数量", "失败数量", "账号状态"])
+            for row in account_rows:
+                account_phone = str(row["account_phone"] or row["account_label"] or "-")
+                writer.writerow([
+                    account_phone,
                     int(row["sent_success_count"] or 0),
                     int(row["sent_fail_count"] or 0),
                     dm_task_status_label(row["status"]),
-                    str(row["last_error"] or ""),
                 ])
-            for row in failed_rows:
-                writer.writerow([
-                    dm_report_section_label("failed_target"),
-                    row["normalized_input"],
-                    dm_error_label(row["error_code"], row["error_message"]),
-                    str(row["error_code"] or "-"),
-                    row["retry_count"],
-                    "-",
-                ])
+
+            writer.writerow([])
+            writer.writerow(["完整日志过程"])
+            writer.writerow(["时间", "账号手机号", "目标", "动作", "状态", "日志内容", "原始错误"])
             for row in log_rows:
+                account_phone = str(row["account_phone"] or row["account_label"] or "-")
                 writer.writerow([
-                    dm_report_section_label("log"),
                     format_beijing_timestamp(row["created_at"]),
-                    row["account_label"],
+                    account_phone,
                     row["normalized_input"],
-                    f"{dm_log_action_label(row['action'])}:{dm_log_status_label(row['status'])}",
+                    dm_log_action_label(row["action"]),
+                    dm_log_status_label(row["status"]),
                     str(row["message"] or row["raw_error"] or "-"),
+                    str(row["raw_error"] or "-"),
                 ])
         return DMExportPaths(success_txt=success_txt, failed_txt=failed_txt, report_csv=report_csv, pending_txt=pending_txt)
