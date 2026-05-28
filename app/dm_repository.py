@@ -269,13 +269,15 @@ class DmRepository:
             rows = self.db.conn.execute(
                 "SELECT restriction_status, COUNT(*) AS total FROM accounts WHERE status IN ('active','checking','collecting') GROUP BY restriction_status"
             ).fetchall()
-        summary = {"unrestricted": 0, "limited": 0, "frozen": 0, "unknown": 0, "invalid": 0}
-        limited_statuses = {"temp_mutual", "permanent_mutual", "geo_limited", "spam_limited", "restricted"}
+        summary = {"unrestricted": 0, "geo_limited": 0, "limited": 0, "frozen": 0, "unknown": 0, "invalid": 0}
+        limited_statuses = {"temp_mutual", "permanent_mutual", "spam_limited", "restricted"}
         for row in rows:
             status = str(row["restriction_status"] or "unknown")
             total = int(row["total"])
             if status == "unrestricted":
                 summary["unrestricted"] += total
+            elif status == "geo_limited":
+                summary["geo_limited"] += total
             elif status == "frozen":
                 summary["frozen"] += total
             elif status == "session_invalid":

@@ -1079,7 +1079,7 @@ class DmCollectorBot:
             f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
             f"当前存活账号：<code>{count}</code>\n"
             f"运行中：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n"
-            f"状态：无限制 <code>{restriction_stats['unrestricted']}</code> · 受限 <code>{restriction_stats['limited']}</code> · 冻结 <code>{restriction_stats['frozen']}</code> · 待检测 <code>{restriction_stats['unknown']}</code>\n"
+            f"状态：无限制 <code>{restriction_stats['unrestricted']}</code> · 地理限制 <code>{restriction_stats['geo_limited']}</code> · 受限 <code>{restriction_stats['limited']}</code> · 冻结 <code>{restriction_stats['frozen']}</code> · 待检测 <code>{restriction_stats['unknown']}</code>\n"
             f"待清理无效：<code>{stats['invalid']}</code>\n\n"
             f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。现在也支持按状态导出原始 session/zip。"
         )

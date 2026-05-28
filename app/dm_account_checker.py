@@ -123,8 +123,18 @@ class DmAccountChecker:
             return "unrestricted", "无限制"
         if "frozen" in lowered or "冻结" in text:
             return "frozen", "冻结"
-        if any(keyword in lowered for keyword in ["some users in some regions", "some countries", "from some regions", "地区限制", "地理位置限制"]):
-            return "geo_limited", "地理位置限制"
+        if any(keyword in lowered for keyword in [
+            "some users in some regions",
+            "some countries",
+            "from some regions",
+            "harsh response from our anti-spam systems",
+            "submit a complaint to our moderators",
+            "subscribe to telegram premium",
+            "premium_offer?ref=spambot",
+            "地区限制",
+            "地理位置限制",
+        ]):
+            return "geo_limited", "地理限制"
         if any(keyword in lowered for keyword in ["mutual contact", "mutual contacts", "people who are in your contacts", "双向联系人", "双向"]):
             if any(keyword in lowered for keyword in ["will be lifted", "temporarily", "temporary", "until", "暂时", "临时"]):
                 return "temp_mutual", "临时双向"
