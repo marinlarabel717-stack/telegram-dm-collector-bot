@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 import html
 import json
@@ -32,13 +32,14 @@ from .dm_account_checker import DmAccountChecker
 from .dm_content import content_type_label, message_mode_label, payload_preview
 from .dm_links import normalize_channel_post_link, parse_channel_post_link
 from .dm_postbot import describe_postbot_inline_result, fetch_postbot_inline_result
-from .dm_repository import DmRepository, dm_log_action_label, dm_log_status_label
+from .dm_repository import DmRepository
 from .dm_sender import DmSenderManager
 from .dm_targets import ParsedTarget, parse_targets_text
 from .emoji import premium_button, restriction_badge, status_badge, tg_emoji
 from .version import __version__
 
 logger = logging.getLogger(__name__)
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class DmCollectorBot:
@@ -68,6 +69,7 @@ class DmCollectorBot:
         self.progress_throttle: dict[int, float] = {}
         self.dm_progress_throttle: dict[int, float] = {}
         self.progress_snapshots: dict[int, dict[str, float | int]] = {}
+        self.dm_progress_snapshots: dict[int, dict[str, float | int | str]] = {}
         self.application.bot_data["settings"] = settings
         self.application.bot_data["db"] = self.db
         recovered = self.db.recover_interrupted_tasks(reason="机器人重启，已停止上次未完成任务并释放账号")
@@ -2455,15 +2457,50 @@ class DmCollectorBot:
             return
         await self._send_task_result(task["requester_id"], task_id, announce=True)
 
+    def _build_dm_progress_snapshot(self, task_id: int, task) -> dict[str, int | str]:
+        return {
+            "processed": self.dm_repository.get_dm_task_processed_count(task_id),
+            "success": int(task["success_count"] or 0),
+            "failed": int(task["failed_count"] or 0),
+            "skipped": int(task["skipped_count"] or 0),
+            "active_accounts": int(task["active_accounts"] or 0),
+            "status": str(task["status"] or ""),
+            "last_error": str(task["last_error"] or ""),
+        }
+
+    def _dm_progress_interval(self, task_id: int, task) -> tuple[float, dict[str, int | str]]:
+        current = self._build_dm_progress_snapshot(task_id, task)
+        previous = self.dm_progress_snapshots.get(task_id) or {}
+        processed_delta = abs(int(current["processed"]) - int(previous.get("processed", 0) or 0))
+        success_delta = abs(int(current["success"]) - int(previous.get("success", 0) or 0))
+        failed_delta = abs(int(current["failed"]) - int(previous.get("failed", 0) or 0))
+        skipped_delta = abs(int(current["skipped"]) - int(previous.get("skipped", 0) or 0))
+        changed = (
+            str(current["status"]) != str(previous.get("status", "") or "")
+            or int(current["active_accounts"]) != int(previous.get("active_accounts", 0) or 0)
+            or str(current["last_error"]) != str(previous.get("last_error", "") or "")
+            or processed_delta >= 10
+            or success_delta >= 2
+            or failed_delta >= 5
+            or skipped_delta >= 1
+        )
+        return (5.0 if changed else 10.0), current
+
     async def _on_dm_task_progress(self, task_id: int, force: bool = False) -> None:
         task = self.dm_repository.get_dm_task(task_id)
         if not task or not task["progress_chat_id"] or not task["progress_message_id"]:
             return
         now = time.time()
         if not force:
-            last = float(self.dm_progress_throttle.get(task_id, 0.0) or 0.0)
-            if now - last < 2.5:
+            next_allowed = float(self.dm_progress_throttle.get(task_id, 0.0) or 0.0)
+            if now < next_allowed:
                 return
+            interval, snapshot = self._dm_progress_interval(task_id, task)
+            last_refresh = float((self.dm_progress_snapshots.get(task_id) or {}).get("last_refresh", 0.0) or 0.0)
+            if now - last_refresh < interval:
+                return
+        else:
+            _, snapshot = self._dm_progress_interval(task_id, task)
         self.dm_progress_throttle[task_id] = now
         try:
             await self.application.bot.edit_message_text(
@@ -2474,6 +2511,8 @@ class DmCollectorBot:
                 disable_web_page_preview=True,
                 reply_markup=self._build_dm_task_keyboard(task_id),
             )
+            snapshot["last_refresh"] = time.time()
+            self.dm_progress_snapshots[task_id] = snapshot
         except RetryAfter as exc:
             self.dm_progress_throttle[task_id] = time.time() + float(exc.retry_after or 1)
         except BadRequest as exc:
@@ -2483,6 +2522,7 @@ class DmCollectorBot:
     async def _on_dm_task_complete(self, task_id: int) -> None:
         await self._on_dm_task_progress(task_id, force=True)
         self.dm_progress_throttle.pop(task_id, None)
+        self.dm_progress_snapshots.pop(task_id, None)
         task = self.dm_repository.get_dm_task(task_id)
         if not task:
             return
@@ -2619,16 +2659,29 @@ class DmCollectorBot:
         return "\n".join(lines)
 
     @staticmethod
-    def _format_runtime(started_at, finished_at=None) -> str:
-        if not started_at:
-            return ""
+    def _parse_utc_timestamp(value) -> datetime | None:
+        if not value:
+            return None
         try:
-            start_dt = datetime.strptime(str(started_at), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         except Exception:
+            return None
+
+    def _format_beijing_timestamp(self, value, *, short: bool = False) -> str:
+        dt = self._parse_utc_timestamp(value)
+        if not dt:
+            return str(value or "-")
+        local_dt = dt.astimezone(BEIJING_TZ)
+        if short:
+            return f"{local_dt.month}-{local_dt.day} {local_dt.hour:02d}:{local_dt.minute:02d}"
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _format_runtime(self, started_at, finished_at=None) -> str:
+        start_dt = self._parse_utc_timestamp(started_at)
+        if not start_dt:
             return ""
-        try:
-            end_dt = datetime.strptime(str(finished_at), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc) if finished_at else datetime.now(timezone.utc)
-        except Exception:
+        end_dt = self._parse_utc_timestamp(finished_at) if finished_at else datetime.now(timezone.utc)
+        if not end_dt:
             end_dt = datetime.now(timezone.utc)
         seconds = max(0, int((end_dt - start_dt).total_seconds()))
         hours, rem = divmod(seconds, 3600)
@@ -2852,8 +2905,8 @@ class DmCollectorBot:
         if int(task["active_accounts"] or 0) > 0:
             lines.append(f"运行账号：<code>{task['active_accounts']}</code>")
         lines.extend([
-            f"创建时间：<code>{task['created_at'] or '-'}</code>",
-            f"开始时间：<code>{task['started_at'] or '-'}</code>",
+            f"创建时间：<code>{self._format_beijing_timestamp(task['created_at'])}</code>",
+            f"开始时间：<code>{self._format_beijing_timestamp(task['started_at'])}</code>",
             f"并发线程：<code>{task['worker_count'] or 1}</code>",
             f"内容类型：<code>{content_type_label(content_type)}</code>",
             f"发送模式：<code>{message_mode_label(task['message_mode'], content_type=content_type)}</code>",
@@ -2900,10 +2953,9 @@ class DmCollectorBot:
                 account_label = row["account_username"] or row["account_phone"] or row["account_display_name"] or (row["account_id"] and f"#{row['account_id']}") or "-"
                 target = row["normalized_input"] or "-"
                 detail = self._format_dm_log_detail(row, policy)
-                action_label = dm_log_action_label(row["action"])
-                status_label = dm_log_status_label(row["status"])
+                timestamp = self._format_beijing_timestamp(row["created_at"], short=True)
                 lines.append(
-                    f"• [{html.escape(str(action_label), quote=False)} / {html.escape(str(status_label), quote=False)}] {html.escape(str(account_label), quote=False)} → {html.escape(str(target), quote=False)} · <code>{html.escape(detail, quote=False)[:80]}</code>"
+                    f"• [{html.escape(timestamp, quote=False)}] {html.escape(str(account_label), quote=False)} → {html.escape(str(target), quote=False)} · <code>{html.escape(detail, quote=False)[:80]}</code>"
                 )
         return "\n".join(lines)
 

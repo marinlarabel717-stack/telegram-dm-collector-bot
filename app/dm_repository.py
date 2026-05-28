@@ -4,12 +4,16 @@ import csv
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Sequence
 
 if TYPE_CHECKING:
     from .database import Database
     from .dm_targets import ParsedTarget
+
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 DM_TASK_STATUS_LABELS = {
@@ -96,6 +100,17 @@ def dm_error_label(code: str | None, message: str | None = None) -> str:
     if raw_code:
         return DM_ERROR_LABELS.get(raw_code, raw_code)
     return "未知失败"
+
+
+
+def format_beijing_timestamp(value) -> str:
+    if not value:
+        return "-"
+    try:
+        dt = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except Exception:
+        return str(value)
+    return dt.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 
@@ -792,7 +807,7 @@ class DmRepository:
             for row in log_rows:
                 writer.writerow([
                     dm_report_section_label("log"),
-                    row["created_at"],
+                    format_beijing_timestamp(row["created_at"]),
                     row["account_label"],
                     row["normalized_input"],
                     f"{dm_log_action_label(row['action'])}:{dm_log_status_label(row['status'])}",
