@@ -51,6 +51,9 @@ PROXY_EMOJI_ID = "5235579174072112613"      # 🔗
 ROCKET_EMOJI_ID = "5188481279963715781"     # 🚀
 TRASH_EMOJI_ID = "5445267414562389170"      # 🗑
 EXPORT_EMOJI_ID = "5445355530111437729"     # 📤
+ACCOUNTS_EMOJI_ID = "6321266496123181150"   # 😃
+COLLECT_EMOJI_ID = "5203993413346680064"    # 📊
+DM_MENU_EMOJI_ID = "5253742260054409879"    # ✉️
 
 
 class DmCollectorBot:
@@ -1238,7 +1241,7 @@ class DmCollectorBot:
         restriction_stats = self.dm_repository.get_account_restriction_summary_counts()
         global_proxies = self.db.get_global_proxies()
         text = (
-            f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
+            f"{tg_emoji(ACCOUNTS_EMOJI_ID, '😃')} <b>账号管理</b>\n"
             f"当前存活账号：<code>{count}</code>\n"
             f"运行中：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n"
             f"状态：无限制 <code>{restriction_stats['unrestricted']}</code> · 地理限制 <code>{restriction_stats['geo_limited']}</code> · 受限 <code>{restriction_stats['limited']}</code> · 冻结 <code>{restriction_stats['frozen']}</code> · 待检测 <code>{restriction_stats['unknown']}</code>\n"
@@ -1719,7 +1722,7 @@ class DmCollectorBot:
 
     async def _show_collect_menu(self, query) -> None:
         text = (
-            f"{tg_emoji(self.settings.emoji_welcome_id, '🌠')} <b>采集用户</b>\n"
+            f"{tg_emoji(COLLECT_EMOJI_ID, '📊')} <b>采集用户</b>\n"
             f"当前支持：频道采集、群组发言用户采集、失败结果导出。"
         )
         keyboard = [
@@ -1753,7 +1756,7 @@ class DmCollectorBot:
 
     async def _show_dm_menu(self, query) -> None:
         text = (
-            f"{tg_emoji(self.settings.emoji_start_id, '🎊')} <b>私信任务</b>\n"
+            f"{tg_emoji(DM_MENU_EMOJI_ID, '✉️')} <b>私信任务</b>\n"
             f"当前支持：文本私信、回复模式、频道帖子转发（通过链接定位原帖）、PostBot 图文代码、txt/手输用户名单、单号上限、自动补号、实时成功失败统计。"
         )
         keyboard = [
@@ -3714,11 +3717,11 @@ class DmCollectorBot:
             return None
         keyboard = [
             [
-                premium_button("账号管理", self.settings.emoji_list_id, callback_data="menu:accounts"),
-                premium_button("采集用户", self.settings.emoji_progress_id, callback_data="menu:collect"),
+                premium_button("账号管理", ACCOUNTS_EMOJI_ID, callback_data="menu:accounts"),
+                premium_button("采集用户", COLLECT_EMOJI_ID, callback_data="menu:collect"),
             ],
             [
-                premium_button("私信任务", self.settings.emoji_start_id, callback_data="menu:dm"),
+                premium_button("私信任务", DM_MENU_EMOJI_ID, callback_data="menu:dm"),
                 premium_button("统计", self.settings.emoji_stats_id, callback_data="menu:stats"),
             ],
             [
