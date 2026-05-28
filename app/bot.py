@@ -57,6 +57,23 @@ DM_MENU_EMOJI_ID = "5253742260054409879"    # ✉️
 DM_NEW_EMOJI_ID = "5233588456730427459"     # 🆕
 DM_TASK_LIST_EMOJI_ID = "5321178215878780131"  # 📋
 STOP_EMOJI_ID = "6271674836628541366"       # 🛑
+WAIT_FILE_EMOJI_ID = "6334425489939105275"  # ⌛
+IMPORT_DONE_EMOJI_ID = "5397916757333654639"  # ➕
+ACCOUNT_LIST_EMOJI_ID = "5190604119089358564"  # 🚩
+SELECT_ACTION_EMOJI_ID = "6161152911352008228"  # 👌
+DM_CONTENT_EMOJI_ID = "5442879799292875082"   # 📖
+DM_MODE_EMOJI_ID = "5442736467644276394"      # ⚡️
+DM_LIMIT_EMOJI_ID = "5442821344787977982"     # 📲
+DM_WORKER_EMOJI_ID = "5445141945682778868"    # 📡
+DM_DELAY_EMOJI_ID = "5443057623823832104"     # 🤑
+DM_TOO_MANY_EMOJI_ID = "5443010800090371868"  # ⛔️
+DM_TYPING_EMOJI_ID = "5442985773315938352"    # 🤘
+DM_SWITCH_EMOJI_ID = "5442850516205851533"    # ➕
+DM_PIN_EMOJI_ID = "5445188902560225384"       # 🔔
+DM_PIN_DELAY_EMOJI_ID = "5442601541246670041" # 💗
+DM_DELETE_EMOJI_ID = "5443105684507873882"    # ⚡️
+DM_DELETE_DELAY_EMOJI_ID = "5445281995976369565"  # 💣
+DM_CONTINUE_EMOJI_ID = "5445303453632977252"  # 📺
 
 
 class DmCollectorBot:
@@ -552,7 +569,7 @@ class DmCollectorBot:
             return
 
         await update.effective_message.reply_text(
-            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 已收到文件，正在保存并检测，请稍等……",
+            f"{tg_emoji(WAIT_FILE_EMOJI_ID, '⌛')} 已收到文件，正在保存并检测，请稍等……",
             parse_mode=ParseMode.HTML,
         )
 
@@ -621,7 +638,7 @@ class DmCollectorBot:
             return
 
         lines = [
-            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>导入处理完成</b>",
+            f"{tg_emoji(IMPORT_DONE_EMOJI_ID, '➕')} <b>导入处理完成</b>",
             f"成功导入：<code>{len(imported_accounts)}</code>",
             f"自动删除损坏：<code>{len(deleted_broken)}</code>",
             f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
@@ -1272,7 +1289,7 @@ class DmCollectorBot:
         keyboard = [
             [
                 premium_button("上传 session", self.settings.emoji_upload_id, callback_data="account:upload"),
-                premium_button("账号列表", self.settings.emoji_list_id, callback_data=f"account:list:{page}"),
+                premium_button("账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data=f"account:list:{page}"),
             ],
             [
                 premium_button("代理管理", PROXY_EMOJI_ID, callback_data="account:proxy:manage"),
@@ -1301,7 +1318,7 @@ class DmCollectorBot:
         rows = self.db.list_accounts(limit=per_page, offset=(page - 1) * per_page)
         total_pages = max(1, ceil(total / per_page))
         lines = [
-            f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>账号列表</b>",
+            f"{tg_emoji(ACCOUNT_LIST_EMOJI_ID, '🚩')} <b>账号列表</b>",
             f"页码：<code>{page}/{total_pages}</code>",
             f"存活账号：<code>{total}</code>",
             "",
@@ -1559,7 +1576,7 @@ class DmCollectorBot:
                 InlineKeyboardMarkup([
                     [
                         premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
-                        premium_button("账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                        premium_button("账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
                     ],
                 ]),
             )
@@ -1611,7 +1628,7 @@ class DmCollectorBot:
                     InlineKeyboardMarkup([
                         [
                             premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
-                            premium_button("账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                            premium_button("账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
                         ],
                     ]),
                 )
@@ -1674,7 +1691,7 @@ class DmCollectorBot:
                     lines.append(f"• {html.escape(item, quote=False)}")
             await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup([
                 [
-                    premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                    premium_button("查看账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
                     premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
                 ],
             ]))
@@ -1686,7 +1703,7 @@ class DmCollectorBot:
             )
             await self._safe_edit(query, text, InlineKeyboardMarkup([
                 [
-                    premium_button("账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                    premium_button("账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
                     premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
                 ],
             ]))
@@ -1704,7 +1721,7 @@ class DmCollectorBot:
             )
             await self._safe_edit(query, text, InlineKeyboardMarkup([
                 [
-                    premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                    premium_button("查看账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
                     premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
                 ],
             ]))
@@ -1729,7 +1746,7 @@ class DmCollectorBot:
                 lines.append(f"• {html.escape(item, quote=False)}")
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup([
             [
-                premium_button("查看账号列表", self.settings.emoji_list_id, callback_data="account:list:1"),
+                premium_button("查看账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
                 premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
             ],
         ]))
@@ -3753,7 +3770,7 @@ class DmCollectorBot:
                 premium_button("删除账号", self.settings.emoji_error_id, callback_data=f"account:delete:{account_id}"),
             ],
             [
-                premium_button("返回账号列表", self.settings.emoji_back_id, callback_data="account:list:1"),
+                premium_button("返回账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
                 premium_button("刷新详情", self.settings.emoji_refresh_id, callback_data=f"account:view:{account_id}"),
             ],
         ]
@@ -3814,7 +3831,7 @@ class DmCollectorBot:
             keyboard.append(row_buffer)
         keyboard.append([
             premium_button("使用全部可用账号", self.settings.emoji_all_id, callback_data="wizard:acc:auto"),
-            premium_button("完成选择", self.settings.emoji_ok_id, callback_data="wizard:acc:done"),
+            premium_button("完成选择", SELECT_ACTION_EMOJI_ID, callback_data="wizard:acc:done"),
         ])
         keyboard.append([
             premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
@@ -3840,8 +3857,8 @@ class DmCollectorBot:
         if row_buffer:
             keyboard.append(row_buffer)
         keyboard.append([
-            premium_button("全选本页", self.settings.emoji_all_id, callback_data="dm:wizard:acc:page_all"),
-            premium_button("完成选择", self.settings.emoji_ok_id, callback_data="dm:wizard:acc:done"),
+            premium_button("全选本页", SELECT_ACTION_EMOJI_ID, callback_data="dm:wizard:acc:page_all"),
+            premium_button("完成选择", SELECT_ACTION_EMOJI_ID, callback_data="dm:wizard:acc:done"),
         ])
         nav = []
         if page > 1:
@@ -3851,7 +3868,7 @@ class DmCollectorBot:
         if nav:
             keyboard.append(nav)
         keyboard.append([
-            premium_button("全选全部", self.settings.emoji_success_id, callback_data="dm:wizard:acc:auto"),
+            premium_button("全选全部", SELECT_ACTION_EMOJI_ID, callback_data="dm:wizard:acc:auto"),
             premium_button("返回上一步", self.settings.emoji_back_id, callback_data="dm:wizard:back:targets"),
         ])
         return InlineKeyboardMarkup(keyboard)
@@ -3864,36 +3881,36 @@ class DmCollectorBot:
         delay_label = f"{int(policy.get('delay_min', 8))}-{int(policy.get('delay_max', 15))}秒"
         keyboard = [
             [
-                premium_button(f"内容：{content_type_label(content_type)}", self.settings.emoji_list_id, callback_data="dm:wizard:content:cycle"),
-                premium_button(f"模式：{mode_label}", self.settings.emoji_idea_id, callback_data="dm:wizard:mode:toggle"),
+                premium_button(f"内容：{content_type_label(content_type)}", DM_CONTENT_EMOJI_ID, callback_data="dm:wizard:content:cycle"),
+                premium_button(f"模式：{mode_label}", DM_MODE_EMOJI_ID, callback_data="dm:wizard:mode:toggle"),
             ],
             [
-                premium_button(f"上限：{int(policy.get('per_account_success_limit', 40))}", self.settings.emoji_progress_id, callback_data="dm:wizard:limit:cycle"),
-                premium_button(f"并发：{worker_count}", self.settings.emoji_stats_id, callback_data="dm:wizard:worker:cycle"),
+                premium_button(f"上限：{int(policy.get('per_account_success_limit', 40))}", DM_LIMIT_EMOJI_ID, callback_data="dm:wizard:limit:cycle"),
+                premium_button(f"并发：{worker_count}", DM_WORKER_EMOJI_ID, callback_data="dm:wizard:worker:cycle"),
             ],
             [
-                premium_button(f"间隔：{delay_label}", self.settings.emoji_timeout_id, callback_data="dm:wizard:delay:cycle"),
-                premium_button(f"频繁停号：{int(policy.get('stop_account_after_too_many_requests', 40))}", self.settings.emoji_error_id, callback_data="dm:wizard:too_many_requests:cycle"),
+                premium_button(f"间隔：{delay_label}", DM_DELAY_EMOJI_ID, callback_data="dm:wizard:delay:cycle"),
+                premium_button(f"频繁停号：{int(policy.get('stop_account_after_too_many_requests', 40))}", DM_TOO_MANY_EMOJI_ID, callback_data="dm:wizard:too_many_requests:cycle"),
             ],
             [
-                premium_button(f"打字：{'开' if policy.get('typing_simulation', True) else '关'}", self.settings.emoji_upload_id, callback_data="dm:wizard:typing:toggle"),
-                premium_button(f"补号：{'开' if policy.get('auto_switch_account', True) else '关'}", self.settings.emoji_all_id, callback_data="dm:wizard:switch:toggle"),
+                premium_button(f"打字：{'开' if policy.get('typing_simulation', True) else '关'}", DM_TYPING_EMOJI_ID, callback_data="dm:wizard:typing:toggle"),
+                premium_button(f"补号：{'开' if policy.get('auto_switch_account', True) else '关'}", DM_SWITCH_EMOJI_ID, callback_data="dm:wizard:switch:toggle"),
             ],
             [
                 premium_button(f"回复延迟：{int(policy.get('reply_delay_seconds', 5))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:reply_delay:cycle"),
-                premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),
+                premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", DM_PIN_EMOJI_ID, callback_data="dm:wizard:pin:toggle"),
             ] if content_type == "reply" else [
-                premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),
-                premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:pin_delay:cycle"),
+                premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", DM_PIN_EMOJI_ID, callback_data="dm:wizard:pin:toggle"),
+                premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", DM_PIN_DELAY_EMOJI_ID, callback_data="dm:wizard:pin_delay:cycle"),
             ],
             [
-                premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:pin_delay:cycle") if content_type == "reply" else premium_button(f"删对话框：{'开' if policy.get('delete_dialog_after_send', False) else '关'}", self.settings.emoji_error_id, callback_data="dm:wizard:delete:toggle"),
-                premium_button(f"删对话框：{'开' if policy.get('delete_dialog_after_send', False) else '关'}", self.settings.emoji_error_id, callback_data="dm:wizard:delete:toggle") if content_type == "reply" else premium_button(f"删除延迟：{int(policy.get('delete_dialog_delay_seconds', 10))}秒", self.settings.emoji_timeout_id, callback_data="dm:wizard:delete_delay:input"),
+                premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", DM_PIN_DELAY_EMOJI_ID, callback_data="dm:wizard:pin_delay:cycle") if content_type == "reply" else premium_button(f"删对话框：{'开' if policy.get('delete_dialog_after_send', False) else '关'}", DM_DELETE_EMOJI_ID, callback_data="dm:wizard:delete:toggle"),
+                premium_button(f"删对话框：{'开' if policy.get('delete_dialog_after_send', False) else '关'}", DM_DELETE_EMOJI_ID, callback_data="dm:wizard:delete:toggle") if content_type == "reply" else premium_button(f"删除延迟：{int(policy.get('delete_dialog_delay_seconds', 10))}秒", DM_DELETE_DELAY_EMOJI_ID, callback_data="dm:wizard:delete_delay:input"),
             ],
         ]
         if content_type == "reply":
             keyboard.append([
-                premium_button(f"删除延迟：{int(policy.get('delete_dialog_delay_seconds', 10))}秒", self.settings.emoji_timeout_id, callback_data="dm:wizard:delete_delay:input"),
+                premium_button(f"删除延迟：{int(policy.get('delete_dialog_delay_seconds', 10))}秒", DM_DELETE_DELAY_EMOJI_ID, callback_data="dm:wizard:delete_delay:input"),
             ])
         if draft.get("message_mode") == "three_stage":
             if content_type == "reply":
@@ -3906,7 +3923,7 @@ class DmCollectorBot:
                     premium_button(f"第2段后：{int(policy.get('stage2_delay_seconds', 3))}秒", self.settings.emoji_welcome_id, callback_data="dm:wizard:stage2:cycle"),
                 ])
         keyboard.extend([
-            [premium_button("继续输入文案", self.settings.emoji_start_id, callback_data="dm:wizard:cfg:done")],
+            [premium_button("继续输入文案", DM_CONTINUE_EMOJI_ID, callback_data="dm:wizard:cfg:done")],
             [
                 premium_button("重新选账号", self.settings.emoji_back_id, callback_data="dm:wizard:back_accounts"),
                 premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
