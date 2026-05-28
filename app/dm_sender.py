@@ -202,12 +202,14 @@ class DmSenderManager:
         content_type = str((task["content_type"] if task else None) or payload.get("content_type") or "text")
         self.repository.update_dm_task_account(task_id, account_id, status="running", last_error=None)
         try:
+            self._append_runtime_log(task_id, account_id=account_id, message="正在连接 Telegram")
             client = await self.collection_manager.connect_client(session_file, account_row=account_row)
             if not await client.is_user_authorized():
                 self.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
                 self.repository.update_dm_task_account(task_id, account_id, status="error", last_error="session 未登录")
                 return
             self.db.update_account_status(account_id, status="collecting", last_error=None)
+            self._append_runtime_log(task_id, account_id=account_id, message="账号连接成功，开始处理目标")
             logger.info(compose_log("开始发送", task_id=task_id, account_id=account_id))
 
             while not queue.empty():
@@ -232,7 +234,14 @@ class DmSenderManager:
                 post_attempt_delay = 0.0
                 self.repository.mark_dm_recipient_sending(task_id, recipient_id, account_id)
                 try:
+                    self._append_runtime_log(task_id, account_id=account_id, recipient_id=recipient_id, message="正在解析目标")
                     entity = await client.get_input_entity(target)
+                    self._append_runtime_log(
+                        task_id,
+                        account_id=account_id,
+                        recipient_id=recipient_id,
+                        message=self._dispatch_progress_message(content_type, payload, policy),
+                    )
                     sent_message, sent_messages = await self._dispatch_payload(client, entity, payload, content_type, policy)
                     await self._apply_post_send_actions(
                         client,
@@ -607,6 +616,30 @@ class DmSenderManager:
         if "frozen" in lowered:
             return "frozen", "账号疑似冻结", True
         return "send_failed", short or exc.__class__.__name__, False
+
+    def _append_runtime_log(self, task_id: int, *, account_id: int | None = None, recipient_id: int | None = None, message: str) -> None:
+        self.repository.add_send_log(
+            task_id=task_id,
+            account_id=account_id,
+            recipient_id=recipient_id,
+            action="send",
+            status="running",
+            message=message,
+        )
+
+    @staticmethod
+    def _dispatch_progress_message(content_type: str, payload: dict, policy: DMTaskPolicy) -> str:
+        normalized = str(content_type or "text")
+        if normalized == "forward":
+            return "正在抓取频道帖子并转发"
+        if normalized == "post":
+            return "正在获取 PostBot 内联内容并发送"
+        if normalized == "reply":
+            timeout = int(float(policy.reply_wait_timeout_seconds or 300))
+            return f"准备发送招呼并等待对方回复（最长{timeout}秒）"
+        if normalized == "media":
+            return "正在发送媒体内容"
+        return "正在发送文本内容"
 
     def _is_account_terminal_error(self, error_code: str) -> bool:
         return error_code in {"account_disconnected", "session_invalid", "frozen"}

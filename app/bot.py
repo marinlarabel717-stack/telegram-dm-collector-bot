@@ -73,6 +73,7 @@ class DmCollectorBot:
         self.task_runners: dict[int, asyncio.Task] = {}
         self.dm_task_runners: dict[int, asyncio.Task] = {}
         self.task_watchers: dict[int, asyncio.Task] = {}
+        self.dm_task_watchers: dict[int, asyncio.Task] = {}
         self.progress_throttle: dict[int, float] = {}
         self.dm_progress_throttle: dict[int, float] = {}
         self.progress_snapshots: dict[int, dict[str, float | int]] = {}
@@ -2015,9 +2016,14 @@ class DmCollectorBot:
         self._clear_state(user_id)
         runner = asyncio.create_task(self.dm_sender.run_task(int(task["id"])))
         self.dm_task_runners[int(task["id"])] = runner
+        watcher = asyncio.create_task(self._dm_task_progress_heartbeat(int(task["id"])))
+        self.dm_task_watchers[int(task["id"])] = watcher
 
         def _cleanup_dm_runner(_: asyncio.Task, task_id: int = int(task["id"])) -> None:
             self.dm_task_runners.pop(task_id, None)
+            heartbeat = self.dm_task_watchers.pop(task_id, None)
+            if heartbeat and not heartbeat.done():
+                heartbeat.cancel()
 
         runner.add_done_callback(_cleanup_dm_runner)
         if query.message:
@@ -2855,12 +2861,26 @@ class DmCollectorBot:
 
     async def _on_dm_task_complete(self, task_id: int) -> None:
         await self._on_dm_task_progress(task_id, force=True)
+        heartbeat = self.dm_task_watchers.pop(task_id, None)
+        if heartbeat and not heartbeat.done():
+            heartbeat.cancel()
         self.dm_progress_throttle.pop(task_id, None)
         self.dm_progress_snapshots.pop(task_id, None)
         task = self.dm_repository.get_dm_task(task_id)
         if not task:
             return
         await self._send_dm_task_result(task["requester_id"], task_id)
+
+    async def _dm_task_progress_heartbeat(self, task_id: int) -> None:
+        try:
+            while True:
+                await asyncio.sleep(45)
+                task = self.dm_repository.get_dm_task(task_id)
+                if not task or task["status"] not in {"queued", "running"}:
+                    return
+                await self._on_dm_task_progress(task_id, force=True)
+        except asyncio.CancelledError:
+            return
 
     async def _task_progress_heartbeat(self, task_id: int) -> None:
         try:
@@ -3314,6 +3334,7 @@ class DmCollectorBot:
         lines.extend([
             f"创建时间：<code>{self._format_beijing_timestamp(task['created_at'])}</code>",
             f"开始时间：<code>{self._format_beijing_timestamp(task['started_at'])}</code>",
+            f"运行时长：<code>{self._format_runtime(task['started_at'], task['finished_at']) or '-'}</code>",
             f"并发线程：<code>{task['worker_count'] or 1}</code>",
             f"内容类型：<code>{content_type_label(content_type)}</code>",
             f"发送模式：<code>{message_mode_label(task['message_mode'], content_type=content_type)}</code>",
@@ -3334,6 +3355,8 @@ class DmCollectorBot:
             account_label = current["account_username"] or current["account_phone"] or current["account_display_name"] or f"#{current['assigned_account_id']}"
             lines.append(f"当前账号：<code>{html.escape(str(account_label), quote=False)}</code>")
             lines.append(f"当前用户：<code>{html.escape(str(current['normalized_input']), quote=False)}</code>")
+        if recent_logs:
+            lines.append(f"最近日志：<code>{self._format_beijing_timestamp(recent_logs[0]['created_at'])}</code>")
         lines.append("")
         lines.append(f"内容概览：<code>{body}</code>")
         if include_stats and accounts:
