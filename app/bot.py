@@ -1686,7 +1686,7 @@ class DmCollectorBot:
         self.dm_repository.attach_task_recipients(int(task["id"]), recipient_ids)
         sent = await self.application.bot.send_message(
             chat_id=query.message.chat_id,
-            text=self._format_dm_task_text(int(task["id"])),
+            text=self._format_dm_task_progress_text(int(task["id"])),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             reply_markup=self._build_dm_task_keyboard(int(task["id"])),
@@ -2038,7 +2038,7 @@ class DmCollectorBot:
         await self._show_dm_task_list(query, page=1)
 
     async def _show_dm_task_detail(self, query, task_id: int, page: int = 1) -> None:
-        await self._safe_edit(query, self._format_dm_task_text(task_id), self._build_dm_task_keyboard(task_id, page=page))
+        await self._safe_edit(query, self._format_dm_task_detail_text(task_id), self._build_dm_task_keyboard(task_id, page=page))
 
     async def _render_dm_account_selection(self, query, draft: dict) -> None:
         await self._safe_edit(query, self._dm_select_accounts_text(draft), self._build_dm_account_selection_keyboard(draft))
@@ -2466,7 +2466,7 @@ class DmCollectorBot:
             await self.application.bot.edit_message_text(
                 chat_id=task["progress_chat_id"],
                 message_id=task["progress_message_id"],
-                text=self._format_dm_task_text(task_id),
+                text=self._format_dm_task_progress_text(task_id),
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
                 reply_markup=self._build_dm_task_keyboard(task_id),
@@ -2810,22 +2810,30 @@ class DmCollectorBot:
         lines.extend(["", "需要看真实效果，请点【预览文案】。"])
         return "\n".join(lines)
 
-    def _format_dm_task_text(self, task_id: int) -> str:
+    def _format_dm_task_progress_text(self, task_id: int) -> str:
+        return self._format_dm_task_text(task_id, include_stats=True)
+
+    def _format_dm_task_detail_text(self, task_id: int) -> str:
+        return self._format_dm_task_text(task_id, include_stats=False)
+
+    def _format_dm_task_text(self, task_id: int, *, include_stats: bool) -> str:
         task = self.dm_repository.get_dm_task(task_id)
         if not task:
             return self._not_found_text("私信任务不存在或已被删除。")
-        accounts = self.dm_repository.list_dm_task_accounts(task_id)
+        accounts = self.dm_repository.list_dm_task_accounts(task_id) if include_stats else []
         current = self.dm_repository.get_dm_task_current_recipient(task_id)
         recent_logs = self.dm_repository.list_dm_recent_logs(task_id, limit=5)
-        failure_summary = self.dm_repository.get_dm_task_failure_summary(task_id, limit=6)
+        failure_summary = self.dm_repository.get_dm_task_failure_summary(task_id, limit=6) if include_stats else []
         processed = self.dm_repository.get_dm_task_processed_count(task_id)
         pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
         payload = json.loads(str(task["payload_json"] or "{}"))
         policy = json.loads(str(task["policy_json"] or "{}"))
         content_type = str(task["content_type"] or payload.get("content_type") or "text")
         body = payload_preview(payload, content_type=content_type, max_len=240)
+        title = "本次私信视图" if include_stats else f"任务详情 #{task['id']}"
         lines = [
-            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>私信任务 #{task['id']}</b> <code>v{__version__}</code>",
+            f"{tg_emoji(self.settings.emoji_history_id, '📝')} <b>{title}</b> <code>v{__version__}</code>",
+            f"任务ID：<code>{task['id']}</code>",
             f"状态：{self._dm_status_badge(task['status'])}",
             f"总目标：<code>{task['total_targets']}</code>",
             f"当前进度：<code>{processed}/{task['total_targets']}</code>",
@@ -2860,7 +2868,7 @@ class DmCollectorBot:
             lines.append(f"当前用户：<code>{html.escape(str(current['normalized_input']), quote=False)}</code>")
         lines.append("")
         lines.append(f"内容概览：<code>{body}</code>")
-        if accounts:
+        if include_stats and accounts:
             lines.append("")
             lines.append("<b>账号统计</b>")
             for row in accounts[:6]:
@@ -2876,7 +2884,7 @@ class DmCollectorBot:
                 if reason and row["status"] in {"error", "stopped"}:
                     line += f" · <code>{html.escape(self._humanize_dm_error(None, str(reason)), quote=False)[:70]}</code>"
                 lines.append(line)
-        if failure_summary:
+        if include_stats and failure_summary:
             lines.append("")
             lines.append("<b>失败原因统计</b>")
             for row in failure_summary:
