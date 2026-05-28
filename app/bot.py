@@ -3739,10 +3739,6 @@ class DmCollectorBot:
             ],
             [
                 premium_button("私信任务", DM_MENU_EMOJI_ID, callback_data="menu:dm"),
-                premium_button("统计", self.settings.emoji_stats_id, callback_data="menu:stats"),
-            ],
-            [
-                premium_button("历史结果", self.settings.emoji_history_id, callback_data="menu:history"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
