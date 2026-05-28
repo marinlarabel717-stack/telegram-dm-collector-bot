@@ -57,7 +57,8 @@ class DmSenderManager:
             return
         if not accounts:
             reason_text = "；".join(unavailable_reasons[:3]) if unavailable_reasons else "没有可用账号"
-            self.repository.mark_dm_task_status(task_id, "stopped", last_error=f"没有可用账号，任务已停止｜{reason_text}")
+            summary = self._build_task_stop_summary(task_id, fallback_total_accounts=len(task_accounts), fallback_pending=len(recipients))
+            self.repository.mark_dm_task_status(task_id, "stopped", last_error=f"没有可用账号，任务已停止｜{summary}｜{reason_text}")
             self.repository.sync_dm_task_metrics(task_id)
             await self._emit_complete(task_id)
             return
@@ -101,7 +102,8 @@ class DmSenderManager:
                 stop_reason = str((current_task["last_error"] if current_task else "") or "").strip() or "管理员手动停止任务"
                 self.repository.mark_dm_task_status(task_id, "stopped", last_error=stop_reason)
             elif pending > 0:
-                self.repository.mark_dm_task_status(task_id, "stopped", last_error="账号已用尽，任务已停止")
+                summary = self._build_task_stop_summary(task_id, fallback_total_accounts=len(task_accounts), fallback_pending=pending)
+                self.repository.mark_dm_task_status(task_id, "stopped", last_error=f"可用账号已用尽，任务已停止｜{summary}")
             else:
                 self.repository.mark_dm_task_status(task_id, "completed")
         self.repository.sync_dm_task_metrics(task_id)
@@ -524,7 +526,8 @@ class DmSenderManager:
         self.db.update_account_status(account_id, status=runtime_status, last_error=error_message)
         self.repository.update_dm_task_account(task_id, account_id, status=task_account_status, last_error=error_message)
         if (not auto_switch_account) or self._task_has_no_other_usable_accounts(task_id, exclude_account_id=account_id):
-            reason = f"{error_message}，且没有其他可用账号，任务已停止"
+            summary = self._build_task_stop_summary(task_id)
+            reason = f"{error_message}，且没有其他可用账号，任务已停止｜{summary}"
             current_task = self.repository.get_dm_task(task_id)
             current_status = str((current_task["status"] if current_task else "") or "")
             self.repository.mark_dm_task_status(
@@ -535,6 +538,13 @@ class DmSenderManager:
             self.repository.request_dm_task_stop(task_id)
             return reason
         return f"{error_message}，已停止当前账号并切到其他账号"
+
+    def _build_task_stop_summary(self, task_id: int, *, fallback_total_accounts: int | None = None, fallback_pending: int | None = None) -> str:
+        account_rows = self.repository.list_dm_task_accounts(task_id)
+        total_accounts = fallback_total_accounts if fallback_total_accounts is not None else len(account_rows)
+        stopped_accounts = sum(1 for row in account_rows if str(row["status"] or "") in {"stopped", "error", "completed"})
+        pending = fallback_pending if fallback_pending is not None else self.repository.count_dm_pending_recipients(task_id)
+        return f"已停账号 {stopped_accounts}/{total_accounts} 个，剩余目标 {pending} 个"
 
     def _task_has_no_other_usable_accounts(self, task_id: int, *, exclude_account_id: int) -> bool:
         for row in self.repository.list_dm_task_accounts(task_id):
