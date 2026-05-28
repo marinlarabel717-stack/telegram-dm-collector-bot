@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import random
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -482,17 +483,30 @@ class Database:
             self.conn.commit()
 
     def get_global_proxy(self) -> dict[str, Any] | None:
+        proxies = self.get_global_proxies()
+        if not proxies:
+            return None
+        return random.choice(proxies)
+
+    def get_global_proxies(self) -> list[dict[str, Any]]:
         with self.lock:
-            row = self.conn.execute("SELECT value FROM app_settings WHERE key='global_proxy'").fetchone()
-        if not row or not row[0]:
-            return None
-        try:
-            data = json.loads(str(row[0]))
-        except Exception:
-            return None
-        if not isinstance(data, dict):
-            return None
-        return data
+            pool_row = self.conn.execute("SELECT value FROM app_settings WHERE key='global_proxy_pool'").fetchone()
+            single_row = self.conn.execute("SELECT value FROM app_settings WHERE key='global_proxy'").fetchone()
+        rows_to_try = []
+        if pool_row and pool_row[0]:
+            rows_to_try.append(pool_row[0])
+        if single_row and single_row[0]:
+            rows_to_try.append(single_row[0])
+        for raw_value in rows_to_try:
+            try:
+                data = json.loads(str(raw_value))
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return [data]
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+        return []
 
     def set_global_proxy(
         self,
@@ -526,9 +540,49 @@ class Database:
             )
             self.conn.commit()
 
+    def set_global_proxies(self, proxies: list[dict[str, Any]]) -> None:
+        payload = json.dumps(proxies, ensure_ascii=False)
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES ('global_proxy_pool', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (payload,),
+            )
+            if proxies:
+                self.conn.execute("DELETE FROM app_settings WHERE key='global_proxy'")
+            self.conn.commit()
+
+    def add_global_proxies(self, proxies: list[dict[str, Any]]) -> int:
+        existing = self.get_global_proxies()
+        seen: set[tuple[str, str, int, str, str]] = set()
+        merged: list[dict[str, Any]] = []
+        for item in [*existing, *proxies]:
+            try:
+                key = (
+                    str(item.get("proxy_type") or ""),
+                    str(item.get("proxy_host") or ""),
+                    int(item.get("proxy_port") or 0),
+                    str(item.get("proxy_username") or ""),
+                    str(item.get("proxy_password") or ""),
+                )
+            except Exception:
+                continue
+            if key in seen or not key[0] or not key[1] or not key[2]:
+                continue
+            seen.add(key)
+            merged.append(dict(item))
+        self.set_global_proxies(merged)
+        return max(0, len(merged) - len(existing))
+
     def clear_global_proxy(self) -> None:
         with self.lock:
             self.conn.execute("DELETE FROM app_settings WHERE key='global_proxy'")
+            self.conn.execute("DELETE FROM app_settings WHERE key='global_proxy_pool'")
             self.conn.commit()
 
     # ---------- collection task storage ----------

@@ -25,7 +25,13 @@ from telegram.ext import (
     filters,
 )
 
-from .account_proxy import PROXY_TYPE_LABELS, format_account_proxy_label, parse_account_proxy_input
+from .account_proxy import (
+    check_proxy_available,
+    format_account_proxy_label,
+    parse_proxy_lines,
+    resolve_working_proxy,
+    summarize_proxy_pool,
+)
 from .collector import CollectionManager
 from .config import Settings
 from .database import Database
@@ -206,10 +212,14 @@ class DmCollectorBot:
             account_id = int(data.split(":")[-1])
             await self._delete_account(query, account_id)
             return
-        if data.startswith("account:proxy:set:"):
-            parts = data.split(":")
-            proxy_type = parts[3] if len(parts) >= 4 else "http"
-            await self._start_global_proxy_input(query, update.effective_user.id, proxy_type)
+        if data == "account:proxy:manage":
+            await self._show_proxy_manage_menu(query)
+            return
+        if data == "account:proxy:upload":
+            await self._start_global_proxy_input(query, update.effective_user.id)
+            return
+        if data == "account:proxy:check":
+            await self._check_global_proxy_pool(query)
             return
         if data.startswith("account:proxy:clear"):
             await self._clear_global_proxy(query)
@@ -469,6 +479,9 @@ class DmCollectorBot:
         if state.get("mode") == "await_dm_media":
             await self._handle_dm_media_input(update, state)
             return
+        if state.get("mode") == "await_global_proxy" and file_name.endswith(".txt"):
+            await self._handle_proxy_txt_upload(update, document)
+            return
         if file_name.endswith(".txt"):
             await self._handle_target_txt_upload(update, document, state)
             return
@@ -579,6 +592,88 @@ class DmCollectorBot:
             disable_web_page_preview=True,
             reply_markup=self._single_back_keyboard("account:list:1"),
         )
+
+    async def _import_proxy_text(self, update: Update, text: str) -> None:
+        message = update.effective_message
+        if not message:
+            return
+        cleaned_lines = parse_proxy_lines(text)
+        if not cleaned_lines:
+            await message.reply_text(
+                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 没识别到代理内容，请重新发送。",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await message.reply_text(
+            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 已收到代理，正在识别类型并检测可用性，请稍等……",
+            parse_mode=ParseMode.HTML,
+        )
+        valid, invalid = await self._resolve_proxy_lines(cleaned_lines)
+        added = self.db.add_global_proxies(valid) if valid else 0
+        self._clear_state(update.effective_user.id)
+        await message.reply_text(
+            self._format_proxy_import_result(valid, invalid, added),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._build_proxy_manage_keyboard(),
+        )
+
+    async def _handle_proxy_txt_upload(self, update: Update, document) -> None:
+        message = update.effective_message
+        if not message or not update.effective_chat:
+            return
+        await message.reply_text(
+            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 已收到代理 txt，正在识别类型并检测可用性，请稍等……",
+            parse_mode=ParseMode.HTML,
+        )
+        await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+        tg_file = await document.get_file()
+        raw_bytes = await tg_file.download_as_bytearray()
+        try:
+            text = bytes(raw_bytes).decode("utf-8")
+        except UnicodeDecodeError:
+            text = bytes(raw_bytes).decode("utf-8-sig", errors="ignore")
+        lines = parse_proxy_lines(text)
+        valid, invalid = await self._resolve_proxy_lines(lines)
+        added = self.db.add_global_proxies(valid) if valid else 0
+        self._clear_state(update.effective_user.id)
+        await message.reply_text(
+            self._format_proxy_import_result(valid, invalid, added),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._build_proxy_manage_keyboard(),
+        )
+
+    async def _resolve_proxy_lines(self, lines: list[str]) -> tuple[list[dict], list[str]]:
+        valid: list[dict] = []
+        invalid: list[str] = []
+        for raw_line in lines:
+            try:
+                proxy = await asyncio.to_thread(resolve_working_proxy, raw_line)
+            except Exception as exc:  # noqa: BLE001
+                invalid.append(f"{raw_line}｜{str(exc) or exc.__class__.__name__}")
+                continue
+            valid.append(proxy)
+        return valid, invalid
+
+    def _format_proxy_import_result(self, valid: list[dict], invalid: list[str], added: int) -> str:
+        proxies = self.db.get_global_proxies()
+        lines = [
+            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>代理导入完成</b>",
+            f"本次可用：<code>{len(valid)}</code>",
+            f"新增入池：<code>{added}</code>",
+            f"自动删除不可用：<code>{len(invalid)}</code>",
+            f"当前代理池：<code>{html.escape(summarize_proxy_pool(proxies), quote=False)}</code>",
+        ]
+        if valid:
+            lines.append("")
+            lines.append("<b>已保留代理</b>")
+            for item in valid[:6]:
+                lines.append(f"• <code>{html.escape(format_account_proxy_label(item), quote=False)}</code>")
+        if invalid:
+            lines.append("")
+            lines.append("<b>已丢弃不可用代理</b>")
+            for item in invalid[:6]:
+                lines.append(f"• <code>{html.escape(item, quote=False)[:160]}</code>")
+        return "\n".join(lines)
 
     async def _handle_target_txt_upload(self, update: Update, document, state: dict) -> None:
         mode = state.get("mode")
@@ -894,24 +989,8 @@ class DmCollectorBot:
             )
             return
 
-        if mode in {"await_account_proxy", "await_global_proxy"}:
-            draft = state.setdefault("draft", {})
-            proxy_type = str(draft.get("proxy_type") or "").strip().lower()
-            try:
-                proxy_data = parse_account_proxy_input(text, proxy_type)
-            except ValueError as exc:
-                await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} {html.escape(str(exc), quote=False)}",
-                    parse_mode=ParseMode.HTML,
-                )
-                return
-            self.db.set_global_proxy(**proxy_data)
-            self._clear_state(update.effective_user.id)
-            await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_success_id, '🆗')} 全局代理已保存：<code>{html.escape(format_account_proxy_label(self.db.get_global_proxy()), quote=False)}</code>",
-                parse_mode=ParseMode.HTML,
-                reply_markup=self._single_back_keyboard("menu:accounts"),
-            )
+        if mode == "await_global_proxy":
+            await self._import_proxy_text(update, text)
             return
 
         if mode == "await_dm_message":
@@ -1066,13 +1145,13 @@ class DmCollectorBot:
         count = self.db.count_accounts()
         stats = self.db.get_account_status_counts()
         restriction_stats = self.dm_repository.get_account_restriction_summary_counts()
-        global_proxy = self.db.get_global_proxy()
+        global_proxies = self.db.get_global_proxies()
         text = (
             f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
             f"当前存活账号：<code>{count}</code>\n"
             f"运行中：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n"
             f"状态：无限制 <code>{restriction_stats['unrestricted']}</code> · 地理限制 <code>{restriction_stats['geo_limited']}</code> · 受限 <code>{restriction_stats['limited']}</code> · 冻结 <code>{restriction_stats['frozen']}</code> · 待检测 <code>{restriction_stats['unknown']}</code>\n"
-            f"全局代理：<code>{html.escape(format_account_proxy_label(global_proxy), quote=False)}</code>\n"
+            f"代理池：<code>{html.escape(summarize_proxy_pool(global_proxies), quote=False)}</code>\n"
             f"待清理无效：<code>{stats['invalid']}</code>\n\n"
             f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。现在所有账号统一走全局代理。"
         )
@@ -1082,11 +1161,7 @@ class DmCollectorBot:
                 premium_button("账号列表", self.settings.emoji_list_id, callback_data=f"account:list:{page}"),
             ],
             [
-                premium_button("HTTP代理", self.settings.emoji_upload_id, callback_data="account:proxy:set:http"),
-                premium_button("SOCKS5代理", self.settings.emoji_list_id, callback_data="account:proxy:set:socks5"),
-            ],
-            [
-                premium_button("清空全局代理", self.settings.emoji_timeout_id, callback_data="account:proxy:clear"),
+                premium_button("代理管理", self.settings.emoji_upload_id, callback_data="account:proxy:manage"),
             ],
             [
                 premium_button("一键检查状态", self.settings.emoji_stats_id, callback_data="account:check_all"),
@@ -1170,30 +1245,95 @@ class DmCollectorBot:
             return
         await self._safe_edit(query, self._format_account_text(account), self._build_account_detail_keyboard(account_id))
 
-    async def _start_global_proxy_input(self, query, user_id: int, proxy_type: str) -> None:
-        normalized_type = str(proxy_type or "").strip().lower()
-        if normalized_type not in PROXY_TYPE_LABELS:
-            await query.answer("代理类型不支持", show_alert=True)
-            return
+    async def _show_proxy_manage_menu(self, query) -> None:
+        proxies = self.db.get_global_proxies()
+        lines = [
+            f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>代理管理</b>",
+            f"当前代理池：<code>{html.escape(summarize_proxy_pool(proxies), quote=False)}</code>",
+            "",
+            "支持直接发送单条代理，或上传 <code>.txt</code> 批量导入。",
+            "格式支持：<code>ip:端口:账号:密码</code>，也支持带 <code>http://</code> / <code>socks5://</code> 前缀。",
+            "未带类型时，我会自动检测是 HTTP 还是 SOCKS5；检测失败的不会保留。",
+        ]
+        keyboard = InlineKeyboardMarkup([
+            [
+                premium_button("上传/粘贴代理", self.settings.emoji_upload_id, callback_data="account:proxy:upload"),
+                premium_button("检查代理可用性", self.settings.emoji_stats_id, callback_data="account:proxy:check"),
+            ],
+            [
+                premium_button("清空代理池", self.settings.emoji_timeout_id, callback_data="account:proxy:clear"),
+            ],
+            [
+                premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
+                premium_button("刷新页面", self.settings.emoji_refresh_id, callback_data="account:proxy:manage"),
+            ],
+        ])
+        await self._safe_edit(query, "\n".join(lines), keyboard)
+
+    async def _start_global_proxy_input(self, query, user_id: int) -> None:
         self.user_states[user_id] = {
             "mode": "await_global_proxy",
-            "draft": {
-                "proxy_type": normalized_type,
-            },
+            "draft": {},
         }
-        current_proxy = self.db.get_global_proxy()
+        current_proxy = self.db.get_global_proxies()
         text = (
-            f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>设置全局 {PROXY_TYPE_LABELS[normalized_type]} 代理</b>\n"
-            f"当前：<code>{html.escape(format_account_proxy_label(current_proxy), quote=False)}</code>\n\n"
-            f"请直接发送：<code>ip:端口:账号:密码</code>\n"
-            f"保存后所有账号都会统一走这条代理。"
+            f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>导入代理</b>\n"
+            f"当前代理池：<code>{html.escape(summarize_proxy_pool(current_proxy), quote=False)}</code>\n\n"
+            f"请直接发送代理文本，或上传 <code>.txt</code> 文件。\n"
+            f"支持：<code>ip:端口:账号:密码</code>\n"
+            f"也支持：<code>http://账号:密码@ip:端口</code> / <code>socks5://账号:密码@ip:端口</code>\n"
+            f"未写类型时，我会自动识别；不可用代理会自动删除。"
         )
-        await self._safe_edit(query, text, self._single_back_keyboard("menu:accounts"))
+        await self._safe_edit(query, text, self._single_back_keyboard("account:proxy:manage"))
 
     async def _clear_global_proxy(self, query) -> None:
         self.db.clear_global_proxy()
-        await self._show_accounts_menu(query, page=1)
-        await query.answer("全局代理已清空", show_alert=False)
+        await self._show_proxy_manage_menu(query)
+        await query.answer("代理池已清空", show_alert=False)
+
+    async def _check_global_proxy_pool(self, query) -> None:
+        proxies = self.db.get_global_proxies()
+        if not proxies:
+            await query.answer("当前没有代理可检测", show_alert=True)
+            return
+        await self._safe_edit(query, f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 正在检测代理可用性，请稍等……", self._single_back_keyboard("account:proxy:manage"))
+        valid: list[dict] = []
+        invalid: list[str] = []
+        for proxy in proxies:
+            ok = await asyncio.to_thread(check_proxy_available, proxy)
+            if ok:
+                valid.append(proxy)
+            else:
+                invalid.append(format_account_proxy_label(proxy))
+        self.db.set_global_proxies(valid)
+        lines = [
+            f"{tg_emoji(self.settings.emoji_stats_id, '🎚️')} <b>代理检测完成</b>",
+            f"保留可用：<code>{len(valid)}</code>",
+            f"自动删除不可用：<code>{len(invalid)}</code>",
+        ]
+        if valid:
+            lines.append(f"当前代理池：<code>{html.escape(summarize_proxy_pool(valid), quote=False)}</code>")
+        if invalid:
+            lines.append("")
+            lines.append("<b>已删除不可用代理</b>")
+            for item in invalid[:6]:
+                lines.append(f"• <code>{html.escape(item, quote=False)}</code>")
+        await self._safe_edit(query, "\n".join(lines), self._build_proxy_manage_keyboard())
+
+    def _build_proxy_manage_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                premium_button("上传/粘贴代理", self.settings.emoji_upload_id, callback_data="account:proxy:upload"),
+                premium_button("检查代理可用性", self.settings.emoji_stats_id, callback_data="account:proxy:check"),
+            ],
+            [
+                premium_button("清空代理池", self.settings.emoji_timeout_id, callback_data="account:proxy:clear"),
+            ],
+            [
+                premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
+                premium_button("刷新页面", self.settings.emoji_refresh_id, callback_data="account:proxy:manage"),
+            ],
+        ])
 
     async def _check_account(self, query, account_id: int) -> None:
         account = self.db.get_account(account_id)
@@ -2672,7 +2812,7 @@ class DmCollectorBot:
             f"用户名：<code>{html.escape(str(account['username'] or '-'), quote=False)}</code>",
             f"手机号：<code>{html.escape(str(account['phone'] or '-'), quote=False)}</code>",
             f"User ID：<code>{account['tg_user_id'] or '-'}</code>",
-            f"全局代理：<code>{html.escape(format_account_proxy_label(self.db.get_global_proxy()), quote=False)}</code>",
+            f"代理池：<code>{html.escape(summarize_proxy_pool(self.db.get_global_proxies()), quote=False)}</code>",
             f"最近检测：<code>{account['last_checked_at'] or '-'}</code>",
         ]
         if account["restriction_checked_at"]:
