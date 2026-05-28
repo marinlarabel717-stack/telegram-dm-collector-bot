@@ -2885,7 +2885,7 @@ class DmCollectorBot:
         policy = draft.get("policy") or {}
         content_label = content_type_label(draft.get("content_type"))
         mode_label = message_mode_label(draft.get("message_mode"), content_type=draft.get("content_type"))
-        switch_label = "自动切号" if policy.get("auto_switch_account", True) else "单号用完即停"
+        switch_label = "开启补号" if policy.get("auto_switch_account", True) else "关闭补号"
         typing_label = "开启" if policy.get("typing_simulation", True) else "关闭"
         delay_label = f"{int(policy.get('delay_min', 8))}-{int(policy.get('delay_max', 15))}秒"
         stage1_label = f"{int(policy.get('stage1_delay_seconds', 5))}秒"
@@ -2927,7 +2927,7 @@ class DmCollectorBot:
             f"请求频繁停号：<code>{int(policy.get('stop_account_after_too_many_requests', 40))}次</code>",
             f"随机间隔：<code>{policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒</code>",
             f"打字状态：<code>{'开启' if policy.get('typing_simulation', True) else '关闭'}</code>",
-            f"账号策略：<code>{'自动切号' if policy.get('auto_switch_account', True) else '单号用完即停'}</code>",
+            f"账号策略：<code>{'开启补号（活跃号停了会从已选账号池补位）' if policy.get('auto_switch_account', True) else '关闭补号（只跑当前启用账号，不再从账号池补位）'}</code>",
             f"自动置顶：<code>{'开启' if policy.get('pin_after_send', False) else '关闭'}</code> · 延迟：<code>{int(policy.get('pin_delay_seconds', 3))}秒</code>",
         ]
         if draft.get("message_mode") == "three_stage":
