@@ -50,6 +50,7 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 PROXY_EMOJI_ID = "5235579174072112613"      # 🔗
 ROCKET_EMOJI_ID = "5188481279963715781"     # 🚀
 TRASH_EMOJI_ID = "5445267414562389170"      # 🗑
+EXPORT_EMOJI_ID = "5445355530111437729"     # 📤
 
 
 class DmCollectorBot:
@@ -1258,11 +1259,11 @@ class DmCollectorBot:
                 premium_button("一键清理无效", TRASH_EMOJI_ID, callback_data="account:purge_invalid"),
             ],
             [
-                premium_button("导出无限制", self.settings.emoji_export_id, callback_data="account:export:unrestricted"),
-                premium_button("导出受限", self.settings.emoji_export_id, callback_data="account:export:limited"),
+                premium_button("导出无限制", EXPORT_EMOJI_ID, callback_data="account:export:unrestricted"),
+                premium_button("导出受限", EXPORT_EMOJI_ID, callback_data="account:export:limited"),
             ],
             [
-                premium_button("导出全部账号", self.settings.emoji_export_id, callback_data="account:export:all"),
+                premium_button("导出全部账号", EXPORT_EMOJI_ID, callback_data="account:export:all"),
             ],
             [
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
@@ -1297,11 +1298,11 @@ class DmCollectorBot:
                 premium_button("一键清理无效", TRASH_EMOJI_ID, callback_data="account:purge_invalid"),
             ],
             [
-                premium_button("导出无限制", self.settings.emoji_export_id, callback_data="account:export:unrestricted"),
-                premium_button("导出受限", self.settings.emoji_export_id, callback_data="account:export:limited"),
+                premium_button("导出无限制", EXPORT_EMOJI_ID, callback_data="account:export:unrestricted"),
+                premium_button("导出受限", EXPORT_EMOJI_ID, callback_data="account:export:limited"),
             ],
             [
-                premium_button("导出全部账号", self.settings.emoji_export_id, callback_data="account:export:all"),
+                premium_button("导出全部账号", EXPORT_EMOJI_ID, callback_data="account:export:all"),
             ],
         ]
         row_buffer = []
@@ -1727,7 +1728,7 @@ class DmCollectorBot:
                 premium_button("任务列表", self.settings.emoji_history_id, callback_data="collect:tasks"),
             ],
             [
-                premium_button("历史结果", self.settings.emoji_export_id, callback_data="menu:history"),
+                premium_button("历史结果", EXPORT_EMOJI_ID, callback_data="menu:history"),
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
             ],
         ]
@@ -2527,7 +2528,7 @@ class DmCollectorBot:
         page = max(1, min(page, total_pages))
         tasks = self.db.list_history_tasks(limit=per_page, offset=(page - 1) * per_page)
         lines = [
-            f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>历史结果</b>",
+            f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>历史结果</b>",
             f"页码：<code>{page}/{total_pages}</code>",
             f"历史总数：<code>{total}</code>",
         ]
@@ -3945,7 +3946,7 @@ class DmCollectorBot:
         keyboard = [
             [
                 premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"task:refresh:{task_id}:{page}:{source}"),
-                premium_button("导出结果", self.settings.emoji_export_id, callback_data=f"task:export:{task_id}"),
+                premium_button("导出结果", EXPORT_EMOJI_ID, callback_data=f"task:export:{task_id}"),
             ],
             [
                 premium_button("删除任务", self.settings.emoji_error_id, callback_data=f"task:delete:{task_id}:{page}:{source}"),
@@ -3994,7 +3995,7 @@ class DmCollectorBot:
             keyboard.append([premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"dm:stop:{task_id}:{page}")])
         keyboard.extend([
             [
-                premium_button("导出结果", self.settings.emoji_export_id, callback_data=f"dm:export:{task_id}"),
+                premium_button("导出结果", EXPORT_EMOJI_ID, callback_data=f"dm:export:{task_id}"),
                 premium_button("刷新任务", self.settings.emoji_refresh_id, callback_data=f"dm:refresh:{task_id}:{page}"),
             ],
             [
@@ -4132,7 +4133,7 @@ class DmCollectorBot:
                 document=fp,
                 filename=zip_path.name,
                 caption=(
-                    f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>账号导出｜{self._account_export_bucket_label(bucket)}</b>\n"
+                    f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>账号导出｜{self._account_export_bucket_label(bucket)}</b>\n"
                     f"数量：<code>{len(rows)}</code>"
                     + ("\n说明：<code>导出后已自动删除这些账号</code>" if auto_delete else "")
                 ),
@@ -4164,7 +4165,7 @@ class DmCollectorBot:
                 chat_id=chat_id,
                 document=users_fp,
                 filename=paths.users_csv.name,
-                caption=f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>用户导出</b>",
+                caption=f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>用户导出</b>",
                 parse_mode=ParseMode.HTML,
             )
         with paths.messages_csv.open("rb") as messages_fp:
@@ -4172,7 +4173,7 @@ class DmCollectorBot:
                 chat_id=chat_id,
                 document=messages_fp,
                 filename=paths.messages_csv.name,
-                caption=f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>消息导出</b>",
+                caption=f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>消息导出</b>",
                 parse_mode=ParseMode.HTML,
             )
 
@@ -4183,10 +4184,10 @@ class DmCollectorBot:
         paths = self.dm_repository.export_task_results(task_id, self.settings.export_dir)
         pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
         captions = [
-            (paths.success_txt, int(task['success_count'] or 0), f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信成功名单</b>\n成功：<code>{task['success_count']}</code>"),
-            (paths.failed_txt, int(task['failed_count'] or 0), f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信失败名单</b>\n失败：<code>{task['failed_count']}</code>"),
-            (paths.report_csv, max(1, int(task['success_count'] or 0) + int(task['failed_count'] or 0) + int(task['skipped_count'] or 0)), f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>本次私信任务日志 / 统计视图</b>"),
-            (paths.pending_txt, pending_count, f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>私信剩余待发送</b>\n待发送：<code>{pending_count}</code>"),
+            (paths.success_txt, int(task['success_count'] or 0), f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>私信成功名单</b>\n成功：<code>{task['success_count']}</code>"),
+            (paths.failed_txt, int(task['failed_count'] or 0), f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>私信失败名单</b>\n失败：<code>{task['failed_count']}</code>"),
+            (paths.report_csv, max(1, int(task['success_count'] or 0) + int(task['failed_count'] or 0) + int(task['skipped_count'] or 0)), f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>本次私信任务日志 / 统计视图</b>"),
+            (paths.pending_txt, pending_count, f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>私信剩余待发送</b>\n待发送：<code>{pending_count}</code>"),
         ]
         sent_any = False
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
@@ -4241,7 +4242,7 @@ class DmCollectorBot:
                         document=fp,
                         filename=Path(path).name,
                         caption=(
-                            f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>{captions[key]}</b>\n"
+                            f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>{captions[key]}</b>\n"
                             f"{labels[key]}：<code>{count}</code>"
                         ),
                         parse_mode=ParseMode.HTML,
@@ -4263,7 +4264,7 @@ class DmCollectorBot:
                 document=fp,
                 filename=Path(path).name,
                 caption=(
-                    f"{tg_emoji(self.settings.emoji_export_id, '🖥')} <b>{caption_prefix}</b>\n"
+                    f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>{caption_prefix}</b>\n"
                     f"去重数量：<code>{task['unique_hits']}</code>"
                 ),
                 parse_mode=ParseMode.HTML,
