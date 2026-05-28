@@ -376,8 +376,14 @@ class DmCollectorBot:
             state = self.user_states.get(update.effective_user.id) or {}
             draft = state.get("draft") or {}
             content_type = draft.get("content_type") or "text"
-            state["mode"] = "await_dm_body" if content_type in {"text", "post"} else ("await_dm_media" if content_type == "media" else "await_dm_forward")
+            state["mode"] = "await_dm_body" if content_type in {"text", "post", "reply"} else ("await_dm_media" if content_type == "media" else "await_dm_forward")
             await self._safe_edit(query, self._dm_body_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:greeting"))
+            return
+        if data == "dm:wizard:back:reply_keywords":
+            state = self.user_states.get(update.effective_user.id) or {}
+            draft = state.get("draft") or {}
+            state["mode"] = "await_dm_reply_keywords"
+            await self._safe_edit(query, self._dm_reply_keywords_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:body"))
             return
         if data == "dm:wizard:back:input":
             await self._dm_wizard_back_to_input(query, update.effective_user.id)
@@ -396,6 +402,9 @@ class DmCollectorBot:
             return
         if data == "dm:wizard:too_many_requests:cycle":
             await self._dm_wizard_cycle_too_many_requests(query, update.effective_user.id)
+            return
+        if data == "dm:wizard:reply_delay:cycle":
+            await self._dm_wizard_cycle_reply_delay(query, update.effective_user.id)
             return
         if data == "dm:wizard:worker:cycle":
             await self._dm_wizard_cycle_worker_count(query, update.effective_user.id)
@@ -1023,7 +1032,7 @@ class DmCollectorBot:
             draft = state.setdefault("draft", {})
             draft["greeting"] = text
             content_type = draft.get("content_type") or "text"
-            state["mode"] = "await_dm_body" if content_type in {"text", "post"} else ("await_dm_media" if content_type == "media" else "await_dm_forward")
+            state["mode"] = "await_dm_body" if content_type in {"text", "post", "reply"} else ("await_dm_media" if content_type == "media" else "await_dm_forward")
             await update.effective_message.reply_text(
                 self._dm_body_prompt_text(draft),
                 parse_mode=ParseMode.HTML,
@@ -1042,11 +1051,37 @@ class DmCollectorBot:
             draft["body"] = text
             if (draft.get("content_type") or "text") == "post":
                 draft["post_code"] = text
+            if (draft.get("content_type") or "text") == "reply":
+                state["mode"] = "await_dm_reply_keywords"
+                await update.effective_message.reply_text(
+                    self._dm_reply_keywords_prompt_text(draft),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self._single_back_keyboard("dm:wizard:back:body"),
+                )
+                return
             state["mode"] = "await_dm_closing"
             await update.effective_message.reply_text(
                 self._dm_closing_prompt_text(draft),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self._single_back_keyboard("dm:wizard:back:body"),
+            )
+            return
+
+        if mode == "await_dm_reply_keywords":
+            draft = state.setdefault("draft", {})
+            rules, invalid = self._parse_dm_reply_keyword_rules(text)
+            if invalid:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 关键词格式不对：<code>{html.escape(invalid[0], quote=False)[:120]}</code>\n请按 <code>关键词=回复文案</code> 一行一条发送；不需要就发 <code>跳过</code>。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            draft["reply_keyword_rules"] = rules
+            state["mode"] = "dm_confirm"
+            await update.effective_message.reply_text(
+                self._dm_confirm_text(draft),
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._build_dm_confirm_keyboard("dm:wizard:back:input"),
             )
             return
 
@@ -1649,7 +1684,7 @@ class DmCollectorBot:
     async def _show_dm_menu(self, query) -> None:
         text = (
             f"{tg_emoji(self.settings.emoji_start_id, '🎊')} <b>私信任务</b>\n"
-            f"当前支持：文本私信、媒体私信、频道帖子转发（通过链接定位原帖）、txt/手输用户名单、单号上限、自动补号、实时成功失败统计。"
+            f"当前支持：文本私信、回复模式、频道帖子转发（通过链接定位原帖）、PostBot 图文代码、txt/手输用户名单、单号上限、自动补号、实时成功失败统计。"
         )
         keyboard = [
             [
@@ -1686,6 +1721,8 @@ class DmCollectorBot:
                     "delay_max": 15,
                     "stage1_delay_seconds": 5,
                     "stage2_delay_seconds": 3,
+                    "reply_delay_seconds": 5,
+                    "reply_wait_timeout_seconds": 300,
                     "pin_after_send": False,
                     "pin_delay_seconds": 3,
                     "delete_dialog_after_send": False,
@@ -1750,6 +1787,10 @@ class DmCollectorBot:
     async def _dm_wizard_back_to_input(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
+        if (draft.get("content_type") or "text") == "reply":
+            state["mode"] = "await_dm_reply_keywords"
+            await self._safe_edit(query, self._dm_reply_keywords_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:body"))
+            return
         if draft.get("message_mode") == "three_stage":
             state["mode"] = "await_dm_closing"
             await self._safe_edit(query, self._dm_closing_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:body"))
@@ -1766,17 +1807,24 @@ class DmCollectorBot:
     async def _dm_wizard_toggle_mode(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
+        if (draft.get("content_type") or "text") == "reply":
+            draft["message_mode"] = "three_stage"
+            await query.answer("回复模式固定走：先打招呼，再等对方回复后发送文案", show_alert=True)
+            await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+            return
         draft["message_mode"] = "three_stage" if draft.get("message_mode") == "single" else "single"
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_content_type(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
-        options = ["text", "post", "media", "forward"]
+        options = ["text", "post", "reply", "forward"]
         current = str(draft.get("content_type") or "text")
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else "text"
         draft["content_type"] = next_value
-        for key in ("text", "body", "post_code", "media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview", "forward_message_preview", "forward_preview_error"):
+        if next_value == "reply":
+            draft["message_mode"] = "three_stage"
+        for key in ("text", "body", "post_code", "media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview", "forward_message_preview", "forward_preview_error", "reply_keyword_rules"):
             draft.pop(key, None)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
@@ -1808,6 +1856,16 @@ class DmCollectorBot:
         current = int(policy.get("stop_account_after_too_many_requests") or 40)
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else 40
         policy["stop_account_after_too_many_requests"] = next_value
+        await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
+
+    async def _dm_wizard_cycle_reply_delay(self, query, user_id: int) -> None:
+        state = self.user_states.get(user_id) or {}
+        draft = state.get("draft") or {}
+        policy = draft.setdefault("policy", {})
+        options = [0, 3, 5, 8, 10, 15, 20, 30]
+        current = int(policy.get("reply_delay_seconds") or 5)
+        next_value = options[(options.index(current) + 1) % len(options)] if current in options else 5
+        policy["reply_delay_seconds"] = next_value
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_worker_count(self, query, user_id: int) -> None:
@@ -1896,6 +1954,8 @@ class DmCollectorBot:
     async def _dm_wizard_finish_config(self, query, user_id: int) -> None:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
+        if (draft.get("content_type") or "text") == "reply":
+            draft["message_mode"] = "three_stage"
         if draft.get("message_mode") == "three_stage":
             state["mode"] = "await_dm_greeting"
             await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
@@ -1915,7 +1975,9 @@ class DmCollectorBot:
         raw_targets = draft.get("targets") or []
         mode = draft.get("message_mode") or "single"
         content_type = draft.get("content_type") or "text"
-        if content_type == "media":
+        if content_type == "reply":
+            has_content = bool((draft.get("body") or "").strip())
+        elif content_type == "media":
             has_content = bool(draft.get("media_path"))
         elif content_type == "post":
             has_content = bool((draft.get("post_code") or draft.get("body") or draft.get("text") or "").strip())
@@ -1968,7 +2030,10 @@ class DmCollectorBot:
         if mode == "three_stage":
             payload["greeting"] = draft.get("greeting") or ""
             payload["closing"] = draft.get("closing") or ""
-        if content_type == "media":
+        if content_type == "reply":
+            payload["body"] = draft.get("body") or ""
+            payload["reply_keyword_rules"] = draft.get("reply_keyword_rules") or []
+        elif content_type == "media":
             payload.update({
                 "media_kind": draft.get("media_kind") or "file",
                 "media_path": draft.get("media_path") or "",
@@ -2007,7 +2072,19 @@ class DmCollectorBot:
         mode = str(payload.get("mode") or "single")
         if mode == "three_stage" and str(payload.get("greeting") or "").strip():
             await self.application.bot.send_message(chat_id=chat_id, text=str(payload.get("greeting") or ""))
-        if content_type == "media":
+        if content_type == "reply":
+            reply_text = str(payload.get("body") or payload.get("reply_text") or "").strip()
+            rules = payload.get("reply_keyword_rules") or []
+            lines = ["【回复模式预览】", "这里先展示：对方一旦回复后，会发送哪段文案。"]
+            if reply_text:
+                lines.append(f"默认回复：{reply_text}")
+            if rules:
+                for row in rules[:5]:
+                    keywords = "|".join(row.get("keywords") or [])
+                    reply = str(row.get("reply") or "")
+                    lines.append(f"关键词：{keywords} → {reply[:80]}")
+            await self.application.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        elif content_type == "media":
             media_path = Path(str(payload.get("media_path") or ""))
             if media_path.exists():
                 with media_path.open("rb") as fp:
@@ -3004,6 +3081,12 @@ class DmCollectorBot:
 
     def _dm_message_prompt_text(self, draft: dict) -> str:
         content_type = draft.get("content_type") or "text"
+        if content_type == "reply":
+            return (
+                f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>输入开场招呼</b>\n"
+                f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+                f"这条会先发给对方；等对方回复后，再按你设置的延迟发送默认回复或关键词回复。"
+            )
         if draft.get("message_mode") == "three_stage":
             return (
                 f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>输入第 1 段问候语</b>\n"
@@ -3015,6 +3098,12 @@ class DmCollectorBot:
                 f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送 PostBot 图文代码</b>\n"
                 f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
                 f"请直接粘贴 PostBot 生成的文案代码，例如：<code>@postbot jsc1mpdn1gw3</code>\n我会按它生成的内联内容发送，不会把代码原样发出去。"
+            )
+        if content_type == "reply":
+            return (
+                f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>回复模式</b>\n"
+                f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+                f"请先发送开场招呼文案。"
             )
         if content_type == "media":
             return (
@@ -3043,6 +3132,12 @@ class DmCollectorBot:
 
     def _dm_body_prompt_text(self, draft: dict) -> str:
         content_type = draft.get("content_type") or "text"
+        if content_type == "reply":
+            return (
+                f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>输入默认回复文案</b>\n"
+                f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+                f"等对方回复后，如果没有命中关键词，就发送这段默认回复。"
+            )
         if content_type == "post":
             return (
                 f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>发送第 2 段主内容（PostBot 图文代码）</b>\n"
@@ -3067,6 +3162,45 @@ class DmCollectorBot:
             f"请发送第二段主消息内容。"
         )
 
+    def _dm_reply_keywords_prompt_text(self, draft: dict) -> str:
+        rules = draft.get("reply_keyword_rules") or []
+        sample = []
+        for row in rules[:3]:
+            keywords = "|".join(row.get("keywords") or [])
+            reply_text = str(row.get("reply") or "")[:20]
+            if keywords and reply_text:
+                sample.append(f"{keywords}={reply_text}")
+        suffix = f"\n当前已配：<code>{html.escape('；'.join(sample), quote=False)}</code>" if sample else ""
+        return (
+            f"{tg_emoji(self.settings.emoji_list_id, '🧩')} <b>配置关键词回复</b>\n"
+            f"目标数：<code>{len(draft.get('targets') or [])}</code> · 账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
+            f"请按 <code>关键词=回复文案</code> 一行一条发送，多个关键词可写成 <code>词1|词2=同一条回复</code>。\n"
+            f"如果对方回复里包含这些关键词，就优先发对应文案；没命中就发默认回复。\n"
+            f"不需要关键词回复就发 <code>跳过</code>。{suffix}"
+        )
+
+    def _parse_dm_reply_keyword_rules(self, text: str) -> tuple[list[dict], list[str]]:
+        raw = str(text or "").strip()
+        if not raw or raw in {"跳过", "无", "没有", "none", "NONE"}:
+            return [], []
+        rules: list[dict] = []
+        invalid: list[str] = []
+        for line in raw.splitlines():
+            item = line.strip()
+            if not item:
+                continue
+            if "=" not in item:
+                invalid.append(item)
+                continue
+            keywords_text, reply_text = item.split("=", 1)
+            keywords = [part.strip().lower() for part in keywords_text.split("|") if part.strip()]
+            reply_text = reply_text.strip()
+            if not keywords or not reply_text:
+                invalid.append(item)
+                continue
+            rules.append({"keywords": keywords, "reply": reply_text})
+        return rules, invalid
+
     def _dm_config_text(self, draft: dict) -> str:
         worker_count = self._sync_dm_worker_count(draft)
         policy = draft.get("policy") or {}
@@ -3081,6 +3215,7 @@ class DmCollectorBot:
         pin_delay_label = f"{int(policy.get('pin_delay_seconds', 3))}秒"
         delete_label = "开启" if policy.get("delete_dialog_after_send", False) else "关闭"
         delete_delay_label = f"{int(policy.get('delete_dialog_delay_seconds', 10))}秒"
+        reply_delay_label = f"{int(policy.get('reply_delay_seconds', 5))}秒"
         too_many_requests_label = int(policy.get("stop_account_after_too_many_requests", 40))
         lines = [
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>发送配置</b>",
@@ -3093,11 +3228,16 @@ class DmCollectorBot:
             f"随机间隔：<code>{delay_label}</code>",
             f"打字状态：<code>{typing_label}</code>",
             f"账号策略：<code>{switch_label}</code>",
+            f"回复延迟：<code>{reply_delay_label}</code>" if str(draft.get("content_type") or "") == "reply" else None,
             f"自动置顶：<code>{pin_label}</code> · 延迟：<code>{pin_delay_label}</code>",
             f"删除对话框：<code>{delete_label}</code> · 延迟：<code>{delete_delay_label}</code>",
         ]
+        lines = [line for line in lines if line is not None]
         if draft.get("message_mode") == "three_stage":
-            lines.append(f"三段间隔：<code>第1段后 {stage1_label} / 第2段后 {stage2_label}</code>")
+            if str(draft.get("content_type") or "") == "reply":
+                lines.append(f"回复模式：<code>先打招呼 → 等对方回复 → 延迟 {reply_delay_label} 发默认/关键词回复</code>")
+            else:
+                lines.append(f"三段间隔：<code>第1段后 {stage1_label} / 第2段后 {stage2_label}</code>")
         return "\n".join(lines)
 
     def _dm_confirm_text(self, draft: dict) -> str:
@@ -3118,11 +3258,16 @@ class DmCollectorBot:
             f"随机间隔：<code>{policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒</code>",
             f"打字状态：<code>{'开启' if policy.get('typing_simulation', True) else '关闭'}</code>",
             f"账号策略：<code>{'开启补号（所选账号用完后，会继续从账号列表补号）' if policy.get('auto_switch_account', True) else '关闭补号（只使用本次所选账号）'}</code>",
+            f"回复延迟：<code>{int(policy.get('reply_delay_seconds', 5))}秒</code>" if content_type == "reply" else None,
             f"自动置顶：<code>{'开启' if policy.get('pin_after_send', False) else '关闭'}</code> · 延迟：<code>{int(policy.get('pin_delay_seconds', 3))}秒</code>",
             f"删除对话框：<code>{'开启' if policy.get('delete_dialog_after_send', False) else '关闭'}</code> · 延迟：<code>{int(policy.get('delete_dialog_delay_seconds', 10))}秒</code>",
         ]
+        lines = [line for line in lines if line is not None]
         if draft.get("message_mode") == "three_stage":
-            lines.append(f"三段间隔：<code>第1段后 {int(policy.get('stage1_delay_seconds', 5))}秒 / 第2段后 {int(policy.get('stage2_delay_seconds', 3))}秒</code>")
+            if content_type == "reply":
+                lines.append("回复逻辑：<code>先打招呼，等对方回复后，再按关键词或默认文案回复</code>")
+            else:
+                lines.append(f"三段间隔：<code>第1段后 {int(policy.get('stage1_delay_seconds', 5))}秒 / 第2段后 {int(policy.get('stage2_delay_seconds', 3))}秒</code>")
         if content_type == "forward" and preview_error:
             lines.append(f"帖子预览状态：<code>抓取失败｜{html.escape(preview_error[:120], quote=False)}</code>")
         lines.extend(["", "需要看真实效果，请点【预览文案】。"])
@@ -3174,6 +3319,8 @@ class DmCollectorBot:
             f"发送模式：<code>{message_mode_label(task['message_mode'], content_type=content_type)}</code>",
             f"发送配置：<code>上限 {policy.get('per_account_success_limit', 40)} / 请求频繁 {policy.get('stop_account_after_too_many_requests', 40)}次停号 / 间隔 {policy.get('delay_min', 8)}-{policy.get('delay_max', 15)}秒 / {'打字开' if policy.get('typing_simulation', True) else '打字关'}</code>",
         ])
+        if content_type == "reply":
+            lines.append(f"回复延迟：<code>{int(policy.get('reply_delay_seconds', 5))}秒</code>")
         if draft_mode := policy.get("pin_after_send", False):
             lines.append(f"自动置顶：<code>{'开启' if draft_mode else '关闭'}</code> · 延迟 <code>{int(policy.get('pin_delay_seconds', 3))}秒</code>")
         lines.append(
@@ -3241,6 +3388,7 @@ class DmCollectorBot:
             "forward_forbidden": "这个目标不允许转发该帖子内容",
             "admin_required": "当前账号没有执行该操作的权限",
             "postbot_failed": "PostBot 内联结果获取失败",
+            "reply_timeout": "等了很久，对方一直没回复",
             "send_failed": "发送失败",
         }
         raw = str(message or code or "-").strip()
@@ -3581,19 +3729,31 @@ class DmCollectorBot:
                 premium_button(f"补号：{'开' if policy.get('auto_switch_account', True) else '关'}", self.settings.emoji_all_id, callback_data="dm:wizard:switch:toggle"),
             ],
             [
+                premium_button(f"回复延迟：{int(policy.get('reply_delay_seconds', 5))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:reply_delay:cycle"),
+                premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),
+            ] if content_type == "reply" else [
                 premium_button(f"置顶：{'开' if policy.get('pin_after_send', False) else '关'}", self.settings.emoji_history_id, callback_data="dm:wizard:pin:toggle"),
                 premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:pin_delay:cycle"),
             ],
             [
-                premium_button(f"删对话框：{'开' if policy.get('delete_dialog_after_send', False) else '关'}", self.settings.emoji_error_id, callback_data="dm:wizard:delete:toggle"),
-                premium_button(f"删除延迟：{int(policy.get('delete_dialog_delay_seconds', 10))}秒", self.settings.emoji_timeout_id, callback_data="dm:wizard:delete_delay:input"),
+                premium_button(f"置顶延迟：{int(policy.get('pin_delay_seconds', 3))}秒", self.settings.emoji_waiting_id, callback_data="dm:wizard:pin_delay:cycle") if content_type == "reply" else premium_button(f"删对话框：{'开' if policy.get('delete_dialog_after_send', False) else '关'}", self.settings.emoji_error_id, callback_data="dm:wizard:delete:toggle"),
+                premium_button(f"删对话框：{'开' if policy.get('delete_dialog_after_send', False) else '关'}", self.settings.emoji_error_id, callback_data="dm:wizard:delete:toggle") if content_type == "reply" else premium_button(f"删除延迟：{int(policy.get('delete_dialog_delay_seconds', 10))}秒", self.settings.emoji_timeout_id, callback_data="dm:wizard:delete_delay:input"),
             ],
         ]
-        if draft.get("message_mode") == "three_stage":
+        if content_type == "reply":
             keyboard.append([
-                premium_button(f"第1段后：{int(policy.get('stage1_delay_seconds', 5))}秒", self.settings.emoji_stats_id, callback_data="dm:wizard:stage1:cycle"),
-                premium_button(f"第2段后：{int(policy.get('stage2_delay_seconds', 3))}秒", self.settings.emoji_welcome_id, callback_data="dm:wizard:stage2:cycle"),
+                premium_button(f"删除延迟：{int(policy.get('delete_dialog_delay_seconds', 10))}秒", self.settings.emoji_timeout_id, callback_data="dm:wizard:delete_delay:input"),
             ])
+        if draft.get("message_mode") == "three_stage":
+            if content_type == "reply":
+                keyboard.append([
+                    premium_button(f"收尾延迟：{int(policy.get('stage2_delay_seconds', 3))}秒", self.settings.emoji_welcome_id, callback_data="dm:wizard:stage2:cycle"),
+                ])
+            else:
+                keyboard.append([
+                    premium_button(f"第1段后：{int(policy.get('stage1_delay_seconds', 5))}秒", self.settings.emoji_stats_id, callback_data="dm:wizard:stage1:cycle"),
+                    premium_button(f"第2段后：{int(policy.get('stage2_delay_seconds', 3))}秒", self.settings.emoji_welcome_id, callback_data="dm:wizard:stage2:cycle"),
+                ])
         keyboard.extend([
             [premium_button("继续输入文案", self.settings.emoji_start_id, callback_data="dm:wizard:cfg:done")],
             [

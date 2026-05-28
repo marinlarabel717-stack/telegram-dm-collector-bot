@@ -7,13 +7,15 @@ def content_type_label(content_type: str | None) -> str:
     mapping = {
         "text": "文本",
         "post": "PostBot 图文代码",
-        "media": "媒体",
+        "reply": "回复模式",
         "forward": "频道转发",
     }
     return mapping.get(str(content_type or "text"), "文本")
 
 
 def message_mode_label(message_mode: str | None, *, content_type: str | None = None) -> str:
+    if str(content_type or "") == "reply":
+        return "等待回复"
     return "三段式" if str(message_mode or "single") == "three_stage" else "单条"
 
 
@@ -34,24 +36,19 @@ def payload_preview(payload: dict | None, *, content_type: str | None = None, ma
                 parts.append(f"第3段：{closing}")
             return html.escape("\n".join(parts)[:max_len], quote=False)
         return html.escape(summary[:max_len], quote=False)
-    if kind == "media":
-        media_kind = str(payload.get("media_kind") or "file")
-        file_name = str(payload.get("file_name") or "未命名文件")
-        caption = str(payload.get("caption") or "").strip()
-        summary = f"{media_kind}｜{file_name}"
-        if caption:
-            summary += f"｜说明：{caption}"
-        if str(payload.get("mode") or "single") == "three_stage":
-            greeting = str(payload.get("greeting") or "").strip()[:60]
-            closing = str(payload.get("closing") or "").strip()[:60]
-            parts = []
-            if greeting:
-                parts.append(f"第1段：{greeting}")
-            parts.append(f"第2段：{summary[:120]}")
-            if closing:
-                parts.append(f"第3段：{closing}")
-            return html.escape("\n".join(parts)[:max_len], quote=False)
-        return html.escape(summary[:max_len], quote=False)
+    if kind == "reply":
+        greeting = str(payload.get("greeting") or "").strip()[:60]
+        reply_text = str(payload.get("body") or payload.get("reply_text") or "").strip()[:120]
+        closing = str(payload.get("closing") or "").strip()[:60]
+        keyword_rules = payload.get("reply_keyword_rules") or []
+        parts = []
+        if greeting:
+            parts.append(f"先打招呼：{greeting}")
+        parts.append(f"默认回复：{reply_text or '-'}")
+        parts.append(f"关键词规则：{len(keyword_rules)} 条")
+        if closing:
+            parts.append(f"收尾：{closing}")
+        return html.escape("\n".join(parts)[:max_len], quote=False)
     if kind == "forward":
         link = str(payload.get("forward_link") or "").strip()
         preview = str(payload.get("forward_preview") or "").strip()

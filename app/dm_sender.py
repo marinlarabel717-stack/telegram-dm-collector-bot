@@ -458,6 +458,8 @@ class DmSenderManager:
         return await self._send_text_message(client, entity, main_text, policy)
 
     async def _dispatch_payload(self, client, entity, payload: dict, content_type: str, policy: DMTaskPolicy):
+        if content_type == "reply":
+            return await self._dispatch_reply_payload(client, entity, payload, policy)
         mode = str(payload.get("mode") or "single")
         if mode != "three_stage":
             main_result = await self._dispatch_single_payload(client, entity, payload, content_type, policy)
@@ -479,6 +481,42 @@ class DmSenderManager:
             await asyncio.sleep(max(0.0, float(policy.stage2_delay_seconds or 0)))
             closing_result = await self._send_text_message(client, entity, closing, policy)
             all_messages.extend(self._collect_sent_messages(closing_result))
+        return main_sent, all_messages
+
+    async def _dispatch_reply_payload(self, client, entity, payload: dict, policy: DMTaskPolicy):
+        greeting = str(payload.get("greeting") or payload.get("text") or "").strip()
+        default_reply = str(payload.get("body") or payload.get("reply_text") or "").strip()
+        closing = str(payload.get("closing") or "").strip()
+        keyword_rules = payload.get("reply_keyword_rules") or []
+
+        all_messages = []
+        baseline_incoming_id = await self._latest_incoming_message_id(client, entity)
+        if greeting:
+            greeting_result = await self._send_text_message(client, entity, greeting, policy)
+            all_messages.extend(self._collect_sent_messages(greeting_result))
+
+        incoming_message = await self._wait_for_reply_message(
+            client,
+            entity,
+            after_message_id=baseline_incoming_id,
+            timeout_seconds=float(policy.reply_wait_timeout_seconds or 300),
+        )
+        reply_text, matched_keywords = self._pick_reply_text(incoming_message, default_reply, keyword_rules)
+        if not reply_text:
+            raise RuntimeError("对方回复了，但没有配置可发送的回复文案")
+
+        reply_delay = max(0.0, float(policy.reply_delay_seconds or 0))
+        if reply_delay > 0:
+            await asyncio.sleep(reply_delay)
+        reply_result = await self._send_text_message(client, entity, reply_text, policy)
+        all_messages.extend(self._collect_sent_messages(reply_result))
+        main_sent = self._normalize_sent_message(reply_result)
+
+        if closing:
+            await asyncio.sleep(max(0.0, float(policy.stage2_delay_seconds or 0)))
+            closing_result = await self._send_text_message(client, entity, closing, policy)
+            all_messages.extend(self._collect_sent_messages(closing_result))
+
         return main_sent, all_messages
 
     @staticmethod
@@ -522,6 +560,8 @@ class DmSenderManager:
             pin_delay_seconds=float(data.get("pin_delay_seconds") or 3),
             delete_dialog_after_send=bool(data.get("delete_dialog_after_send", False)),
             delete_dialog_delay_seconds=float(data.get("delete_dialog_delay_seconds") or 0),
+            reply_delay_seconds=float(data.get("reply_delay_seconds") or 5),
+            reply_wait_timeout_seconds=float(data.get("reply_wait_timeout_seconds") or 300),
             retry_policy=RetryPolicy(
                 max_retries=int(data.get("max_retries") or 3),
                 stop_account_after_user_frequent=int(data.get("stop_account_after_user_frequent") or 30),
@@ -552,6 +592,8 @@ class DmSenderManager:
             return "forward_forbidden", "这个目标不允许转发该帖子内容", False
         if "inline bot" in lowered or "bot response timeout" in lowered or "next_offset_invalid" in lowered:
             return "postbot_failed", "PostBot 内联结果获取失败", False
+        if "等待对方回复超时" in short:
+            return "reply_timeout", "等了很久，对方一直没回复", False
         if "username not occupied" in lowered or "cannot find" in lowered or "no user has" in lowered or "entity not found" in lowered or "nobody is using this username" in lowered or "username is unacceptable" in lowered:
             return "user_not_found", "用户不存在", False
         if "bot method invalid" in lowered or "bot invalid" in lowered:
@@ -811,6 +853,7 @@ class DmSenderManager:
     def _action_success_message(content_type: str) -> str:
         return {
             "text": "文本发送成功",
+            "reply": "回复模式发送成功",
             "post": "PostBot 内联文案发送成功",
             "media": "媒体发送成功",
             "forward": "频道帖子转发成功",
@@ -826,6 +869,43 @@ class DmSenderManager:
             return message
         current = max(0, int(current_count or 0))
         return f"{message}[{current}/{limit}]"
+
+    async def _latest_incoming_message_id(self, client, entity) -> int:
+        last_id = 0
+        async for message in client.iter_messages(entity, limit=10):
+            if message.out:
+                continue
+            last_id = max(last_id, int(getattr(message, "id", 0) or 0))
+        return last_id
+
+    async def _wait_for_reply_message(self, client, entity, *, after_message_id: int, timeout_seconds: float):
+        deadline = asyncio.get_running_loop().time() + max(1.0, timeout_seconds)
+        while asyncio.get_running_loop().time() < deadline:
+            async for message in client.iter_messages(entity, limit=10):
+                if message.out:
+                    continue
+                if int(getattr(message, "id", 0) or 0) <= after_message_id:
+                    continue
+                return message
+            await asyncio.sleep(1)
+        raise RuntimeError("等待对方回复超时")
+
+    @staticmethod
+    def _pick_reply_text(incoming_message, default_reply: str, keyword_rules: list[dict]) -> tuple[str, list[str]]:
+        incoming_text = str(
+            getattr(incoming_message, "raw_text", None)
+            or getattr(incoming_message, "message", None)
+            or ""
+        ).strip().lower()
+        matched_keywords: list[str] = []
+        for row in keyword_rules or []:
+            keywords = [str(item or "").strip().lower() for item in (row.get("keywords") or []) if str(item or "").strip()]
+            if not keywords:
+                continue
+            if any(keyword in incoming_text for keyword in keywords):
+                matched_keywords = keywords
+                return str(row.get("reply") or "").strip(), matched_keywords
+        return default_reply, matched_keywords
 
     @staticmethod
     def _failure_backoff_delay(error_code: str, policy: DMTaskPolicy) -> float:

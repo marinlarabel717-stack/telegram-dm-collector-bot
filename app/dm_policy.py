@@ -35,6 +35,8 @@ class DMTaskPolicy:
     pin_delay_seconds: float = 3.0
     delete_dialog_after_send: bool = False
     delete_dialog_delay_seconds: float = 0.0
+    reply_delay_seconds: float = 5.0
+    reply_wait_timeout_seconds: float = 300.0
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
 
     def should_rotate_account(self, success_count: int) -> bool:

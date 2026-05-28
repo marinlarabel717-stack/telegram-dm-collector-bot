@@ -69,6 +69,7 @@ DM_ERROR_LABELS = {
     "forward_forbidden": "这个目标不允许转发该帖子内容",
     "admin_required": "当前账号没有执行该操作的权限",
     "postbot_failed": "PostBot 内联结果获取失败",
+    "reply_timeout": "等了很久，对方一直没回复",
     "send_failed": "发送失败",
 }
 
