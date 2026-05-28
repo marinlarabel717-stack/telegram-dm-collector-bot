@@ -7,7 +7,7 @@ DEFAULT_EMOJI_IDS = {
     "welcome": "5296308529873828834",   # 🌠
     "inbox": "5954227490179255253",     # 🔵
     "stats": "6237934454019461140",     # 🧠
-    "export": "5282843764451195532",    # 🖥
+    "export": "5445355530111437729",    # 📤
     "success": "5312028599803460968",   # 🆗
     "upload": "5443127283898405358",    # 📥
     "waiting": "5296562641613897196",   # 🕜
@@ -17,7 +17,7 @@ DEFAULT_EMOJI_IDS = {
     "progress": "5352625743081775722",  # 🎚️
     "refresh": "5242232228737472707",   # ⚡
     "idea": "5193127592764394874",      # 💡
-    "back": "5253955286137338977",      # ⬅️
+    "back": "6323574371029884186",      # ⬅️
     "home": "5416041192905265756",      # 🏠
     "next": "5416117059207572332",      # ➡️
     "list": "6321041414067068140",      # 👤
@@ -46,7 +46,7 @@ RESTRICTION_META = {
     "unrestricted": (DEFAULT_EMOJI_IDS["completed"], "🟢", "无限制"),
     "temp_mutual": (DEFAULT_EMOJI_IDS["timeout"], "⏱️", "临时双向"),
     "permanent_mutual": (DEFAULT_EMOJI_IDS["error"], "❌", "永久双向"),
-    "geo_limited": (DEFAULT_EMOJI_IDS["upload"], "📥", "地区限制"),
+    "geo_limited": ("6321283126236552928", "😄", "地区限制"),
     "frozen": (DEFAULT_EMOJI_IDS["progress"], "🎚️", "冻结"),
     "spam_limited": (DEFAULT_EMOJI_IDS["error"], "❌", "官方限流"),
     "restricted": (DEFAULT_EMOJI_IDS["error"], "❌", "受限"),

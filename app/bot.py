@@ -47,6 +47,9 @@ from .version import __version__
 
 logger = logging.getLogger(__name__)
 BEIJING_TZ = timezone(timedelta(hours=8))
+PROXY_EMOJI_ID = "5235579174072112613"      # 🔗
+ROCKET_EMOJI_ID = "5188481279963715781"     # 🚀
+TRASH_EMOJI_ID = "5445267414562389170"      # 🗑
 
 
 class DmCollectorBot:
@@ -1248,15 +1251,15 @@ class DmCollectorBot:
                 premium_button("账号列表", self.settings.emoji_list_id, callback_data=f"account:list:{page}"),
             ],
             [
-                premium_button("代理管理", self.settings.emoji_upload_id, callback_data="account:proxy:manage"),
+                premium_button("代理管理", PROXY_EMOJI_ID, callback_data="account:proxy:manage"),
             ],
             [
-                premium_button("一键检查状态", self.settings.emoji_stats_id, callback_data="account:check_all"),
-                premium_button("一键清理无效", self.settings.emoji_error_id, callback_data="account:purge_invalid"),
+                premium_button("一键检查状态", ROCKET_EMOJI_ID, callback_data="account:check_all"),
+                premium_button("一键清理无效", TRASH_EMOJI_ID, callback_data="account:purge_invalid"),
             ],
             [
-                premium_button("导出无限制", self.settings.emoji_success_id, callback_data="account:export:unrestricted"),
-                premium_button("导出受限", self.settings.emoji_timeout_id, callback_data="account:export:limited"),
+                premium_button("导出无限制", self.settings.emoji_export_id, callback_data="account:export:unrestricted"),
+                premium_button("导出受限", self.settings.emoji_export_id, callback_data="account:export:limited"),
             ],
             [
                 premium_button("导出全部账号", self.settings.emoji_export_id, callback_data="account:export:all"),
@@ -1290,12 +1293,12 @@ class DmCollectorBot:
 
         keyboard: list[list] = [
             [
-                premium_button("一键检查状态", self.settings.emoji_stats_id, callback_data="account:check_all"),
-                premium_button("一键清理无效", self.settings.emoji_error_id, callback_data="account:purge_invalid"),
+                premium_button("一键检查状态", ROCKET_EMOJI_ID, callback_data="account:check_all"),
+                premium_button("一键清理无效", TRASH_EMOJI_ID, callback_data="account:purge_invalid"),
             ],
             [
-                premium_button("导出无限制", self.settings.emoji_success_id, callback_data="account:export:unrestricted"),
-                premium_button("导出受限", self.settings.emoji_timeout_id, callback_data="account:export:limited"),
+                premium_button("导出无限制", self.settings.emoji_export_id, callback_data="account:export:unrestricted"),
+                premium_button("导出受限", self.settings.emoji_export_id, callback_data="account:export:limited"),
             ],
             [
                 premium_button("导出全部账号", self.settings.emoji_export_id, callback_data="account:export:all"),
@@ -1335,7 +1338,7 @@ class DmCollectorBot:
     async def _show_proxy_manage_menu(self, query) -> None:
         proxies = self.db.get_global_proxies()
         lines = [
-            f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>代理管理</b>",
+            f"{tg_emoji(PROXY_EMOJI_ID, '🔗')} <b>代理管理</b>",
             f"当前代理池：<code>{html.escape(summarize_proxy_pool(proxies), quote=False)}</code>",
             "",
             "支持直接发送单条代理，或上传 <code>.txt</code> 批量导入。",
@@ -1607,7 +1610,7 @@ class DmCollectorBot:
 
             total_alive = self.db.count_accounts()
             lines = [
-                f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>批量检查状态完成</b>",
+                f"{tg_emoji(ROCKET_EMOJI_ID, '🚀')} <b>批量检查状态完成</b>",
                 f"总检测账号：<code>{total_checked}</code>",
                 f"无限制：<code>{unrestricted}</code>",
                 f"受限：<code>{limited}</code>",
@@ -3587,7 +3590,7 @@ class DmCollectorBot:
     ) -> str:
         return "\n".join(
             [
-                f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>正在批量检查账号状态</b>",
+                f"{tg_emoji(ROCKET_EMOJI_ID, '🚀')} <b>正在批量检查账号状态</b>",
                 f"进度：<code>{processed}/{total}</code> · 并发：<code>{parallel}</code>",
                 f"最近完成：<code>{html.escape(current_label[:36], quote=False)}</code>",
                 "",
