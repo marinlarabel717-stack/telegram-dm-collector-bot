@@ -2049,6 +2049,13 @@ class DmCollectorBot:
         await self._safe_edit(query, self._dm_select_accounts_text(draft), self._build_dm_account_selection_keyboard(draft))
 
     async def _stop_dm_task(self, query, task_id: int, page: int = 1) -> None:
+        task = self.dm_repository.get_dm_task(task_id)
+        current_status = str((task["status"] if task else "") or "")
+        self.dm_repository.mark_dm_task_status(
+            task_id,
+            current_status if current_status in {"queued", "running", "paused"} else "running",
+            last_error="管理员手动停止任务",
+        )
         self.dm_repository.request_dm_task_stop(task_id)
         runner = self.dm_task_runners.get(task_id)
         if runner and not runner.done():

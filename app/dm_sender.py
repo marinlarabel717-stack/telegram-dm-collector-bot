@@ -82,8 +82,14 @@ class DmSenderManager:
         try:
             await asyncio.gather(*workers, return_exceptions=False)
         except asyncio.CancelledError:
+            current_task = self.repository.get_dm_task(task_id)
+            stop_reason = str((current_task["last_error"] if current_task else "") or "").strip()
+            if stop_reason == "管理员手动停止任务":
+                final_reason = stop_reason
+            else:
+                final_reason = stop_reason or "任务运行被中断，可能是机器人重启或进程被打断"
             self.repository.request_dm_task_stop(task_id)
-            self.repository.mark_dm_task_status(task_id, "stopped", last_error="管理员手动停止任务")
+            self.repository.mark_dm_task_status(task_id, "stopped", last_error=final_reason)
             raise
         except Exception as exc:  # noqa: BLE001
             logger.exception(compose_log(f"发送器异常｜{exc}", task_id=task_id))
@@ -225,7 +231,7 @@ class DmSenderManager:
                     raw_error = self.collection_manager._short_error(exc)
                     error_code, error_message, frequent_hit = self._classify_send_error(exc)
                     post_attempt_delay = self._failure_backoff_delay(error_code, policy)
-                    if frequent_hit:
+                    if frequent_hit and error_code != "too_many_requests":
                         frequent_errors += 1
                     if error_code == "too_many_requests":
                         too_many_requests_hits += 1
@@ -242,7 +248,7 @@ class DmSenderManager:
                         task_id,
                         account_id,
                         fail_delta=1,
-                        frequent_delta=1 if frequent_hit else 0,
+                        frequent_delta=1 if frequent_hit and error_code != "too_many_requests" else 0,
                         last_error=error_message,
                     )
                     log_message = error_message
