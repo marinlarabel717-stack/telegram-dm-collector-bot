@@ -375,7 +375,8 @@ class DmRepository:
             return self.db.conn.execute(
                 """
                 SELECT l.*, r.normalized_input, a.username AS account_username, a.phone AS account_phone, a.display_name AS account_display_name,
-                       ta.sent_success_count AS account_sent_success_count, ta.sent_fail_count AS account_sent_fail_count
+                       ta.sent_success_count AS account_sent_success_count, ta.sent_fail_count AS account_sent_fail_count,
+                       ta.last_error AS account_last_error
                 FROM dm_send_logs l
                 LEFT JOIN dm_recipients r ON r.id = l.recipient_id
                 LEFT JOIN accounts a ON a.id = l.account_id

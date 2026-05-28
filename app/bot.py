@@ -3406,6 +3406,13 @@ class DmCollectorBot:
         detail = self._humanize_dm_error(None, str(row["message"] or row["raw_error"] or "-"))
         if "[" in detail and detail.endswith("]"):
             return detail
+        if "请求过于频繁" in detail:
+            limit = int(policy.get("stop_account_after_too_many_requests") or 0)
+            if limit > 0:
+                last_error = str(row["account_last_error"] or "") if "account_last_error" in row.keys() else ""
+                match = re.search(r"(\d+)\s*/\s*(\d+)", last_error)
+                if match:
+                    return f"{detail}[{match.group(1)}/{match.group(2)}]"
         if not self._is_dm_frequency_log(detail):
             return detail
         limit = int(policy.get("per_account_success_limit") or 0)

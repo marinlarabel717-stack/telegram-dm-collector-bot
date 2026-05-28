@@ -222,7 +222,13 @@ class DmSenderManager:
                         last_error=error_message,
                     )
                     log_message = error_message
-                    if frequent_hit:
+                    if error_code == "too_many_requests":
+                        log_message = self._append_limit_progress(
+                            log_message,
+                            too_many_requests_hits,
+                            policy.retry_policy.stop_account_after_too_many_requests,
+                        )
+                    elif frequent_hit:
                         log_message = self._append_limit_progress(log_message, success_count, policy)
                     self.repository.add_send_log(
                         task_id=task_id,
@@ -487,11 +493,14 @@ class DmSenderManager:
         }.get(str(content_type or "text"), "发送成功")
 
     @staticmethod
-    def _append_limit_progress(message: str, success_count: int, policy: DMTaskPolicy) -> str:
-        limit = int(policy.per_account_success_limit or 0)
+    def _append_limit_progress(message: str, current_count: int, policy_or_limit) -> str:
+        if isinstance(policy_or_limit, DMTaskPolicy):
+            limit = int(policy_or_limit.per_account_success_limit or 0)
+        else:
+            limit = int(policy_or_limit or 0)
         if limit <= 0:
             return message
-        current = max(0, int(success_count or 0))
+        current = max(0, int(current_count or 0))
         return f"{message}[{current}/{limit}]"
 
     @staticmethod
