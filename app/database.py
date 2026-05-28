@@ -83,6 +83,12 @@ class Database:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS collect_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     requester_id INTEGER NOT NULL,
@@ -473,6 +479,56 @@ class Database:
                 """,
                 (proxy_type, proxy_host, proxy_port, proxy_username, proxy_password, account_id),
             )
+            self.conn.commit()
+
+    def get_global_proxy(self) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.conn.execute("SELECT value FROM app_settings WHERE key='global_proxy'").fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            data = json.loads(str(row[0]))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def set_global_proxy(
+        self,
+        *,
+        proxy_type: str,
+        proxy_host: str,
+        proxy_port: int,
+        proxy_username: str,
+        proxy_password: str,
+    ) -> None:
+        payload = json.dumps(
+            {
+                "proxy_type": proxy_type,
+                "proxy_host": proxy_host,
+                "proxy_port": proxy_port,
+                "proxy_username": proxy_username,
+                "proxy_password": proxy_password,
+            },
+            ensure_ascii=False,
+        )
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES ('global_proxy', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (payload,),
+            )
+            self.conn.commit()
+
+    def clear_global_proxy(self) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM app_settings WHERE key='global_proxy'")
             self.conn.commit()
 
     # ---------- collection task storage ----------

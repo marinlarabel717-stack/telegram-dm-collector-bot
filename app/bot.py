@@ -207,12 +207,12 @@ class DmCollectorBot:
             await self._delete_account(query, account_id)
             return
         if data.startswith("account:proxy:set:"):
-            _, _, _, proxy_type, account_id_text = data.split(":")
-            await self._start_account_proxy_input(query, update.effective_user.id, int(account_id_text), proxy_type)
+            parts = data.split(":")
+            proxy_type = parts[3] if len(parts) >= 4 else "http"
+            await self._start_global_proxy_input(query, update.effective_user.id, proxy_type)
             return
-        if data.startswith("account:proxy:clear:"):
-            account_id = int(data.split(":")[-1])
-            await self._clear_account_proxy(query, account_id)
+        if data.startswith("account:proxy:clear"):
+            await self._clear_global_proxy(query)
             return
         if data == "collect:new":
             await self._show_collect_create_menu(query)
@@ -894,18 +894,9 @@ class DmCollectorBot:
             )
             return
 
-        if mode == "await_account_proxy":
+        if mode in {"await_account_proxy", "await_global_proxy"}:
             draft = state.setdefault("draft", {})
             proxy_type = str(draft.get("proxy_type") or "").strip().lower()
-            account_id = int(draft.get("account_id") or 0)
-            account = self.db.get_account(account_id)
-            if not account:
-                self._clear_state(update.effective_user.id)
-                await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 账号不存在或已删除。",
-                    parse_mode=ParseMode.HTML,
-                )
-                return
             try:
                 proxy_data = parse_account_proxy_input(text, proxy_type)
             except ValueError as exc:
@@ -914,12 +905,12 @@ class DmCollectorBot:
                     parse_mode=ParseMode.HTML,
                 )
                 return
-            self.db.update_account_proxy(account_id, **proxy_data)
+            self.db.set_global_proxy(**proxy_data)
             self._clear_state(update.effective_user.id)
             await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_success_id, '🆗')} 代理已保存：<code>{html.escape(format_account_proxy_label(self.db.get_account(account_id)), quote=False)}</code>",
+                f"{tg_emoji(self.settings.emoji_success_id, '🆗')} 全局代理已保存：<code>{html.escape(format_account_proxy_label(self.db.get_global_proxy()), quote=False)}</code>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=self._build_account_detail_keyboard(account_id),
+                reply_markup=self._single_back_keyboard("menu:accounts"),
             )
             return
 
@@ -1075,18 +1066,27 @@ class DmCollectorBot:
         count = self.db.count_accounts()
         stats = self.db.get_account_status_counts()
         restriction_stats = self.dm_repository.get_account_restriction_summary_counts()
+        global_proxy = self.db.get_global_proxy()
         text = (
             f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>账号管理</b>\n"
             f"当前存活账号：<code>{count}</code>\n"
             f"运行中：<code>{stats['active']}</code> · 检测中：<code>{stats['checking']}</code> · 采集中：<code>{stats['collecting']}</code>\n"
             f"状态：无限制 <code>{restriction_stats['unrestricted']}</code> · 地理限制 <code>{restriction_stats['geo_limited']}</code> · 受限 <code>{restriction_stats['limited']}</code> · 冻结 <code>{restriction_stats['frozen']}</code> · 待检测 <code>{restriction_stats['unknown']}</code>\n"
+            f"全局代理：<code>{html.escape(format_account_proxy_label(global_proxy), quote=False)}</code>\n"
             f"待清理无效：<code>{stats['invalid']}</code>\n\n"
-            f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。现在也支持按状态导出原始 session/zip。"
+            f"上传 .session 后会立即做一次登录验证；点“检查状态”会额外向 SpamBot 读取私信限制状态。现在所有账号统一走全局代理。"
         )
         keyboard = [
             [
                 premium_button("上传 session", self.settings.emoji_upload_id, callback_data="account:upload"),
                 premium_button("账号列表", self.settings.emoji_list_id, callback_data=f"account:list:{page}"),
+            ],
+            [
+                premium_button("HTTP代理", self.settings.emoji_upload_id, callback_data="account:proxy:set:http"),
+                premium_button("SOCKS5代理", self.settings.emoji_list_id, callback_data="account:proxy:set:socks5"),
+            ],
+            [
+                premium_button("清空全局代理", self.settings.emoji_timeout_id, callback_data="account:proxy:clear"),
             ],
             [
                 premium_button("一键检查状态", self.settings.emoji_stats_id, callback_data="account:check_all"),
@@ -1170,39 +1170,30 @@ class DmCollectorBot:
             return
         await self._safe_edit(query, self._format_account_text(account), self._build_account_detail_keyboard(account_id))
 
-    async def _start_account_proxy_input(self, query, user_id: int, account_id: int, proxy_type: str) -> None:
-        account = self.db.get_account(account_id)
-        if not account:
-            await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
-            return
+    async def _start_global_proxy_input(self, query, user_id: int, proxy_type: str) -> None:
         normalized_type = str(proxy_type or "").strip().lower()
         if normalized_type not in PROXY_TYPE_LABELS:
             await query.answer("代理类型不支持", show_alert=True)
             return
         self.user_states[user_id] = {
-            "mode": "await_account_proxy",
+            "mode": "await_global_proxy",
             "draft": {
-                "account_id": account_id,
                 "proxy_type": normalized_type,
             },
         }
-        label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+        current_proxy = self.db.get_global_proxy()
         text = (
-            f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>设置 {PROXY_TYPE_LABELS[normalized_type]} 代理</b>\n"
-            f"账号：<code>{html.escape(str(label), quote=False)}</code>\n"
-            f"当前：<code>{html.escape(format_account_proxy_label(account), quote=False)}</code>\n\n"
-            f"请直接发送：<code>ip:端口:账号:密码</code>"
+            f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>设置全局 {PROXY_TYPE_LABELS[normalized_type]} 代理</b>\n"
+            f"当前：<code>{html.escape(format_account_proxy_label(current_proxy), quote=False)}</code>\n\n"
+            f"请直接发送：<code>ip:端口:账号:密码</code>\n"
+            f"保存后所有账号都会统一走这条代理。"
         )
-        await self._safe_edit(query, text, self._single_back_keyboard(f"account:view:{account_id}"))
+        await self._safe_edit(query, text, self._single_back_keyboard("menu:accounts"))
 
-    async def _clear_account_proxy(self, query, account_id: int) -> None:
-        account = self.db.get_account(account_id)
-        if not account:
-            await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
-            return
-        self.db.update_account_proxy(account_id, proxy_type=None, proxy_host=None, proxy_port=None, proxy_username=None, proxy_password=None)
-        await self._show_account_detail(query, account_id)
-        await query.answer("代理已清空", show_alert=False)
+    async def _clear_global_proxy(self, query) -> None:
+        self.db.clear_global_proxy()
+        await self._show_accounts_menu(query, page=1)
+        await query.answer("全局代理已清空", show_alert=False)
 
     async def _check_account(self, query, account_id: int) -> None:
         account = self.db.get_account(account_id)
@@ -2681,7 +2672,7 @@ class DmCollectorBot:
             f"用户名：<code>{html.escape(str(account['username'] or '-'), quote=False)}</code>",
             f"手机号：<code>{html.escape(str(account['phone'] or '-'), quote=False)}</code>",
             f"User ID：<code>{account['tg_user_id'] or '-'}</code>",
-            f"代理：<code>{html.escape(format_account_proxy_label(account), quote=False)}</code>",
+            f"全局代理：<code>{html.escape(format_account_proxy_label(self.db.get_global_proxy()), quote=False)}</code>",
             f"最近检测：<code>{account['last_checked_at'] or '-'}</code>",
         ]
         if account["restriction_checked_at"]:
@@ -2777,7 +2768,7 @@ class DmCollectorBot:
             f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>上传 session</b>\n"
             f"请直接发送一个 <code>.session</code> 文件，或发送包含 <code>.session + .json</code> 的 <code>.zip</code> 压缩包。\n\n"
             f"收到后会自动：\n"
-            f"1. 保存/解压文件\n2. 验证是否已登录\n3. 写入账号列表\n4. 需要的话可在账号详情里补 HTTP / SOCKS5 代理"
+            f"1. 保存/解压文件\n2. 验证是否已登录\n3. 写入账号列表\n4. 需要的话可在账号管理里设置全局 HTTP / SOCKS5 代理"
         )
 
     def _dm_targets_prompt_text(self) -> str:
@@ -3255,13 +3246,6 @@ class DmCollectorBot:
             [
                 premium_button("检测状态", self.settings.emoji_stats_id, callback_data=f"account:check:{account_id}"),
                 premium_button("删除账号", self.settings.emoji_error_id, callback_data=f"account:delete:{account_id}"),
-            ],
-            [
-                premium_button("HTTP代理", self.settings.emoji_upload_id, callback_data=f"account:proxy:set:http:{account_id}"),
-                premium_button("SOCKS5代理", self.settings.emoji_list_id, callback_data=f"account:proxy:set:socks5:{account_id}"),
-            ],
-            [
-                premium_button("清空代理", self.settings.emoji_timeout_id, callback_data=f"account:proxy:clear:{account_id}"),
             ],
             [
                 premium_button("返回账号列表", self.settings.emoji_back_id, callback_data="account:list:1"),

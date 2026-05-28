@@ -589,7 +589,7 @@ class CollectionManager:
         session_base = str(session_file)
         if session_base.endswith(".session"):
             session_base = session_base[:-8]
-        proxy = build_telethon_proxy(account_row)
+        proxy = build_telethon_proxy(self.db.get_global_proxy())
         try:
             return TelegramClient(session_base, self.settings.api_id, self.settings.api_hash, proxy=proxy)
         except ValueError as exc:
