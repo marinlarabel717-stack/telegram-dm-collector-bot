@@ -49,11 +49,14 @@ logger = logging.getLogger(__name__)
 BEIJING_TZ = timezone(timedelta(hours=8))
 PROXY_EMOJI_ID = "5235579174072112613"      # 🔗
 ROCKET_EMOJI_ID = "5188481279963715781"     # 🚀
-TRASH_EMOJI_ID = "5445267414562389170"      # 🗑
+TRASH_EMOJI_ID = "5408832111773757273"      # 🗑
 EXPORT_EMOJI_ID = "5445355530111437729"     # 📤
 ACCOUNTS_EMOJI_ID = "6321266496123181150"   # 😃
 COLLECT_EMOJI_ID = "5203993413346680064"    # 📊
 DM_MENU_EMOJI_ID = "5253742260054409879"    # ✉️
+DM_NEW_EMOJI_ID = "5233588456730427459"     # 🆕
+DM_TASK_LIST_EMOJI_ID = "5321178215878780131"  # 📋
+STOP_EMOJI_ID = "6271674836628541366"       # 🛑
 
 
 class DmCollectorBot:
@@ -1696,7 +1699,7 @@ class DmCollectorBot:
         rows = self.db.list_invalid_accounts()
         if not rows:
             text = (
-                f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>没有可清理的无效账号</b>\n"
+                f"{tg_emoji(TRASH_EMOJI_ID, '🗑')} <b>没有可清理的无效账号</b>\n"
                 f"当前列表里只剩存活账号。"
             )
             await self._safe_edit(query, text, InlineKeyboardMarkup([
@@ -1778,7 +1781,7 @@ class DmCollectorBot:
         )
         keyboard = [
             [
-                premium_button("新建私信任务", self.settings.emoji_idea_id, callback_data="dm:new"),
+                premium_button("新建私信任务", DM_NEW_EMOJI_ID, callback_data="dm:new"),
                 premium_button("任务列表", self.settings.emoji_history_id, callback_data="dm:tasks"),
             ],
             [
@@ -2407,7 +2410,7 @@ class DmCollectorBot:
         page = max(1, min(page, total_pages))
         tasks = self.dm_repository.list_dm_tasks(limit=per_page, offset=(page - 1) * per_page)
         lines = [
-            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>私信任务列表</b>",
+            f"{tg_emoji(DM_TASK_LIST_EMOJI_ID, '📋')} <b>私信任务列表</b>",
             f"页码：<code>{page}/{total_pages}</code>",
             f"任务总数：<code>{total}</code>",
         ]
@@ -2435,7 +2438,7 @@ class DmCollectorBot:
         if nav:
             keyboard.append(nav)
         keyboard.append([
-            premium_button("一键清空任务", self.settings.emoji_error_id, callback_data="dm:tasks:clear"),
+            premium_button("一键清空任务", TRASH_EMOJI_ID, callback_data="dm:tasks:clear"),
             premium_button("刷新列表", self.settings.emoji_refresh_id, callback_data=f"dm:tasks:{page}"),
         ])
         keyboard.append([
@@ -2453,7 +2456,7 @@ class DmCollectorBot:
         )
         keyboard = InlineKeyboardMarkup([
             [
-                premium_button("确认清空", self.settings.emoji_error_id, callback_data="dm:tasks:clear:confirm"),
+                premium_button("确认清空", TRASH_EMOJI_ID, callback_data="dm:tasks:clear:confirm"),
                 premium_button("返回列表", self.settings.emoji_back_id, callback_data="dm:tasks:1"),
             ]
         ])
@@ -3186,7 +3189,7 @@ class DmCollectorBot:
 
     def _dm_targets_prompt_text(self) -> str:
         return (
-            f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>新建私信任务</b>\n"
+            f"{tg_emoji(DM_MENU_EMOJI_ID, '✉️')} <b>新建私信任务</b>\n"
             f"请直接发送用户名单，或上传 <code>.txt</code> 文件。\n\n"
             f"支持格式：\n"
             f"<code>@username</code>\n<code>username</code>\n<code>https://t.me/username</code>\n<code>+1649494646</code>"
@@ -4008,7 +4011,7 @@ class DmCollectorBot:
             if pending_count > 0:
                 keyboard.append([premium_button(f"待发送 {pending_count}", self.settings.emoji_waiting_id, callback_data=f"dm:refresh:{task_id}:{page}")])
         if task and task["status"] in {"queued", "running"}:
-            keyboard.append([premium_button("停止任务", self.settings.emoji_timeout_id, callback_data=f"dm:stop:{task_id}:{page}")])
+            keyboard.append([premium_button("停止任务", STOP_EMOJI_ID, callback_data=f"dm:stop:{task_id}:{page}")])
         keyboard.extend([
             [
                 premium_button("导出结果", EXPORT_EMOJI_ID, callback_data=f"dm:export:{task_id}"),
