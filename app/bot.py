@@ -1555,7 +1555,7 @@ class DmCollectorBot:
         state = self.user_states.get(user_id) or {}
         draft = state.get("draft") or {}
         policy = draft.setdefault("policy", {})
-        options = [(5, 10), (8, 15), (15, 30), (30, 45)]
+        options = [(1, 3), (2, 5), (5, 10), (8, 15), (15, 30), (30, 45)]
         current = (int(policy.get("delay_min") or 8), int(policy.get("delay_max") or 15))
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else (8, 15)
         policy["delay_min"], policy["delay_max"] = next_value

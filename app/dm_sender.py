@@ -146,12 +146,14 @@ class DmSenderManager:
                 recipient_id = int(recipient["recipient_id"])
                 target = str(recipient["normalized_input"])
                 retry_count = int(recipient["retry_count"] or 0)
+                post_attempt_delay = 0.0
                 self.repository.mark_dm_recipient_sending(task_id, recipient_id, account_id)
                 try:
                     entity = await client.get_input_entity(target)
                     sent_message = await self._dispatch_payload(client, entity, payload, content_type, policy)
                     await self._apply_post_send_actions(client, entity, sent_message, policy, task_id=task_id, account_id=account_id, recipient_id=recipient_id)
                     success_count += 1
+                    post_attempt_delay = policy.delay_window.next_delay()
                     self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
                     self.repository.update_dm_task_account(task_id, account_id, success_delta=1, last_error=None)
                     self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="success", message=self._action_success_message(content_type))
@@ -159,6 +161,7 @@ class DmSenderManager:
                 except FloodWaitError as exc:
                     wait_seconds = int(getattr(exc, "seconds", 0) or 0)
                     if retry_count + 1 > policy.retry_policy.max_retries:
+                        post_attempt_delay = self._failure_backoff_delay("flood_wait_exhausted", policy)
                         self.repository.mark_dm_recipient_result(
                             task_id,
                             recipient_id,
@@ -204,6 +207,7 @@ class DmSenderManager:
                 except Exception as exc:  # noqa: BLE001
                     raw_error = self.collection_manager._short_error(exc)
                     error_code, error_message, frequent_hit = self._classify_send_error(exc)
+                    post_attempt_delay = self._failure_backoff_delay(error_code, policy)
                     if frequent_hit:
                         frequent_errors += 1
                     if error_code == "too_many_requests":
@@ -281,7 +285,8 @@ class DmSenderManager:
                     queue.task_done()
                     self.repository.sync_dm_task_metrics(task_id)
                     await self._emit_progress(task_id)
-                    await asyncio.sleep(policy.delay_window.next_delay())
+                    if post_attempt_delay > 0 and not self.repository.should_stop_dm_task(task_id) and not queue.empty():
+                        await asyncio.sleep(post_attempt_delay)
         except RPCError as exc:
             short = self.collection_manager._short_error(exc)
             self.repository.update_dm_task_account(task_id, account_id, status="error", last_error=short)
@@ -584,6 +589,14 @@ class DmSenderManager:
             return message
         current = max(0, int(current_count or 0))
         return f"{message}[{current}/{limit}]"
+
+    @staticmethod
+    def _failure_backoff_delay(error_code: str, policy: DMTaskPolicy) -> float:
+        if error_code in {"too_many_requests", "peer_flood", "mutual_limit", "frozen", "flood_wait_exhausted"}:
+            return max(2.0, min(6.0, float(policy.delay_window.min_seconds or 0)))
+        if error_code in {"account_disconnected", "session_invalid"}:
+            return 0.0
+        return 0.35
 
     @staticmethod
     def _detect_dm_media_kind(path: Path, media_kind: str | None) -> str:
