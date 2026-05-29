@@ -135,6 +135,18 @@ class Database:
                     FOREIGN KEY (account_id) REFERENCES accounts(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS collect_task_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    account_id INTEGER,
+                    channel TEXT,
+                    level TEXT NOT NULL DEFAULT 'info',
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (task_id) REFERENCES collect_tasks(id) ON DELETE CASCADE,
+                    FOREIGN KEY (account_id) REFERENCES accounts(id)
+                );
+
                 CREATE TABLE IF NOT EXISTS collect_task_usernames (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id INTEGER NOT NULL,
@@ -170,6 +182,7 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
                 CREATE INDEX IF NOT EXISTS idx_collect_tasks_status ON collect_tasks(status);
                 CREATE INDEX IF NOT EXISTS idx_task_channels_task_id ON collect_task_channels(task_id);
+                CREATE INDEX IF NOT EXISTS idx_collect_task_logs_task_id ON collect_task_logs(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_usernames_task_id ON collect_task_usernames(task_id);
                 CREATE INDEX IF NOT EXISTS idx_task_members_task_id ON collect_task_members(task_id);
                 """
@@ -654,6 +667,33 @@ class Database:
             return self.conn.execute(
                 "SELECT * FROM collect_task_channels WHERE task_id=? ORDER BY id ASC",
                 (task_id,),
+            ).fetchall()
+
+    def add_collect_task_log(self, task_id: int, *, message: str, account_id: int | None = None, channel: str | None = None, level: str = "info") -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO collect_task_logs (task_id, account_id, channel, level, message)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (task_id, account_id, channel, level, message),
+            )
+            self.conn.execute(
+                """
+                DELETE FROM collect_task_logs
+                WHERE task_id=? AND id NOT IN (
+                    SELECT id FROM collect_task_logs WHERE task_id=? ORDER BY id DESC LIMIT 200
+                )
+                """,
+                (task_id, task_id),
+            )
+            self.conn.commit()
+
+    def list_collect_task_logs(self, task_id: int, *, limit: int = 5) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                "SELECT * FROM collect_task_logs WHERE task_id=? ORDER BY id DESC LIMIT ?",
+                (task_id, limit),
             ).fetchall()
 
     def set_collect_task_progress_message(self, task_id: int, chat_id: int, message_id: int) -> None:

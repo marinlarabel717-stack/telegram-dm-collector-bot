@@ -1577,7 +1577,7 @@ class DmCollectorBot:
             kept_other_errors: list[str] = []
             total_checked = len(rows)
             processed = 0
-            parallel = min(30, total_checked)
+            parallel = min(50, total_checked)
 
             semaphore = asyncio.Semaphore(parallel)
 
@@ -3208,6 +3208,7 @@ class DmCollectorBot:
             return self._not_found_text("任务不存在或已被删除。")
         channels = self.db.list_collect_task_channels(task_id)
         visible_channels = [item for item in channels if item["status"] != "completed"]
+        recent_task_logs = self.db.list_collect_task_logs(task_id, limit=5)
         display_code = self._task_display_code(task)
         task_type = task["task_type"] or "channel"
         unit = "群组" if task_type == "group" else "频道"
@@ -3234,10 +3235,22 @@ class DmCollectorBot:
             lines.append(f"错误：<code>{html.escape(str(task['last_error']), quote=False)}</code>")
         if task["status"] == "stopped" and int(task["total_messages_scanned"] or 0) > 0:
             lines.append("提示：<code>已保留当前已采集结果，可直接点击“导出结果”</code>")
-        if visible_channels:
+        if task_type == "group":
             lines.append("")
-            section_title = "采集任务日志（最新5条）" if task_type == "group" else f"{unit}子任务"
-            lines.append(f"<b>{section_title}</b>")
+            lines.append("<b>采集任务日志（最新5条）</b>")
+            if recent_task_logs:
+                for row in recent_task_logs:
+                    timestamp = self._format_beijing_timestamp(row["created_at"], short=True)
+                    account_suffix = f" · 账号 <code>{row['account_id']}</code>" if row["account_id"] else ""
+                    channel_suffix = f" · <code>{html.escape(str(row['channel']), quote=False)}</code>" if row["channel"] else ""
+                    lines.append(
+                        f"• <code>{timestamp}</code>{account_suffix}{channel_suffix} · {html.escape(str(row['message']), quote=False)}"
+                    )
+            else:
+                lines.append("• <code>暂时还没有日志</code>")
+        elif visible_channels:
+            lines.append("")
+            lines.append(f"<b>{unit}子任务</b>")
             for item in visible_channels[:5]:
                 item_runtime = self._format_runtime(item["started_at"], item["finished_at"])
                 runtime_suffix = f" · 已跑 <code>{item_runtime}</code>" if item["status"] == "running" and item_runtime else ""

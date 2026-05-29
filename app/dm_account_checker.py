@@ -16,8 +16,7 @@ from .dm_repository import DmRepository
 logger = logging.getLogger(__name__)
 BEIJING_TZ = timezone(timedelta(hours=8))
 ACCOUNT_CHECK_RECONNECT_RETRIES = 2
-SPAMBOT_REPLY_POLL_INTERVAL_SECONDS = 0.5
-SPAMBOT_REPLY_MAX_POLLS = 16
+SPAMBOT_REPLY_TIMEOUT_SECONDS = 5
 
 
 @dataclass(slots=True)
@@ -145,23 +144,12 @@ class DmAccountChecker:
             if not await client.is_user_authorized():
                 raise RuntimeError("session 未登录")
             entity = await client.get_input_entity("SpamBot")
-            last_incoming_id = 0
-            async for message in client.iter_messages(entity, limit=10):
-                if message.out:
-                    continue
-                last_incoming_id = max(last_incoming_id, int(getattr(message, "id", 0) or 0))
-            await client.send_message(entity, "/start")
-
-            for _ in range(SPAMBOT_REPLY_MAX_POLLS):
-                await asyncio.sleep(SPAMBOT_REPLY_POLL_INTERVAL_SECONDS)
-                async for message in client.iter_messages(entity, limit=10):
-                    if message.out:
-                        continue
-                    if int(getattr(message, "id", 0) or 0) <= last_incoming_id:
-                        continue
-                    text = (getattr(message, "raw_text", None) or getattr(message, "message", None) or "").strip()
-                    if text:
-                        return text
+            async with client.conversation(entity, timeout=SPAMBOT_REPLY_TIMEOUT_SECONDS) as conversation:
+                await conversation.send_message("/start")
+                message = await conversation.get_response()
+            text = (getattr(message, "raw_text", None) or getattr(message, "message", None) or "").strip()
+            if text:
+                return text
             raise RuntimeError("未收到 SpamBot 回复")
         finally:
             if owns_client and client is not None:
