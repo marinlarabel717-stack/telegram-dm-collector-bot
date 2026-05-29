@@ -553,6 +553,10 @@ class DmCollectorBot:
         if data == "wizard:acc:auto":
             await self._wizard_auto_accounts(query, update.effective_user.id)
             return
+        if data.startswith("wizard:acc:page:"):
+            page = int(data.split(":")[-1])
+            await self._wizard_set_account_page(query, update.effective_user.id, page)
+            return
         if data.startswith("wizard:acc:toggle:"):
             account_id = int(data.split(":")[-1])
             await self._wizard_toggle_account(query, update.effective_user.id, account_id)
@@ -2724,7 +2728,7 @@ class DmCollectorBot:
             markup = self._build_group_filters_keyboard(draft)
         else:
             state["mode"] = "select_accounts"
-            text = self._select_accounts_text(draft["channels"], days, draft["account_ids"], task_type=draft.get("task_type", "channel"), filters=draft.get("filters"))
+            text = self._select_accounts_text(draft["channels"], days, draft["account_ids"], task_type=draft.get("task_type", "channel"), filters=draft.get("filters"), page=int(draft.get("account_page") or 1))
             markup = self._build_account_selection_keyboard(draft)
         if query is not None:
             await self._safe_edit(query, text, markup)
@@ -2768,6 +2772,7 @@ class DmCollectorBot:
                 draft.get("account_ids") or [],
                 task_type=draft.get("task_type", "channel"),
                 filters=draft.get("filters"),
+                page=int(draft.get("account_page") or 1),
             ),
             self._build_account_selection_keyboard(draft),
         )
@@ -2821,6 +2826,7 @@ class DmCollectorBot:
                 draft.get("account_ids") or [],
                 task_type=draft.get("task_type", "channel"),
                 filters=draft.get("filters"),
+                page=int(draft.get("account_page") or 1),
             ),
             self._build_account_selection_keyboard(draft),
         )
@@ -2836,6 +2842,21 @@ class DmCollectorBot:
             draft["account_ids"],
             task_type=draft.get("task_type", "channel"),
             filters=draft.get("filters"),
+            page=int(draft.get("account_page") or 1),
+        )
+        await self._safe_edit(query, text, self._build_account_selection_keyboard(draft))
+
+    async def _wizard_set_account_page(self, query, user_id: int, page: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        draft["account_page"] = page
+        text = self._select_accounts_text(
+            draft.get("channels", []),
+            int(draft.get("days") or 1),
+            draft.get("account_ids") or [],
+            task_type=draft.get("task_type", "channel"),
+            filters=draft.get("filters"),
+            page=int(draft.get("account_page") or 1),
         )
         await self._safe_edit(query, text, self._build_account_selection_keyboard(draft))
 
@@ -2854,6 +2875,7 @@ class DmCollectorBot:
             draft["account_ids"],
             task_type=draft.get("task_type", "channel"),
             filters=draft.get("filters"),
+            page=int(draft.get("account_page") or 1),
         )
         await self._safe_edit(query, text, self._build_account_selection_keyboard(draft))
 
@@ -3777,23 +3799,38 @@ class DmCollectorBot:
             f"<code>0</code> = 发送后立刻删除自己的聊天框消息。"
         )
 
-    def _select_accounts_text(self, channels: list[str], days: int, selected_ids: list[int], *, task_type: str = "channel", filters: dict | None = None) -> str:
+    def _select_accounts_text(self, channels: list[str], days: int, selected_ids: list[int], *, task_type: str = "channel", filters: dict | None = None, page: int = 1) -> str:
         active = self.db.get_active_accounts()
+        per_page = 20
+        total_pages = max(1, ceil(len(active) / per_page))
+        page = max(1, min(int(page or 1), total_pages))
+        rows = list(active[(page - 1) * per_page : page * per_page])
         unit = "群组" if task_type == "group" else "频道"
         lines = [
             f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>选择采集账号</b>",
             f"{unit}数：<code>{len(channels)}</code> · 时间范围：<code>{days}</code> 天",
             f"已选账号：<code>{len(selected_ids)}</code>",
+            f"页码：<code>{page}/{total_pages}</code> · 本页：<code>{len(rows)}</code> · 可用总数：<code>{len(active)}</code>",
         ]
         if task_type == "group":
             lines.append(f"筛选规则：<code>{html.escape(self._format_filter_summary(filters), quote=False)}</code>")
             lines.append("单号每轮最多新增 5 个群，剩余群会自动冷却后继续处理。")
         lines.append("")
-        for row in active:
+        for row in rows:
             mark = "已选" if row["id"] in selected_ids else "未选"
             label = row["phone"] or "-"
             lines.append(f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {mark}")
         return "\n".join(lines)
+
+    def _get_collect_account_page_rows(self, draft: dict) -> tuple[list, int, int]:
+        all_rows = self.db.get_active_accounts()
+        per_page = 20
+        total_pages = max(1, ceil(len(all_rows) / per_page))
+        page = max(1, min(int(draft.get("account_page") or 1), total_pages))
+        draft["account_page"] = page
+        start = (page - 1) * per_page
+        end = start + per_page
+        return list(all_rows[start:end]), page, total_pages
 
     def _group_filters_text(self, draft: dict) -> str:
         filters = self._parse_group_filters(draft.get("filters"))
@@ -3922,9 +3959,10 @@ class DmCollectorBot:
 
     def _build_account_selection_keyboard(self, draft: dict) -> InlineKeyboardMarkup:
         selected_ids = [int(item) for item in (draft.get("account_ids") or [])]
+        rows, page, total_pages = self._get_collect_account_page_rows(draft)
         keyboard = []
         row_buffer = []
-        for row in self.db.get_active_accounts():
+        for row in rows:
             is_selected = row["id"] in selected_ids
             icon = ACCOUNT_SELECTED_EMOJI_ID if is_selected else ACCOUNT_UNSELECTED_EMOJI_ID
             title = row["phone"] or "-"
@@ -3936,6 +3974,13 @@ class DmCollectorBot:
                 row_buffer = []
         if row_buffer:
             keyboard.append(row_buffer)
+        nav = []
+        if page > 1:
+            nav.append(premium_button("上一页", self.settings.emoji_back_id, callback_data=f"wizard:acc:page:{page - 1}"))
+        if page < total_pages:
+            nav.append(premium_button("下一页", self.settings.emoji_next_id, callback_data=f"wizard:acc:page:{page + 1}"))
+        if nav:
+            keyboard.append(nav)
         keyboard.append([
             premium_button("使用全部可用账号", SELECT_ACTION_EMOJI_ID, callback_data="wizard:acc:auto"),
             premium_button("完成选择", SELECT_ACTION_EMOJI_ID, callback_data="wizard:acc:done"),
@@ -4503,7 +4548,7 @@ class DmCollectorBot:
     async def _safe_edit(self, query, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
         try:
             await query.edit_message_text(
-                text=text,
+                text=self._fit_message_text(text),
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
                 reply_markup=markup,
@@ -4511,7 +4556,34 @@ class DmCollectorBot:
         except BadRequest as exc:
             if "Message is not modified" in str(exc):
                 return
+            if "Message_too_long" in str(exc) or "message is too long" in str(exc).lower():
+                await query.edit_message_text(
+                    text=self._fit_message_text(text, hard_trim=True),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=markup,
+                )
+                return
             raise
+
+    def _fit_message_text(self, text: str, *, hard_trim: bool = False) -> str:
+        limit = 3900 if not hard_trim else 3400
+        text = str(text or "")
+        if len(text) <= limit:
+            return text
+        suffix = "\n\n<code>内容过长，已自动折叠显示</code>"
+        lines = text.splitlines()
+        kept: list[str] = []
+        current = 0
+        for line in lines:
+            extra = len(line) + (1 if kept else 0)
+            if current + extra + len(suffix) > limit:
+                break
+            kept.append(line)
+            current += extra
+        if not kept:
+            return text[: limit - len(suffix)] + suffix
+        return "\n".join(kept) + suffix
 
     async def _save_uploaded_session_files(self, document) -> list[Path]:
         original_name = Path(document.file_name or f"upload_{int(time.time())}")
