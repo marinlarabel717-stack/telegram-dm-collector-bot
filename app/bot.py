@@ -601,8 +601,17 @@ class DmCollectorBot:
         deleted_broken: list[tuple[str, str]] = []
         deleted_banned: list[tuple[str, str]] = []
         kept_other_errors: list[tuple[str, str]] = []
-        for session_file in session_files:
-            result = await self.collection_manager.verify_session_file(session_file)
+
+        verify_parallel = min(6, max(1, len(session_files)))
+        verify_semaphore = asyncio.Semaphore(verify_parallel)
+
+        async def _verify_one(session_file: Path):
+            async with verify_semaphore:
+                result = await self.collection_manager.verify_session_file(session_file)
+                return session_file, result
+
+        verify_results = await asyncio.gather(*(_verify_one(session_file) for session_file in session_files))
+        for session_file, result in verify_results:
             issue_text = self._humanize_account_issue(result.status, result.last_error)
             if result.status == "active":
                 account = self.db.upsert_account(
@@ -725,13 +734,23 @@ class DmCollectorBot:
     async def _resolve_proxy_lines(self, lines: list[str]) -> tuple[list[dict], list[str]]:
         valid: list[dict] = []
         invalid: list[str] = []
-        for raw_line in lines:
-            try:
-                proxy = await asyncio.to_thread(resolve_working_proxy, raw_line)
-            except Exception as exc:  # noqa: BLE001
-                invalid.append(f"{raw_line}｜{str(exc) or exc.__class__.__name__}")
-                continue
-            valid.append(proxy)
+        parallel = min(20, max(1, len(lines)))
+        semaphore = asyncio.Semaphore(parallel)
+
+        async def _resolve_one(raw_line: str):
+            async with semaphore:
+                try:
+                    proxy = await asyncio.to_thread(resolve_working_proxy, raw_line)
+                    return ("valid", proxy)
+                except Exception as exc:  # noqa: BLE001
+                    return ("invalid", f"{raw_line}｜{str(exc) or exc.__class__.__name__}")
+
+        results = await asyncio.gather(*(_resolve_one(raw_line) for raw_line in lines))
+        for kind, payload in results:
+            if kind == "valid":
+                valid.append(payload)
+            else:
+                invalid.append(payload)
         return valid, invalid
 
     def _format_proxy_import_result(self, valid: list[dict], invalid: list[str], added: int) -> str:
@@ -1431,8 +1450,16 @@ class DmCollectorBot:
         await self._safe_edit(query, f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} 正在检测代理可用性，请稍等……", self._single_back_keyboard("account:proxy:manage"))
         valid: list[dict] = []
         invalid: list[str] = []
-        for proxy in proxies:
-            ok = await asyncio.to_thread(check_proxy_available, proxy)
+        parallel = min(20, max(1, len(proxies)))
+        semaphore = asyncio.Semaphore(parallel)
+
+        async def _check_one(proxy: dict):
+            async with semaphore:
+                ok = await asyncio.to_thread(check_proxy_available, proxy)
+                return proxy, ok
+
+        results = await asyncio.gather(*(_check_one(proxy) for proxy in proxies))
+        for proxy, ok in results:
             if ok:
                 valid.append(proxy)
             else:

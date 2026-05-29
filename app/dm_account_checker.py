@@ -33,9 +33,41 @@ class DmAccountChecker:
 
     async def check_account_status(self, account_row) -> AccountStatusCheckResult:
         account_id = int(account_row["id"])
-        verified = await self.collection_manager.verify_account(account_row)
-        if verified.status != "active":
-            summary = self._humanize_session_issue(verified.status, verified.last_error)
+        client: TelegramClient | None = None
+        try:
+            client = await self.collection_manager.connect_client(Path(account_row["session_file"]), account_row=account_row)
+            if not await client.is_user_authorized():
+                summary = self._humanize_session_issue("unauthorized", "session 未登录")
+                self.collection_manager.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
+                self.repository.update_account_restriction(
+                    account_id,
+                    restriction_status="session_invalid",
+                    restriction_reason=summary,
+                    raw_reply=None,
+                )
+                logger.warning(compose_log(f"状态检查失败｜{summary}", account_id=account_id))
+                return AccountStatusCheckResult(
+                    login_status="unauthorized",
+                    restriction_status="session_invalid",
+                    summary=summary,
+                    spambot_reply=None,
+                    last_error="session 未登录",
+                )
+
+            me = await client.get_me()
+            self.collection_manager.db.update_account_status(
+                account_id,
+                status="active",
+                last_error=None,
+                tg_user_id=getattr(me, "id", None),
+                phone=getattr(me, "phone", None),
+                username=getattr(me, "username", None),
+                display_name=getattr(me, "first_name", "") and me.first_name or getattr(me, "username", None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = self.collection_manager._short_error(exc)
+            summary = self._humanize_session_issue("error", last_error)
+            self.collection_manager.db.update_account_status(account_id, status="error", last_error=last_error)
             self.repository.update_account_restriction(
                 account_id,
                 restriction_status="session_invalid",
@@ -44,17 +76,17 @@ class DmAccountChecker:
             )
             logger.warning(compose_log(f"状态检查失败｜{summary}", account_id=account_id))
             return AccountStatusCheckResult(
-                login_status=verified.status,
+                login_status="error",
                 restriction_status="session_invalid",
                 summary=summary,
                 spambot_reply=None,
-                last_error=verified.last_error,
+                last_error=last_error,
             )
 
         self.repository.update_account_restriction(account_id, restriction_status="checking", restriction_reason="正在检测 SpamBot 状态")
         logger.info(compose_log("开始检测 SpamBot 状态", account_id=account_id))
         try:
-            reply_text = await self._fetch_spambot_reply(account_row)
+            reply_text = await self._fetch_spambot_reply(account_row, client=client)
             restriction_status, summary = self._parse_spambot_reply(reply_text)
             self.repository.update_account_restriction(
                 account_id,
@@ -86,11 +118,15 @@ class DmAccountChecker:
                 spambot_reply=None,
                 last_error=str(exc),
             )
+        finally:
+            if client is not None:
+                await client.disconnect()
 
-    async def _fetch_spambot_reply(self, account_row) -> str:
-        client: TelegramClient | None = None
+    async def _fetch_spambot_reply(self, account_row, *, client: TelegramClient | None = None) -> str:
+        owns_client = client is None
         try:
-            client = await self.collection_manager.connect_client(Path(account_row["session_file"]), account_row=account_row)
+            if client is None:
+                client = await self.collection_manager.connect_client(Path(account_row["session_file"]), account_row=account_row)
             if not await client.is_user_authorized():
                 raise RuntimeError("session 未登录")
             entity = await client.get_input_entity("SpamBot")
@@ -113,7 +149,7 @@ class DmAccountChecker:
                         return text
             raise RuntimeError("未收到 SpamBot 回复")
         finally:
-            if client is not None:
+            if owns_client and client is not None:
                 await client.disconnect()
 
     @classmethod

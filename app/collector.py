@@ -60,6 +60,7 @@ class CollectionManager:
         self.db = db
         self.on_progress = on_progress
         self.on_complete = on_complete
+        self._preferred_proxy_key: tuple[str, str, int, str, str] | None = None
 
     @staticmethod
     def _task_tag(task_id: int) -> str:
@@ -588,7 +589,17 @@ class CollectionManager:
             session_base = session_base[:-8]
         proxy = build_telethon_proxy(proxy_row)
         try:
-            return TelegramClient(session_base, self.settings.api_id, self.settings.api_hash, proxy=proxy)
+            return TelegramClient(
+                session_base,
+                self.settings.api_id,
+                self.settings.api_hash,
+                proxy=proxy,
+                timeout=8,
+                request_retries=2,
+                connection_retries=1,
+                retry_delay=0,
+                auto_reconnect=False,
+            )
         except ValueError as exc:
             if "too many values to unpack" not in str(exc):
                 raise
@@ -596,7 +607,17 @@ class CollectionManager:
             compat_base = str(compat_session)
             if compat_base.endswith(".session"):
                 compat_base = compat_base[:-8]
-            return TelegramClient(compat_base, self.settings.api_id, self.settings.api_hash, proxy=proxy)
+            return TelegramClient(
+                compat_base,
+                self.settings.api_id,
+                self.settings.api_hash,
+                proxy=proxy,
+                timeout=8,
+                request_retries=2,
+                connection_retries=1,
+                retry_delay=0,
+                auto_reconnect=False,
+            )
 
     async def connect_client(self, session_file: Path, *, account_row=None) -> TelegramClient:
         proxy_pool = self.db.get_global_proxies()
@@ -605,13 +626,15 @@ class CollectionManager:
             await client.connect()
             return client
 
-        attempt_pool = proxy_pool if len(proxy_pool) > 1 else proxy_pool * 3
+        ordered_pool = self._ordered_proxy_pool(proxy_pool)
+        attempt_pool = ordered_pool if len(ordered_pool) > 1 else ordered_pool * 2
         last_exc: Exception | None = None
         for proxy_row in attempt_pool:
             client: TelegramClient | None = None
             try:
                 client = self._build_client(session_file, account_row=account_row, proxy_row=proxy_row)
                 await client.connect()
+                self._remember_working_proxy(proxy_row)
                 return client
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
@@ -626,9 +649,29 @@ class CollectionManager:
                 continue
         if last_exc is not None:
             raise RuntimeError(
-                "代理连接超时：已自动切换代理重试；如果只有一条代理，则已重试 3 次仍未连上"
+                "代理连接超时：已自动切换代理重试；如果只有一条代理，则已重试 2 次仍未连上"
             ) from last_exc
         raise RuntimeError("代理连接失败")
+
+    def _ordered_proxy_pool(self, proxy_pool: list[dict]) -> list[dict]:
+        if not proxy_pool or self._preferred_proxy_key is None:
+            return list(proxy_pool)
+        preferred = [row for row in proxy_pool if self._proxy_key(row) == self._preferred_proxy_key]
+        others = [row for row in proxy_pool if self._proxy_key(row) != self._preferred_proxy_key]
+        return preferred + others if preferred else list(proxy_pool)
+
+    def _remember_working_proxy(self, proxy_row) -> None:
+        self._preferred_proxy_key = self._proxy_key(proxy_row)
+
+    @staticmethod
+    def _proxy_key(proxy_row) -> tuple[str, str, int, str, str]:
+        return (
+            str(proxy_row.get("proxy_type") or ""),
+            str(proxy_row.get("proxy_host") or ""),
+            int(proxy_row.get("proxy_port") or 0),
+            str(proxy_row.get("proxy_username") or ""),
+            str(proxy_row.get("proxy_password") or ""),
+        )
 
     @staticmethod
     def _is_proxy_timeout_error(exc: Exception) -> bool:
