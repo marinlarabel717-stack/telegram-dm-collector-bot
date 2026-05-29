@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from telethon import TelegramClient
+from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
 from telethon.errors import (
     FloodWaitError,
     InviteHashExpiredError,
@@ -655,7 +656,7 @@ class CollectionManager:
         self.db.sync_task_metrics(task_id, unique_total=unique_total)
         await self._emit_progress(task_id)
 
-    def _build_client(self, session_file: Path, *, account_row=None, proxy_row=None) -> TelegramClient:
+    def _build_client(self, session_file: Path, *, account_row=None, proxy_row=None, receive_updates: bool = False) -> TelegramClient:
         session_base = str(session_file)
         if session_base.endswith(".session"):
             session_base = session_base[:-8]
@@ -665,12 +666,14 @@ class CollectionManager:
                 session_base,
                 self.settings.api_id,
                 self.settings.api_hash,
+                connection=ConnectionTcpAbridged,
                 proxy=proxy,
                 timeout=TELEGRAM_CLIENT_TIMEOUT,
                 request_retries=TELEGRAM_REQUEST_RETRIES,
                 connection_retries=TELEGRAM_CONNECTION_RETRIES,
                 retry_delay=TELEGRAM_RETRY_DELAY,
                 auto_reconnect=False,
+                receive_updates=receive_updates,
             )
         except ValueError as exc:
             if "too many values to unpack" not in str(exc):
@@ -683,18 +686,20 @@ class CollectionManager:
                 compat_base,
                 self.settings.api_id,
                 self.settings.api_hash,
+                connection=ConnectionTcpAbridged,
                 proxy=proxy,
                 timeout=TELEGRAM_CLIENT_TIMEOUT,
                 request_retries=TELEGRAM_REQUEST_RETRIES,
                 connection_retries=TELEGRAM_CONNECTION_RETRIES,
                 retry_delay=TELEGRAM_RETRY_DELAY,
                 auto_reconnect=False,
+                receive_updates=receive_updates,
             )
 
-    async def connect_client(self, session_file: Path, *, account_row=None) -> TelegramClient:
+    async def connect_client(self, session_file: Path, *, account_row=None, receive_updates: bool = False) -> TelegramClient:
         proxy_pool = self.db.get_global_proxies()
         if not proxy_pool:
-            client = self._build_client(session_file, account_row=account_row, proxy_row=None)
+            client = self._build_client(session_file, account_row=account_row, proxy_row=None, receive_updates=receive_updates)
             await client.connect()
             return client
 
@@ -704,7 +709,7 @@ class CollectionManager:
         for proxy_row in attempt_pool:
             client: TelegramClient | None = None
             try:
-                client = self._build_client(session_file, account_row=account_row, proxy_row=proxy_row)
+                client = self._build_client(session_file, account_row=account_row, proxy_row=proxy_row, receive_updates=receive_updates)
                 await client.connect()
                 self._remember_working_proxy(proxy_row)
                 return client
@@ -769,13 +774,13 @@ class CollectionManager:
         )
         return any(keyword in text for keyword in keywords)
 
-    async def _reconnect_client(self, client: TelegramClient | None, session_file: Path, *, account_row=None) -> TelegramClient:
+    async def _reconnect_client(self, client: TelegramClient | None, session_file: Path, *, account_row=None, receive_updates: bool = False) -> TelegramClient:
         if client is not None:
             try:
                 await client.disconnect()
             except Exception:
                 pass
-        new_client = await self.connect_client(session_file, account_row=account_row)
+        new_client = await self.connect_client(session_file, account_row=account_row, receive_updates=receive_updates)
         if not await new_client.is_user_authorized():
             raise RuntimeError("session 未登录")
         return new_client

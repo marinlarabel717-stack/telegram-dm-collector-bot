@@ -42,7 +42,7 @@ class DmAccountChecker:
             while True:
                 try:
                     if client is None:
-                        client = await self.collection_manager.connect_client(session_file, account_row=account_row)
+                        client = await self.collection_manager.connect_client(session_file, account_row=account_row, receive_updates=True)
                     if not await client.is_user_authorized():
                         summary = self._humanize_session_issue("unauthorized", "session 未登录")
                         self.collection_manager.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
@@ -67,7 +67,7 @@ class DmAccountChecker:
                         raise
                     connect_attempt += 1
                     logger.warning(compose_log(f"状态检查连接中断，准备重连｜第{connect_attempt}次｜{self.collection_manager._short_error(exc)}", account_id=account_id))
-                    client = await self.collection_manager._reconnect_client(client, session_file, account_row=account_row)
+                    client = await self.collection_manager._reconnect_client(client, session_file, account_row=account_row, receive_updates=True)
 
             self.collection_manager.db.update_account_status(
                 account_id,
@@ -140,7 +140,7 @@ class DmAccountChecker:
         owns_client = client is None
         try:
             if client is None:
-                client = await self.collection_manager.connect_client(Path(account_row["session_file"]), account_row=account_row)
+                client = await self.collection_manager.connect_client(Path(account_row["session_file"]), account_row=account_row, receive_updates=True)
             if not await client.is_user_authorized():
                 raise RuntimeError("session 未登录")
             entity = await client.get_input_entity("SpamBot")
