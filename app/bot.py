@@ -80,6 +80,7 @@ FAILED_LIST_EMOJI_ID = "5411225014148014586"   # 🔴
 PENDING_LIST_EMOJI_ID = "5359535585251838264"  # ⏰
 COLLECT_CHANNEL_EMOJI_ID = "5402471432712113737"  # 📢
 COLLECT_GROUP_EMOJI_ID = "6048783222425260180"    # 👥
+HISTORY_RESULT_EMOJI_ID = "5215209935188534658"   # 📝
 
 
 class DmCollectorBot:
@@ -1801,11 +1802,11 @@ class DmCollectorBot:
         )
         keyboard = [
             [
-                premium_button("新建采集任务", self.settings.emoji_idea_id, callback_data="collect:new"),
+                premium_button("新建采集任务", DM_NEW_EMOJI_ID, callback_data="collect:new"),
                 premium_button("任务列表", self.settings.emoji_history_id, callback_data="collect:tasks"),
             ],
             [
-                premium_button("历史结果", EXPORT_EMOJI_ID, callback_data="menu:history"),
+                premium_button("历史结果", HISTORY_RESULT_EMOJI_ID, callback_data="menu:history"),
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
             ],
         ]
@@ -1813,7 +1814,7 @@ class DmCollectorBot:
 
     async def _show_collect_create_menu(self, query) -> None:
         text = (
-            f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>新建采集任务</b>\n"
+            f"{tg_emoji(DM_NEW_EMOJI_ID, '🆕')} <b>新建采集任务</b>\n"
             f"请选择这次要采集的来源类型。"
         )
         keyboard = [
@@ -2586,7 +2587,7 @@ class DmCollectorBot:
         if history_total > 0:
             keyboard.append([
                 premium_button("一键清空任务历史", TRASH_EMOJI_ID, callback_data="task:clear_history"),
-                premium_button("历史结果", self.settings.emoji_history_id, callback_data="menu:history:1"),
+                premium_button("历史结果", HISTORY_RESULT_EMOJI_ID, callback_data="menu:history:1"),
             ])
         keyboard.append([
             premium_button("返回采集用户", self.settings.emoji_back_id, callback_data="menu:collect"),
@@ -2605,7 +2606,7 @@ class DmCollectorBot:
         page = max(1, min(page, total_pages))
         tasks = self.db.list_history_tasks(limit=per_page, offset=(page - 1) * per_page)
         lines = [
-            f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>历史结果</b>",
+            f"{tg_emoji(HISTORY_RESULT_EMOJI_ID, '📝')} <b>历史结果</b>",
             f"页码：<code>{page}/{total_pages}</code>",
             f"历史总数：<code>{total}</code>",
         ]
@@ -3634,7 +3635,7 @@ class DmCollectorBot:
 
     def _channels_prompt_text(self) -> str:
         return (
-            f"{tg_emoji(self.settings.emoji_idea_id, '💡')} <b>新建频道采集</b>\n"
+            f"{tg_emoji(COLLECT_CHANNEL_EMOJI_ID, '📢')} <b>新建频道采集</b>\n"
             f"你可以：\n"
             f"1. 直接发频道列表（一行一个）\n"
             f"2. 上传一个 <code>.txt</code> 频道文件\n\n"
@@ -3644,7 +3645,7 @@ class DmCollectorBot:
 
     def _group_targets_prompt_text(self) -> str:
         return (
-            f"{tg_emoji(self.settings.emoji_list_id, '👤')} <b>新建群组发言采集</b>\n"
+            f"{tg_emoji(COLLECT_GROUP_EMOJI_ID, '👥')} <b>新建群组发言采集</b>\n"
             f"你可以：\n"
             f"1. 直接发送群组链接/群用户名（一行一个）\n"
             f"2. 上传一个 <code>.txt</code> 群组文件\n\n"
