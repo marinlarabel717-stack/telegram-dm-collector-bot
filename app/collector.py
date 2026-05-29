@@ -166,20 +166,9 @@ class CollectionManager:
             task_channels = self.db.list_collect_task_channels(task_id)
             selected_account_ids = self._parse_json_ids(task["account_ids_json"])
             accounts = [row for row in (self.db.get_account(account_id) for account_id in selected_account_ids) if row]
-            active_workers = []
-            for account in accounts:
-                checked = await self.verify_account(account)
-                logger.info(
-                    "%s%s 账号检测｜状态=%s｜用户名=%s｜手机号=%s｜错误=%s",
-                    self._task_tag(task_id),
-                    self._account_tag(account["id"]),
-                    checked.status,
-                    checked.username or "-",
-                    checked.phone or "-",
-                    checked.last_error or "-",
-                )
-                if checked.status == "active":
-                    active_workers.append(self.db.get_account(account["id"]))
+            active_workers = list(accounts)
+            if active_workers:
+                self._append_collect_log(task_id, f"已跳过启动前验号，直接开跑｜选中账号={len(active_workers)}")
 
             if not active_workers:
                 self.db.mark_collect_task_status(task_id, "error", last_error="没有可用账号，无法开始采集")
