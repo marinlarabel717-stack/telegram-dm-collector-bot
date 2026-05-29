@@ -71,9 +71,9 @@ DM_TYPING_EMOJI_ID = "5276483738224582009"    # 📘
 DM_SWITCH_EMOJI_ID = "5278330174729907327"    # 📦
 DM_PIN_EMOJI_ID = "5278346822023142994"       # 🚀
 DM_PIN_DELAY_EMOJI_ID = "5278398821192196191" # 🧭
-DM_DELETE_EMOJI_ID = "5276234999488602967"    # ❌
-DM_DELETE_DELAY_EMOJI_ID = "5278219575027063997"  # ❌
-DM_CONTINUE_EMOJI_ID = "5278283484140429419"  # ✅
+DM_DELETE_EMOJI_ID = "5301020349515712616"    # 🔴
+DM_DELETE_DELAY_EMOJI_ID = "5301020349515712616"  # 🔴
+DM_CONTINUE_EMOJI_ID = "5465644758049251661"  # ✔️
 REPORT_EXPORT_EMOJI_ID = "5350398227013188928"  # 📊
 SUCCESS_LIST_EMOJI_ID = "5188234920639632382"  # 🟢
 FAILED_LIST_EMOJI_ID = "5411225014148014586"   # 🔴
@@ -169,7 +169,7 @@ class DmCollectorBot:
             return
         try:
             await effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 刚刚这一步执行失败了，我已经记下日志。请重试一次；如果还报错，把刚刚的操作再发我。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 刚刚这一步执行失败了，我已经记下日志。请重试一次；如果还报错，把刚刚的操作再发我。",
                 parse_mode=ParseMode.HTML,
             )
         except Exception:  # noqa: BLE001
@@ -605,21 +605,21 @@ class DmCollectorBot:
             session_files = await self._save_uploaded_session_files(document)
         except zipfile.BadZipFile:
             await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 这个 zip 看起来不是有效压缩包，请重新打包后再传。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 这个 zip 看起来不是有效压缩包，请重新打包后再传。",
                 parse_mode=ParseMode.HTML,
             )
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("处理上传文件失败: %s", document.file_name)
             await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 处理上传文件时出错：<code>{html.escape(str(exc) or exc.__class__.__name__, quote=False)[:300]}</code>",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 处理上传文件时出错：<code>{html.escape(str(exc) or exc.__class__.__name__, quote=False)[:300]}</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
 
         if not session_files:
             await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 压缩包里没找到可用的 <code>.session</code> 文件。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 压缩包里没找到可用的 <code>.session</code> 文件。",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -716,7 +716,7 @@ class DmCollectorBot:
         cleaned_lines = parse_proxy_lines(text)
         if not cleaned_lines:
             await message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 没识别到代理内容，请重新发送。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 没识别到代理内容，请重新发送。",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -818,7 +818,7 @@ class DmCollectorBot:
             targets, invalid, duplicates = parse_targets_text(text)
             if not targets:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} txt 里没识别到有效用户名 / 手机号，请检查后重传。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} txt 里没识别到有效用户名 / 手机号，请检查后重传。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -858,7 +858,7 @@ class DmCollectorBot:
         if not targets:
             fail_text = "txt 里没识别到有效群组，请检查内容后重传。" if mode == "await_group_targets" else "txt 里没识别到有效频道，请检查内容后重传。"
             await update.effective_message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} {fail_text}",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} {fail_text}",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -880,13 +880,13 @@ class DmCollectorBot:
         except Exception as exc:  # noqa: BLE001
             logger.exception("保存私信媒体失败")
             await message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 保存媒体失败：<code>{html.escape(self._humanize_dm_error(None, str(exc) or exc.__class__.__name__), quote=False)[:200]}</code>",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 保存媒体失败：<code>{html.escape(self._humanize_dm_error(None, str(exc) or exc.__class__.__name__), quote=False)[:200]}</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
         if not payload:
             await message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请发送图片 / 视频 / 文件，支持附带 caption。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 请发送图片 / 视频 / 文件，支持附带 caption。",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -921,7 +921,7 @@ class DmCollectorBot:
         link = normalize_channel_post_link(raw_link)
         if not link:
             await message.reply_text(
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 频道帖子链接格式不正确。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 频道帖子链接格式不正确。",
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
@@ -1063,7 +1063,7 @@ class DmCollectorBot:
             channels = self._parse_channels(text)
             if not channels:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 没识别到有效频道，请按一行一个频道重新发送。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 没识别到有效频道，请按一行一个频道重新发送。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1081,7 +1081,7 @@ class DmCollectorBot:
             channels = self._parse_group_targets(text)
             if not channels:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 没识别到有效群组，请按一行一个群链接或群用户名重新发送。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 没识别到有效群组，请按一行一个群链接或群用户名重新发送。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1099,7 +1099,7 @@ class DmCollectorBot:
             targets, invalid, duplicates = parse_targets_text(text)
             if not targets:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 没识别到有效用户名 / 手机号，请按一行一个重新发送。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 没识别到有效用户名 / 手机号，请按一行一个重新发送。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1123,7 +1123,7 @@ class DmCollectorBot:
         if mode == "await_dm_message":
             if not text:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请输入要发送的文本内容。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 请输入要发送的文本内容。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1156,7 +1156,7 @@ class DmCollectorBot:
         if mode == "await_dm_body":
             if not text:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请输入主消息内容。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 请输入主消息内容。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1185,7 +1185,7 @@ class DmCollectorBot:
             rules, invalid = self._parse_dm_reply_keyword_rules(text)
             if invalid:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 关键词格式不对：<code>{html.escape(invalid[0], quote=False)[:120]}</code>\n请按 <code>关键词=回复文案</code> 一行一条发送；不需要就发 <code>跳过</code>。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 关键词格式不对：<code>{html.escape(invalid[0], quote=False)[:120]}</code>\n请按 <code>关键词=回复文案</code> 一行一条发送；不需要就发 <code>跳过</code>。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1229,13 +1229,13 @@ class DmCollectorBot:
                 seconds = int(text)
             except ValueError:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请输入整数秒数，例如 30。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 请输入整数秒数，例如 30。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
             if seconds < 0 or seconds > 86400:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 秒数请填 0 到 86400 之间。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 秒数请填 0 到 86400 之间。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1253,13 +1253,13 @@ class DmCollectorBot:
                 days = int(text)
             except ValueError:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请输入整数天数，例如 7。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 请输入整数天数，例如 7。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
             if days <= 0 or days > 365:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 天数请控制在 1 到 365 之间。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 天数请控制在 1 到 365 之间。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1273,13 +1273,13 @@ class DmCollectorBot:
                 workers = int(text)
             except ValueError:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 请输入整数线程数，例如 {max_workers}。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 请输入整数线程数，例如 {max_workers}。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
             if workers <= 0 or workers > max_workers:
                 await update.effective_message.reply_text(
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} 线程数请控制在 1 到 {max_workers} 之间。",
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 线程数请控制在 1 到 {max_workers} 之间。",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -1556,7 +1556,7 @@ class DmCollectorBot:
                     self.db.delete_account(account_id)
                     backup_note = "未找到可导出的原始文件，已直接删除账号"
                 text = (
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>账号已自动删除</b>\n"
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>账号已自动删除</b>\n"
                     f"名称：<code>{html.escape(str(label), quote=False)}</code>\n"
                     f"原因：<code>{html.escape(issue_text, quote=False)}</code>\n"
                     f"备份：<code>{backup_note}</code>"
@@ -1577,7 +1577,7 @@ class DmCollectorBot:
             if account:
                 error_text = self._humanize_account_issue("error", str(exc))
                 text = (
-                    f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>账号状态检查失败</b>\n"
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>账号状态检查失败</b>\n"
                     f"账号：<code>{html.escape(str(account['username'] or account['phone'] or account['display_name'] or account['session_name']), quote=False)}</code>\n"
                     f"原因：<code>{html.escape(error_text, quote=False)}</code>"
                 )
@@ -1756,7 +1756,7 @@ class DmCollectorBot:
         except Exception:  # noqa: BLE001
             logger.exception("批量账号状态检查失败")
             text = (
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>批量检查状态失败</b>\n"
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>批量检查状态失败</b>\n"
                 f"请点一次刷新或稍后重试。"
             )
             await self._safe_edit(query, text, InlineKeyboardMarkup([
@@ -1793,7 +1793,7 @@ class DmCollectorBot:
             self.db.delete_account(row["id"])
 
         lines = [
-            f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>无效账号已清理</b>",
+            f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>无效账号已清理</b>",
             f"已删除数量：<code>{len(deleted_labels)}</code>",
             f"当前保留存活：<code>{self.db.count_accounts()}</code>",
         ]
@@ -1871,7 +1871,7 @@ class DmCollectorBot:
         if not active_accounts:
             await self._safe_edit(
                 query,
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前没有可用账号，请先上传并验证 session。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 当前没有可用账号，请先上传并验证 session。",
                 self._single_back_keyboard("menu:accounts"),
             )
             return
@@ -2525,7 +2525,7 @@ class DmCollectorBot:
     async def _confirm_clear_dm_tasks(self, query) -> None:
         total = self.dm_repository.count_dm_tasks()
         text = (
-            f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>确认清空私信任务</b>\n"
+            f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>确认清空私信任务</b>\n"
             f"当前列表任务：<code>{total}</code>\n"
             f"说明：会清空 <code>已完成 / 已停止 / 异常</code> 的任务，运行中的任务会保留。"
         )
@@ -2704,7 +2704,7 @@ class DmCollectorBot:
         if not active_accounts:
             await self._safe_edit(
                 query,
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前没有可用账号，请先上传并验证 session。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 当前没有可用账号，请先上传并验证 session。",
                 self._single_back_keyboard("menu:accounts"),
             )
             return
@@ -2716,7 +2716,7 @@ class DmCollectorBot:
         if not active_accounts:
             await self._safe_edit(
                 query,
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前没有可用账号，请先上传并验证 session。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 当前没有可用账号，请先上传并验证 session。",
                 self._single_back_keyboard("menu:accounts"),
             )
             return
@@ -2886,7 +2886,7 @@ class DmCollectorBot:
         if not account_ids:
             await self._safe_edit(
                 query,
-                f"{tg_emoji(self.settings.emoji_error_id, '❌')} 至少选择一个可用账号。",
+                f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 至少选择一个可用账号。",
                 self._build_account_selection_keyboard(draft),
             )
             return
@@ -3857,7 +3857,7 @@ class DmCollectorBot:
         return "\n".join(lines)
 
     def _not_found_text(self, message: str) -> str:
-        return f"{tg_emoji(self.settings.emoji_error_id, '❌')} <b>{html.escape(message, quote=False)}</b>"
+        return f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>{html.escape(message, quote=False)}</b>"
 
     def _build_auto_reply_text(self) -> str:
         return f"{tg_emoji(self.settings.emoji_success_id, '🆗')} {html.escape(self.settings.auto_reply_text, quote=False)}"
@@ -4377,7 +4377,7 @@ class DmCollectorBot:
         if not sent_any:
             await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前这个私信任务还没有可导出的结果。",
+                text=f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 当前这个私信任务还没有可导出的结果。",
                 parse_mode=ParseMode.HTML,
             )
 
@@ -4421,7 +4421,7 @@ class DmCollectorBot:
             if not sent_any:
                 await self.application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"{tg_emoji(self.settings.emoji_error_id, '❌')} 当前没有可导出的用户名、ID 或失败群结果。",
+                    text=f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 当前没有可导出的用户名、ID 或失败群结果。",
                     parse_mode=ParseMode.HTML,
                 )
             return

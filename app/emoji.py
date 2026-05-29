@@ -11,8 +11,8 @@ DEFAULT_EMOJI_IDS = {
     "success": "5312028599803460968",   # 🆗
     "upload": "5443127283898405358",    # 📥
     "waiting": "5296562641613897196",   # 🕜
-    "ok": "5260463209562776385",        # ✅
-    "error": "5273914604752216432",     # ❌
+    "ok": "5465644758049251661",        # ✔️
+    "error": "5301020349515712616",     # 🔴
     "timeout": "5382194935057372936",   # ⏱️
     "progress": "5352625743081775722",  # 🎚️
     "refresh": "5242232228737472707",   # ⚡
@@ -33,12 +33,12 @@ DEFAULT_EMOJI_IDS = {
 
 
 STATUS_META = {
-    "active": (DEFAULT_EMOJI_IDS["ok"], "✅", "可用"),
+    "active": (DEFAULT_EMOJI_IDS["ok"], "✔️", "可用"),
     "checking": (DEFAULT_EMOJI_IDS["waiting"], "🕜", "检测中"),
     "collecting": (DEFAULT_EMOJI_IDS["progress"], "🎚️", "采集中"),
     "running": (DEFAULT_EMOJI_IDS["progress"], "🎚️", "采集中"),
-    "unauthorized": (DEFAULT_EMOJI_IDS["error"], "❌", "未登录"),
-    "error": (DEFAULT_EMOJI_IDS["error"], "❌", "异常"),
+    "unauthorized": (DEFAULT_EMOJI_IDS["error"], "🔴", "未登录"),
+    "error": (DEFAULT_EMOJI_IDS["error"], "🔴", "异常"),
     "stopped": (DEFAULT_EMOJI_IDS["stop"], "🛑", "已停止"),
     "completed": (DEFAULT_EMOJI_IDS["completed"], "🟢", "已完成"),
     "queued": (DEFAULT_EMOJI_IDS["waiting"], "🕜", "排队中"),
@@ -49,12 +49,12 @@ RESTRICTION_META = {
     "checking": (DEFAULT_EMOJI_IDS["stats"], "🧠", "检测中"),
     "unrestricted": (DEFAULT_EMOJI_IDS["completed"], "🟢", "无限制"),
     "temp_mutual": (DEFAULT_EMOJI_IDS["timeout"], "⏱️", "临时双向"),
-    "permanent_mutual": (DEFAULT_EMOJI_IDS["error"], "❌", "永久双向"),
+    "permanent_mutual": (DEFAULT_EMOJI_IDS["error"], "🔴", "永久双向"),
     "geo_limited": ("6321283126236552928", "😄", "地区限制"),
     "frozen": (DEFAULT_EMOJI_IDS["progress"], "🎚️", "冻结"),
-    "spam_limited": (DEFAULT_EMOJI_IDS["error"], "❌", "官方限流"),
-    "restricted": (DEFAULT_EMOJI_IDS["error"], "❌", "受限"),
-    "session_invalid": (DEFAULT_EMOJI_IDS["error"], "❌", "已失效"),
+    "spam_limited": (DEFAULT_EMOJI_IDS["error"], "🔴", "官方限流"),
+    "restricted": (DEFAULT_EMOJI_IDS["error"], "🔴", "受限"),
+    "session_invalid": (DEFAULT_EMOJI_IDS["error"], "🔴", "已失效"),
 }
 
 
