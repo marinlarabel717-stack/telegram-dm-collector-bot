@@ -3083,6 +3083,25 @@ class DmCollectorBot:
         task = self.dm_repository.get_dm_task(task_id)
         if not task:
             return
+        pending_count = max(
+            0,
+            int(task["total_targets"] or 0)
+            - int(task["success_count"] or 0)
+            - int(task["failed_count"] or 0)
+            - int(task["skipped_count"] or 0),
+        )
+        if str(task["status"] or "") != "completed" and pending_count > 0:
+            logger.info("私信任务未全部完成，跳过自动结果推送: task_id=%s status=%s pending=%s", task_id, task["status"], pending_count)
+            await self.application.bot.send_message(
+                chat_id=task["requester_id"],
+                text=(
+                    f"{tg_emoji(self.settings.emoji_waiting_id, '⏰')} <b>私信任务已停止</b>\n"
+                    f"当前还有 <code>{pending_count}</code> 个待发送，暂不自动推送结果文件。\n"
+                    f"如需查看阶段性结果，可在任务详情里手动导出。"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+            return
         await self._send_dm_task_result(task["requester_id"], task_id)
 
     async def _dm_task_progress_heartbeat(self, task_id: int) -> None:
