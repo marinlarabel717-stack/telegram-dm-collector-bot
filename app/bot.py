@@ -91,6 +91,7 @@ GROUP_FILTER_USERNAME_EMOJI_ID = "6235699516247379290" # 🧠
 GROUP_FILTER_PREMIUM_EMOJI_ID = "5274026806477857971"  # ⭐
 ACCOUNT_SELECTED_EMOJI_ID = "5465644758049251661"      # ✔️
 ACCOUNT_UNSELECTED_EMOJI_ID = "5301020349515712616"    # 🔴
+THREAD_EMOJI_ID = "5217475010746145177"                # 🚀
 
 
 class DmCollectorBot:
@@ -844,8 +845,9 @@ class DmCollectorBot:
             return
 
         processing_text = "已收到群组文件，正在读取并解析，请稍等……" if mode == "await_group_targets" else "已收到频道文件，正在读取并解析，请稍等……"
+        processing_emoji_id = WAIT_FILE_EMOJI_ID if mode == "await_group_targets" else self.settings.emoji_waiting_id
         await update.effective_message.reply_text(
-            f"{tg_emoji(self.settings.emoji_waiting_id, '🕜')} {processing_text}",
+            f"{tg_emoji(processing_emoji_id, '⌛' if mode == 'await_group_targets' else '🕜')} {processing_text}",
             parse_mode=ParseMode.HTML,
         )
         await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
@@ -3333,7 +3335,7 @@ class DmCollectorBot:
         ]
         for row in rows:
             mark = "已选" if int(row["id"]) in (draft.get("account_ids") or []) else "未选"
-            label = row["username"] or row["phone"] or row["session_name"]
+            label = row["phone"] or "-"
             lines.append(
                 f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {mark} · {restriction_badge(row['restriction_status'])}"
             )
@@ -3772,7 +3774,7 @@ class DmCollectorBot:
     def _custom_workers_prompt_text(self, draft: dict) -> str:
         max_workers = self._max_worker_count(draft)
         return (
-            f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>自定义并发线程</b>\n"
+            f"{tg_emoji(THREAD_EMOJI_ID, '🚀')} <b>自定义并发线程</b>\n"
             f"当前最多可设：<code>{max_workers}</code>\n"
             f"请直接发送一个整数，例如 <code>{max_workers}</code>。"
         )
@@ -3801,7 +3803,7 @@ class DmCollectorBot:
         lines.append("")
         for row in active:
             mark = "已选" if row["id"] in selected_ids else "未选"
-            label = row["username"] or row["phone"] or row["session_name"]
+            label = row["phone"] or "-"
             lines.append(f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {mark}")
         return "\n".join(lines)
 
@@ -3826,7 +3828,7 @@ class DmCollectorBot:
         unit = "群组" if task_type == "group" else "频道"
         tail = "单号遇到第 6 个新群时会自动冷却后继续，不会只跑 5 个就结束。" if task_type == "group" else "并发会按 账号数 / 频道数 / 上限 取最小值。"
         return (
-            f"{tg_emoji(self.settings.emoji_welcome_id, '🌠')} <b>设置并发</b>\n"
+            f"{tg_emoji(THREAD_EMOJI_ID, '🚀')} <b>设置并发</b>\n"
             f"{unit}数：<code>{len(draft.get('channels') or [])}</code>\n"
             f"账号数：<code>{len(draft.get('account_ids') or [])}</code>\n"
             f"当前最多可设：<code>{max_workers}</code>\n"
@@ -3937,7 +3939,7 @@ class DmCollectorBot:
         for row in self.db.get_active_accounts():
             is_selected = row["id"] in selected_ids
             icon = ACCOUNT_SELECTED_EMOJI_ID if is_selected else ACCOUNT_UNSELECTED_EMOJI_ID
-            title = row["username"] or row["phone"] or row["session_name"]
+            title = row["phone"] or "-"
             row_buffer.append(
                 premium_button(f"#{self._account_display_code(row)} {str(title)[:28]}", icon, callback_data=f"wizard:acc:toggle:{row['id']}")
             )
@@ -3964,7 +3966,7 @@ class DmCollectorBot:
         for row in rows:
             is_selected = int(row["id"]) in selected_ids
             icon = ACCOUNT_SELECTED_EMOJI_ID if is_selected else ACCOUNT_UNSELECTED_EMOJI_ID
-            title = row["username"] or row["phone"] or row["session_name"]
+            title = row["phone"] or "-"
             row_buffer.append(
                 premium_button(f"#{self._account_display_code(row)} {str(title)[:28]}", icon, callback_data=f"dm:wizard:acc:toggle:{row['id']}")
             )
@@ -4003,7 +4005,7 @@ class DmCollectorBot:
             ],
             [
                 premium_button(f"上限：{int(policy.get('per_account_success_limit', 40))}", DM_LIMIT_EMOJI_ID, callback_data="dm:wizard:limit:cycle"),
-                premium_button(f"并发：{worker_count}", DM_WORKER_EMOJI_ID, callback_data="dm:wizard:worker:cycle"),
+                premium_button(f"并发：{worker_count}", THREAD_EMOJI_ID, callback_data="dm:wizard:worker:cycle"),
             ],
             [
                 premium_button(f"间隔：{delay_label}", DM_DELAY_EMOJI_ID, callback_data="dm:wizard:delay:cycle"),
@@ -4055,16 +4057,7 @@ class DmCollectorBot:
         if max_workers not in available:
             available.append(max_workers)
         available = sorted(set(available))
-        icon_pool = [
-            self.settings.emoji_progress_id,
-            self.settings.emoji_waiting_id,
-            self.settings.emoji_history_id,
-            self.settings.emoji_stats_id,
-            self.settings.emoji_upload_id,
-            self.settings.emoji_list_id,
-            self.settings.emoji_all_id,
-            self.settings.emoji_start_id,
-        ]
+        icon_pool = [THREAD_EMOJI_ID]
 
         keyboard = []
         row_buffer = []
@@ -4078,9 +4071,9 @@ class DmCollectorBot:
         if row_buffer:
             keyboard.append(row_buffer)
         keyboard.append([
-            premium_button("自定义线程", self.settings.emoji_idea_id, callback_data="wizard:wrk_custom"),
-            premium_button("返回上层", self.settings.emoji_back_id, callback_data="wizard:back:accounts"),
-        ])
+                premium_button("自定义线程", THREAD_EMOJI_ID, callback_data="wizard:wrk_custom"),
+                premium_button("返回上层", self.settings.emoji_back_id, callback_data="wizard:back:accounts"),
+            ])
         return InlineKeyboardMarkup(keyboard)
 
     def _build_confirm_keyboard(self) -> InlineKeyboardMarkup:
@@ -4102,7 +4095,7 @@ class DmCollectorBot:
                 premium_button("导出结果", EXPORT_EMOJI_ID, callback_data=f"task:export:{task_id}"),
             ],
             [
-                premium_button("删除任务", self.settings.emoji_error_id, callback_data=f"task:delete:{task_id}:{page}:{source}"),
+                premium_button("删除任务", TRASH_EMOJI_ID, callback_data=f"task:delete:{task_id}:{page}:{source}"),
                 premium_button(back_label, self.settings.emoji_back_id, callback_data=back_callback),
             ],
         ]
