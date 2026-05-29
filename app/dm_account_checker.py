@@ -181,6 +181,17 @@ class DmAccountChecker:
             if restriction_until is not None or any(keyword in lowered for keyword in ["will be lifted", "temporarily", "temporary", "until", "暂时", "临时"]):
                 return "temp_mutual", cls._format_temp_mutual_summary(restriction_until)
             return "permanent_mutual", "永久双向"
+        if any(keyword in lowered for keyword in [
+            "blocked for violations",
+            "terms of service",
+            "user reports confirmed by our moderators",
+            "confirmed by our moderators",
+            "your account was blocked",
+            "violations of the telegram terms of service",
+        ]):
+            if restriction_until is not None:
+                return "temp_mutual", cls._format_temp_mutual_summary(restriction_until)
+            return "permanent_mutual", "永久双向"
         if any(keyword in lowered for keyword in ["too many", "spam", "limited", "can only send", "can't send", "cannot send", "限制"]):
             if restriction_until is not None:
                 return "temp_mutual", cls._format_temp_mutual_summary(restriction_until)
