@@ -451,6 +451,29 @@ class DmRepository:
                 ).fetchone()[0]
             )
 
+    def get_dm_task_recipient_counts(self, task_id: int) -> dict[str, int]:
+        with self.db.lock:
+            row = self.db.conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END), 0) AS success_count,
+                    COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+                    COALESCE(SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END), 0) AS skipped_count,
+                    COALESCE(SUM(CASE WHEN status IN ('pending','sending') THEN 1 ELSE 0 END), 0) AS pending_count,
+                    COALESCE(SUM(CASE WHEN status IN ('sending','success','failed','skipped') THEN 1 ELSE 0 END), 0) AS processed_count
+                FROM dm_task_recipients
+                WHERE task_id=?
+                """,
+                (task_id,),
+            ).fetchone()
+            return {
+                "success": int(row["success_count"] or 0),
+                "failed": int(row["failed_count"] or 0),
+                "skipped": int(row["skipped_count"] or 0),
+                "pending": int(row["pending_count"] or 0),
+                "processed": int(row["processed_count"] or 0),
+            }
+
     def create_or_get_recipients(self, targets: Iterable[ParsedTarget]) -> list[int]:
         recipient_ids: list[int] = []
         with self.db.lock:

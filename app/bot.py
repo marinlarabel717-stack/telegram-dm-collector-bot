@@ -3012,11 +3012,12 @@ class DmCollectorBot:
         await self._send_task_result(task["requester_id"], task_id, announce=True)
 
     def _build_dm_progress_snapshot(self, task_id: int, task) -> dict[str, int | str]:
+        counts = self.dm_repository.get_dm_task_recipient_counts(task_id)
         return {
-            "processed": self.dm_repository.get_dm_task_processed_count(task_id),
-            "success": int(task["success_count"] or 0),
-            "failed": int(task["failed_count"] or 0),
-            "skipped": int(task["skipped_count"] or 0),
+            "processed": int(counts["processed"]),
+            "success": int(counts["success"]),
+            "failed": int(counts["failed"]),
+            "skipped": int(counts["skipped"]),
             "active_accounts": int(task["active_accounts"] or 0),
             "status": str(task["status"] or ""),
             "last_error": str(task["last_error"] or ""),
@@ -3083,13 +3084,8 @@ class DmCollectorBot:
         task = self.dm_repository.get_dm_task(task_id)
         if not task:
             return
-        pending_count = max(
-            0,
-            int(task["total_targets"] or 0)
-            - int(task["success_count"] or 0)
-            - int(task["failed_count"] or 0)
-            - int(task["skipped_count"] or 0),
-        )
+        counts = self.dm_repository.get_dm_task_recipient_counts(task_id)
+        pending_count = int(counts["pending"])
         if str(task["status"] or "") != "completed" and pending_count > 0:
             logger.info("私信任务未全部完成，跳过自动结果推送: task_id=%s status=%s pending=%s", task_id, task["status"], pending_count)
             await self.application.bot.send_message(
@@ -3598,12 +3594,16 @@ class DmCollectorBot:
         task = self.dm_repository.get_dm_task(task_id)
         if not task:
             return self._not_found_text("私信任务不存在或已被删除。")
+        counts = self.dm_repository.get_dm_task_recipient_counts(task_id)
         accounts = self.dm_repository.list_dm_task_accounts(task_id) if include_stats else []
         current = self.dm_repository.get_dm_task_current_recipient(task_id)
         recent_logs = self.dm_repository.list_dm_recent_logs(task_id, limit=20)
         failure_summary = self.dm_repository.get_dm_task_failure_summary(task_id, limit=6) if include_stats else []
-        processed = self.dm_repository.get_dm_task_processed_count(task_id)
-        pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
+        processed = int(counts["processed"])
+        success_count = int(counts["success"])
+        failed_count = int(counts["failed"])
+        skipped_count = int(counts["skipped"])
+        pending_count = int(counts["pending"])
         payload = json.loads(str(task["payload_json"] or "{}"))
         policy = json.loads(str(task["policy_json"] or "{}"))
         content_type = str(task["content_type"] or payload.get("content_type") or "text")
@@ -3616,12 +3616,12 @@ class DmCollectorBot:
             f"总目标：<code>{task['total_targets']}</code>",
             f"当前进度：<code>{processed}/{task['total_targets']}</code>",
         ]
-        if int(task["success_count"] or 0) > 0:
-            lines.append(f"成功：<code>{task['success_count']}</code>")
-        if int(task["failed_count"] or 0) > 0:
-            lines.append(f"失败：<code>{task['failed_count']}</code>")
-        if int(task["skipped_count"] or 0) > 0:
-            lines.append(f"跳过：<code>{task['skipped_count']}</code>")
+        if success_count > 0:
+            lines.append(f"成功：<code>{success_count}</code>")
+        if failed_count > 0:
+            lines.append(f"失败：<code>{failed_count}</code>")
+        if skipped_count > 0:
+            lines.append(f"跳过：<code>{skipped_count}</code>")
         if pending_count > 0:
             lines.append(f"剩余待发送：<code>{pending_count}</code>")
         if int(task["active_accounts"] or 0) > 0:
@@ -4186,12 +4186,15 @@ class DmCollectorBot:
         task = self.dm_repository.get_dm_task(task_id)
         keyboard: list[list] = []
         if task:
-            pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
+            counts = self.dm_repository.get_dm_task_recipient_counts(task_id)
+            success_count = int(counts["success"])
+            failed_count = int(counts["failed"])
+            pending_count = int(counts["pending"])
             stats_row = []
-            if int(task['success_count'] or 0) > 0:
-                stats_row.append(premium_button(f"成功 {task['success_count']}", SUCCESS_LIST_EMOJI_ID, callback_data=f"dm:refresh:{task_id}:{page}"))
-            if int(task['failed_count'] or 0) > 0:
-                stats_row.append(premium_button(f"失败 {task['failed_count']}", FAILED_LIST_EMOJI_ID, callback_data=f"dm:refresh:{task_id}:{page}"))
+            if success_count > 0:
+                stats_row.append(premium_button(f"成功 {success_count}", SUCCESS_LIST_EMOJI_ID, callback_data=f"dm:refresh:{task_id}:{page}"))
+            if failed_count > 0:
+                stats_row.append(premium_button(f"失败 {failed_count}", FAILED_LIST_EMOJI_ID, callback_data=f"dm:refresh:{task_id}:{page}"))
             if stats_row:
                 keyboard.append(stats_row[:2])
             if pending_count > 0:
