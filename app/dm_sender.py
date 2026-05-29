@@ -17,6 +17,7 @@ from .dm_repository import DmRepository
 
 logger = logging.getLogger(__name__)
 DM_SEND_RECONNECT_RETRIES = 2
+DM_MAX_PARALLEL_ACCOUNTS = 100
 
 
 class DmSenderManager:
@@ -81,36 +82,57 @@ class DmSenderManager:
             await self._emit_complete(task_id)
             return
 
-        worker_count = min(int(task["worker_count"] or 1), len(account_seed_rows), len(recipients))
+        worker_count = min(int(task["worker_count"] or 1), DM_MAX_PARALLEL_ACCOUNTS, len(account_seed_rows), len(recipients))
         active_account_ids = {int(row["account_id"]) for row in account_seed_rows}
 
         queue: asyncio.Queue = asyncio.Queue()
         for row in recipients:
             queue.put_nowait(row)
 
-        account_queue: asyncio.Queue = asyncio.Queue()
-        for row in account_seed_rows:
-            account_queue.put_nowait(row)
+        account_batches = [
+            account_seed_rows[index : index + worker_count]
+            for index in range(0, len(account_seed_rows), worker_count)
+        ]
 
         self.repository.mark_dm_task_status(task_id, "running")
         await self._emit_progress(task_id)
-        logger.info(compose_log(f"启动｜目标={queue.qsize()}｜账号={len(accounts)}｜并发={worker_count}", task_id=task_id))
+        logger.info(compose_log(f"启动｜目标={queue.qsize()}｜账号={len(accounts)}｜并发={worker_count}｜轮次={len(account_batches)}", task_id=task_id))
 
-        workers = [
-            asyncio.create_task(
-                self._account_slot_worker(
-                    task_id,
-                    queue,
-                    account_queue,
-                    active_policy,
-                    active_account_ids=active_account_ids,
-                    slot_index=index + 1,
-                )
-            )
-            for index in range(worker_count)
-        ]
+        workers: list[asyncio.Task] = []
         try:
-            await asyncio.gather(*workers, return_exceptions=False)
+            for batch_index, batch_rows in enumerate(account_batches, start=1):
+                if queue.empty() or self.repository.should_stop_dm_task(task_id):
+                    break
+                current_parallel = min(worker_count, len(batch_rows), queue.qsize())
+                if current_parallel <= 0:
+                    break
+
+                account_queue: asyncio.Queue = asyncio.Queue()
+                for row in batch_rows:
+                    account_queue.put_nowait(row)
+
+                logger.info(
+                    compose_log(
+                        f"第{batch_index}/{len(account_batches)}轮启动｜本轮账号={len(batch_rows)}｜剩余目标={queue.qsize()}｜并发={current_parallel}",
+                        task_id=task_id,
+                    )
+                )
+
+                workers = [
+                    asyncio.create_task(
+                        self._account_slot_worker(
+                            task_id,
+                            queue,
+                            account_queue,
+                            active_policy,
+                            active_account_ids=active_account_ids,
+                            slot_index=index + 1,
+                        )
+                    )
+                    for index in range(current_parallel)
+                ]
+                await asyncio.gather(*workers, return_exceptions=False)
+                workers = []
         except asyncio.CancelledError:
             for worker in workers:
                 if not worker.done():
