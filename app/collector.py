@@ -33,6 +33,11 @@ GROUP_JOIN_BATCH_LIMIT = 5
 GROUP_JOIN_COOLDOWN_SECONDS = 300
 PROGRESS_FLUSH_EVERY_MESSAGES = 50
 LOG_PROGRESS_EVERY_MESSAGES = 200
+TELEGRAM_CLIENT_TIMEOUT = 20
+TELEGRAM_REQUEST_RETRIES = 5
+TELEGRAM_CONNECTION_RETRIES = 5
+TELEGRAM_RETRY_DELAY = 1
+TELEGRAM_RECONNECT_RETRIES = 2
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +276,25 @@ class CollectionManager:
                     break
                 try:
                     logger.info("%s%s 分配频道｜%s", self._task_tag(task_id), self._account_tag(account_id), task_channel["channel"])
-                    await self._process_channel(task_id, client, account_id, task_channel)
+                    attempt = 0
+                    while True:
+                        try:
+                            await self._process_channel(task_id, client, account_id, task_channel)
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            if attempt >= TELEGRAM_RECONNECT_RETRIES or not self._is_disconnect_error(exc) or self.db.should_stop_task(task_id):
+                                raise
+                            attempt += 1
+                            logger.warning(
+                                "%s%s 频道连接中断，准备重连后重试｜频道=%s｜第%s次｜错误=%s",
+                                self._task_tag(task_id),
+                                self._account_tag(account_id),
+                                task_channel["channel"],
+                                attempt,
+                                self._short_error(exc),
+                            )
+                            client = await self._reconnect_client(client, session_file, account_row=account_row)
+                            self.db.update_account_status(account_id, status="collecting", last_error=None)
                 finally:
                     queue.task_done()
         except asyncio.CancelledError:
@@ -318,9 +341,27 @@ class CollectionManager:
                     break
                 try:
                     logger.info("%s%s 分配群组｜%s", self._task_tag(task_id), self._account_tag(account_id), task_channel["channel"])
-                    joined = await self._process_group(task_id, client, account_id, task_channel)
-                    if joined:
-                        joined_since_cooldown += 1
+                    attempt = 0
+                    while True:
+                        try:
+                            joined = await self._process_group(task_id, client, account_id, task_channel)
+                            if joined:
+                                joined_since_cooldown += 1
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            if attempt >= TELEGRAM_RECONNECT_RETRIES or not self._is_disconnect_error(exc) or self.db.should_stop_task(task_id):
+                                raise
+                            attempt += 1
+                            logger.warning(
+                                "%s%s 群组连接中断，准备重连后重试｜群=%s｜第%s次｜错误=%s",
+                                self._task_tag(task_id),
+                                self._account_tag(account_id),
+                                task_channel["channel"],
+                                attempt,
+                                self._short_error(exc),
+                            )
+                            client = await self._reconnect_client(client, session_file, account_row=account_row)
+                            self.db.update_account_status(account_id, status="collecting", last_error=None)
                 finally:
                     queue.task_done()
         except asyncio.CancelledError:
@@ -594,11 +635,11 @@ class CollectionManager:
                 self.settings.api_id,
                 self.settings.api_hash,
                 proxy=proxy,
-                timeout=8,
-                request_retries=2,
-                connection_retries=1,
-                retry_delay=0,
-                auto_reconnect=False,
+                timeout=TELEGRAM_CLIENT_TIMEOUT,
+                request_retries=TELEGRAM_REQUEST_RETRIES,
+                connection_retries=TELEGRAM_CONNECTION_RETRIES,
+                retry_delay=TELEGRAM_RETRY_DELAY,
+                auto_reconnect=True,
             )
         except ValueError as exc:
             if "too many values to unpack" not in str(exc):
@@ -612,11 +653,11 @@ class CollectionManager:
                 self.settings.api_id,
                 self.settings.api_hash,
                 proxy=proxy,
-                timeout=8,
-                request_retries=2,
-                connection_retries=1,
-                retry_delay=0,
-                auto_reconnect=False,
+                timeout=TELEGRAM_CLIENT_TIMEOUT,
+                request_retries=TELEGRAM_REQUEST_RETRIES,
+                connection_retries=TELEGRAM_CONNECTION_RETRIES,
+                retry_delay=TELEGRAM_RETRY_DELAY,
+                auto_reconnect=True,
             )
 
     async def connect_client(self, session_file: Path, *, account_row=None) -> TelegramClient:
@@ -679,6 +720,33 @@ class CollectionManager:
             return True
         text = str(exc or "").lower()
         return any(keyword in text for keyword in ("timeout", "timed out", "time out"))
+
+    @staticmethod
+    def _is_disconnect_error(exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        keywords = (
+            "while disconnected",
+            "connection closed while receiving data",
+            "server closed the connection",
+            "automatic reconnection failed",
+            "not connected",
+            "connection was closed",
+            "connection reset",
+            "incompletereaderror",
+            "bytes read on a total",
+        )
+        return any(keyword in text for keyword in keywords)
+
+    async def _reconnect_client(self, client: TelegramClient | None, session_file: Path, *, account_row=None) -> TelegramClient:
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        new_client = await self.connect_client(session_file, account_row=account_row)
+        if not await new_client.is_user_authorized():
+            raise RuntimeError("session 未登录")
+        return new_client
 
     def _build_compat_session_file(self, session_file: Path) -> Path:
         compat_file = session_file.with_name(f"{session_file.stem}.compat.session")
