@@ -81,6 +81,9 @@ PENDING_LIST_EMOJI_ID = "5359535585251838264"  # ⏰
 COLLECT_CHANNEL_EMOJI_ID = "5402471432712113737"  # 📢
 COLLECT_GROUP_EMOJI_ID = "6048783222425260180"    # 👥
 HISTORY_RESULT_EMOJI_ID = "5215209935188534658"   # 📝
+SELECT_RANGE_EMOJI_ID = "5359535585251838264"    # ⏰
+DAY_OPTION_EMOJI_ID = "5215553987838749679"      # 🟡
+CANCEL_EMOJI_ID = "5226886710020820160"          # 🔴
 
 
 class DmCollectorBot:
@@ -3657,7 +3660,7 @@ class DmCollectorBot:
         preview = "\n".join(f"• {html.escape(channel, quote=False)}" for channel in channels[:6])
         unit = "群组" if task_type == "group" else "频道"
         return (
-            f"{tg_emoji(self.settings.emoji_welcome_id, '🌠')} <b>选择采集时间范围</b>\n"
+            f"{tg_emoji(SELECT_RANGE_EMOJI_ID, '⏰')} <b>选择采集时间范围</b>\n"
             f"{unit}数：<code>{len(channels)}</code>\n\n{preview}"
         )
 
@@ -3826,16 +3829,16 @@ class DmCollectorBot:
     def _build_days_keyboard(self) -> InlineKeyboardMarkup:
         keyboard = [
             [
-                premium_button("1 天", self.settings.emoji_waiting_id, callback_data="wizard:days:1"),
-                premium_button("3 天", self.settings.emoji_progress_id, callback_data="wizard:days:3"),
+                premium_button("1 天", DAY_OPTION_EMOJI_ID, callback_data="wizard:days:1"),
+                premium_button("3 天", DAY_OPTION_EMOJI_ID, callback_data="wizard:days:3"),
             ],
             [
-                premium_button("7 天", self.settings.emoji_history_id, callback_data="wizard:days:7"),
-                premium_button("15 天", self.settings.emoji_stats_id, callback_data="wizard:days:15"),
+                premium_button("7 天", DAY_OPTION_EMOJI_ID, callback_data="wizard:days:7"),
+                premium_button("15 天", DAY_OPTION_EMOJI_ID, callback_data="wizard:days:15"),
             ],
             [
                 premium_button("自定义", self.settings.emoji_idea_id, callback_data="wizard:days_custom"),
-                premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+                premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -3856,7 +3859,7 @@ class DmCollectorBot:
             ],
             [
                 premium_button("完成设置", self.settings.emoji_ok_id, callback_data="wizard:gflt:done"),
-                premium_button("取消", self.settings.emoji_back_id, callback_data="wizard:cancel"),
+                premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -3877,11 +3880,11 @@ class DmCollectorBot:
         if row_buffer:
             keyboard.append(row_buffer)
         keyboard.append([
-            premium_button("使用全部可用账号", self.settings.emoji_all_id, callback_data="wizard:acc:auto"),
+            premium_button("使用全部可用账号", SELECT_ACTION_EMOJI_ID, callback_data="wizard:acc:auto"),
             premium_button("完成选择", SELECT_ACTION_EMOJI_ID, callback_data="wizard:acc:done"),
         ])
         keyboard.append([
-            premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+            premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
             premium_button("重新开始", self.settings.emoji_idea_id, callback_data="collect:new"),
         ])
         return InlineKeyboardMarkup(keyboard)
@@ -3973,7 +3976,7 @@ class DmCollectorBot:
             [premium_button("继续输入文案", DM_CONTINUE_EMOJI_ID, callback_data="dm:wizard:cfg:done")],
             [
                 premium_button("重新选账号", self.settings.emoji_back_id, callback_data="dm:wizard:back_accounts"),
-                premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
+                premium_button("取消", CANCEL_EMOJI_ID, callback_data="dm:wizard:cancel"),
             ],
         ])
         return InlineKeyboardMarkup(keyboard)
@@ -4009,7 +4012,7 @@ class DmCollectorBot:
             keyboard.append(row_buffer)
         keyboard.append([
             premium_button("自定义线程", self.settings.emoji_idea_id, callback_data="wizard:wrk_custom"),
-            premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+            premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
         ])
         return InlineKeyboardMarkup(keyboard)
 
@@ -4017,7 +4020,7 @@ class DmCollectorBot:
         keyboard = [
             [
                 premium_button("开始采集", self.settings.emoji_start_id, callback_data="wizard:start"),
-                premium_button("取消", self.settings.emoji_error_id, callback_data="wizard:cancel"),
+                premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
             ]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -4055,7 +4058,7 @@ class DmCollectorBot:
             ],
             [
                 premium_button("返回上一步", self.settings.emoji_back_id, callback_data=back_callback),
-                premium_button("取消", self.settings.emoji_error_id, callback_data="dm:wizard:cancel"),
+                premium_button("取消", CANCEL_EMOJI_ID, callback_data="dm:wizard:cancel"),
             ],
         ])
 
