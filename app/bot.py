@@ -3236,8 +3236,9 @@ class DmCollectorBot:
             lines.append("提示：<code>已保留当前已采集结果，可直接点击“导出结果”</code>")
         if visible_channels:
             lines.append("")
-            lines.append(f"<b>{unit}子任务</b>")
-            for item in visible_channels[:6]:
+            section_title = "采集任务日志（最新5条）" if task_type == "group" else f"{unit}子任务"
+            lines.append(f"<b>{section_title}</b>")
+            for item in visible_channels[:5]:
                 item_runtime = self._format_runtime(item["started_at"], item["finished_at"])
                 runtime_suffix = f" · 已跑 <code>{item_runtime}</code>" if item["status"] == "running" and item_runtime else ""
                 lines.append(
