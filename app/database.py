@@ -90,6 +90,14 @@ class Database:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS authorized_users (
+                    tg_user_id INTEGER PRIMARY KEY,
+                    granted_by INTEGER,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS collect_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     requester_id INTEGER NOT NULL,
@@ -188,6 +196,7 @@ class Database:
                 """
             )
             for statement in (
+                "ALTER TABLE accounts ADD COLUMN owner_id INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE collect_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'channel'",
                 "ALTER TABLE collect_tasks ADD COLUMN filters_json TEXT NOT NULL DEFAULT '{}'",
                 "ALTER TABLE accounts ADD COLUMN proxy_type TEXT",
@@ -201,7 +210,130 @@ class Database:
                 except sqlite3.OperationalError:
                     pass
             ensure_dm_schema(self.conn)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_owner_id ON accounts(owner_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_collect_tasks_requester_id ON collect_tasks(requester_id)")
             self.conn.commit()
+
+    def bootstrap_access(self, admin_ids: list[int]) -> None:
+        admin_ids = [int(item) for item in admin_ids if int(item) > 0]
+        if not admin_ids:
+            return
+        primary_admin_id = admin_ids[0]
+        with self.lock:
+            for admin_id in admin_ids:
+                self.conn.execute(
+                    """
+                    INSERT INTO authorized_users (tg_user_id, granted_by, enabled, updated_at)
+                    VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(tg_user_id) DO UPDATE SET
+                        enabled=1,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (admin_id, admin_id),
+                )
+            self.conn.execute(
+                "UPDATE accounts SET owner_id=? WHERE COALESCE(owner_id, 0)=0",
+                (primary_admin_id,),
+            )
+
+            legacy_pool = self.conn.execute(
+                "SELECT value FROM app_settings WHERE key='global_proxy_pool'"
+            ).fetchone()
+            legacy_single = self.conn.execute(
+                "SELECT value FROM app_settings WHERE key='global_proxy'"
+            ).fetchone()
+            owner_pool_key = self._proxy_setting_key(primary_admin_id, pooled=True)
+            owner_single_key = self._proxy_setting_key(primary_admin_id, pooled=False)
+            owner_has_proxy = self.conn.execute(
+                "SELECT 1 FROM app_settings WHERE key IN (?, ?) LIMIT 1",
+                (owner_pool_key, owner_single_key),
+            ).fetchone()
+            if not owner_has_proxy:
+                if legacy_pool and legacy_pool[0]:
+                    self.conn.execute(
+                        """
+                        INSERT INTO app_settings (key, value, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(key) DO UPDATE SET
+                            value=excluded.value,
+                            updated_at=CURRENT_TIMESTAMP
+                        """,
+                        (owner_pool_key, legacy_pool[0]),
+                    )
+                elif legacy_single and legacy_single[0]:
+                    self.conn.execute(
+                        """
+                        INSERT INTO app_settings (key, value, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(key) DO UPDATE SET
+                            value=excluded.value,
+                            updated_at=CURRENT_TIMESTAMP
+                        """,
+                        (owner_single_key, legacy_single[0]),
+                    )
+            self.conn.commit()
+
+    @staticmethod
+    def _proxy_setting_key(owner_id: int, *, pooled: bool) -> str:
+        return f"owner:{int(owner_id)}:{'global_proxy_pool' if pooled else 'global_proxy'}"
+
+    def is_user_authorized(self, user_id: int) -> bool:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT enabled FROM authorized_users WHERE tg_user_id=?",
+                (user_id,),
+            ).fetchone()
+        return bool(row and int(row[0]))
+
+    def grant_user_access(self, tg_user_id: int, *, granted_by: int) -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO authorized_users (tg_user_id, granted_by, enabled, updated_at)
+                VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(tg_user_id) DO UPDATE SET
+                    granted_by=excluded.granted_by,
+                    enabled=1,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (tg_user_id, granted_by),
+            )
+            self.conn.commit()
+
+    def revoke_user_access(self, tg_user_id: int) -> None:
+        with self.lock:
+            self.conn.execute(
+                "UPDATE authorized_users SET enabled=0, updated_at=CURRENT_TIMESTAMP WHERE tg_user_id=?",
+                (tg_user_id,),
+            )
+            self.conn.commit()
+
+    def list_authorized_users(self) -> list[sqlite3.Row]:
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT au.*, u.username, u.first_name, u.last_name, u.chat_id, u.last_seen_at
+                FROM authorized_users au
+                LEFT JOIN users u ON u.tg_user_id = au.tg_user_id
+                WHERE au.enabled=1
+                ORDER BY au.created_at ASC, au.tg_user_id ASC
+                """
+            ).fetchall()
+
+    def get_known_user_by_username(self, username: str) -> sqlite3.Row | None:
+        normalized = str(username or "").strip().lstrip("@").lower()
+        if not normalized:
+            return None
+        with self.lock:
+            return self.conn.execute(
+                """
+                SELECT * FROM users
+                WHERE LOWER(COALESCE(username, ''))=?
+                ORDER BY last_seen_at DESC
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
 
     # ---------- basic dm storage ----------
     def upsert_user(self, user: Any, chat_id: int, increment_start: bool = False, increment_message: bool = False) -> None:
@@ -341,6 +473,7 @@ class Database:
     def upsert_account(
         self,
         *,
+        owner_id: int,
         session_name: str,
         session_file: str,
         tg_user_id: int | None,
@@ -353,15 +486,16 @@ class Database:
         with self.lock:
             existing = None
             if tg_user_id is not None:
-                existing = self.conn.execute("SELECT * FROM accounts WHERE tg_user_id=?", (tg_user_id,)).fetchone()
+                existing = self.conn.execute("SELECT * FROM accounts WHERE tg_user_id=? AND owner_id=?", (tg_user_id, owner_id)).fetchone()
             if existing is None:
-                existing = self.conn.execute("SELECT * FROM accounts WHERE session_file=?", (session_file,)).fetchone()
+                existing = self.conn.execute("SELECT * FROM accounts WHERE session_file=? AND owner_id=?", (session_file, owner_id)).fetchone()
             if existing is None:
-                existing = self.conn.execute("SELECT * FROM accounts WHERE session_name=?", (session_name,)).fetchone()
+                existing = self.conn.execute("SELECT * FROM accounts WHERE session_name=? AND owner_id=?", (session_name, owner_id)).fetchone()
             if existing:
                 self.conn.execute(
                     """
                     UPDATE accounts SET
+                        owner_id=?,
                         session_name=?,
                         session_file=?,
                         phone=?,
@@ -373,67 +507,105 @@ class Database:
                         updated_at=CURRENT_TIMESTAMP
                     WHERE id=?
                     """,
-                    (session_name, session_file, phone, username, display_name, status, last_error, existing["id"]),
+                    (owner_id, session_name, session_file, phone, username, display_name, status, last_error, existing["id"]),
                 )
                 account_id = existing["id"]
             else:
                 self.conn.execute(
                     """
                     INSERT INTO accounts (
-                        session_name, session_file, tg_user_id, phone, username, display_name,
+                        owner_id, session_name, session_file, tg_user_id, phone, username, display_name,
                         status, last_error, last_checked_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
-                    (session_name, session_file, tg_user_id, phone, username, display_name, status, last_error),
+                    (owner_id, session_name, session_file, tg_user_id, phone, username, display_name, status, last_error),
                 )
                 account_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             self.conn.commit()
             return self.conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
 
-    def list_accounts(self, *, limit: int = 20, offset: int = 0) -> list[sqlite3.Row]:
+    def list_accounts(self, *, owner_id: int | None = None, limit: int = 20, offset: int = 0) -> list[sqlite3.Row]:
         with self.lock:
+            if owner_id is None:
+                return self.conn.execute(
+                    "SELECT * FROM accounts WHERE status IN ('active','checking','collecting') ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
             return self.conn.execute(
-                "SELECT * FROM accounts WHERE status IN ('active','checking','collecting') ORDER BY id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                "SELECT * FROM accounts WHERE owner_id=? AND status IN ('active','checking','collecting') ORDER BY id DESC LIMIT ? OFFSET ?",
+                (owner_id, limit, offset),
             ).fetchall()
 
-    def list_all_accounts(self) -> list[sqlite3.Row]:
+    def list_all_accounts(self, *, owner_id: int | None = None) -> list[sqlite3.Row]:
         with self.lock:
+            if owner_id is None:
+                return self.conn.execute("SELECT * FROM accounts ORDER BY id DESC").fetchall()
             return self.conn.execute(
-                "SELECT * FROM accounts ORDER BY id DESC"
+                "SELECT * FROM accounts WHERE owner_id=? ORDER BY id DESC",
+                (owner_id,),
             ).fetchall()
 
-    def list_invalid_accounts(self) -> list[sqlite3.Row]:
+    def list_invalid_accounts(self, *, owner_id: int | None = None) -> list[sqlite3.Row]:
         with self.lock:
+            if owner_id is None:
+                return self.conn.execute(
+                    "SELECT * FROM accounts WHERE status NOT IN ('active','checking','collecting') ORDER BY id DESC"
+                ).fetchall()
             return self.conn.execute(
-                "SELECT * FROM accounts WHERE status NOT IN ('active','checking','collecting') ORDER BY id DESC"
+                "SELECT * FROM accounts WHERE owner_id=? AND status NOT IN ('active','checking','collecting') ORDER BY id DESC",
+                (owner_id,),
             ).fetchall()
 
-    def count_accounts(self) -> int:
+    def count_accounts(self, *, owner_id: int | None = None) -> int:
         with self.lock:
-            return self.conn.execute("SELECT COUNT(*) FROM accounts WHERE status IN ('active','checking','collecting')").fetchone()[0]
-
-    def get_account_status_counts(self) -> dict[str, int]:
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT status, COUNT(*) AS total FROM accounts WHERE status IN ('active','checking','collecting') GROUP BY status"
-            ).fetchall()
-            invalid_total = self.conn.execute(
-                "SELECT COUNT(*) FROM accounts WHERE status NOT IN ('active','checking','collecting')"
+            if owner_id is None:
+                return self.conn.execute("SELECT COUNT(*) FROM accounts WHERE status IN ('active','checking','collecting')").fetchone()[0]
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM accounts WHERE owner_id=? AND status IN ('active','checking','collecting')",
+                (owner_id,),
             ).fetchone()[0]
+
+    def get_account_status_counts(self, *, owner_id: int | None = None) -> dict[str, int]:
+        with self.lock:
+            if owner_id is None:
+                rows = self.conn.execute(
+                    "SELECT status, COUNT(*) AS total FROM accounts WHERE status IN ('active','checking','collecting') GROUP BY status"
+                ).fetchall()
+                invalid_total = self.conn.execute(
+                    "SELECT COUNT(*) FROM accounts WHERE status NOT IN ('active','checking','collecting')"
+                ).fetchone()[0]
+            else:
+                rows = self.conn.execute(
+                    "SELECT status, COUNT(*) AS total FROM accounts WHERE owner_id=? AND status IN ('active','checking','collecting') GROUP BY status",
+                    (owner_id,),
+                ).fetchall()
+                invalid_total = self.conn.execute(
+                    "SELECT COUNT(*) FROM accounts WHERE owner_id=? AND status NOT IN ('active','checking','collecting')",
+                    (owner_id,),
+                ).fetchone()[0]
         result = {"active": 0, "checking": 0, "collecting": 0, "invalid": int(invalid_total)}
         for row in rows:
             result[str(row["status"])] = int(row["total"])
         return result
 
-    def get_account(self, account_id: int) -> sqlite3.Row | None:
+    def get_account(self, account_id: int, *, owner_id: int | None = None) -> sqlite3.Row | None:
         with self.lock:
-            return self.conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
-
-    def get_active_accounts(self) -> list[sqlite3.Row]:
-        with self.lock:
+            if owner_id is None:
+                return self.conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
             return self.conn.execute(
-                "SELECT * FROM accounts WHERE status='active' ORDER BY id DESC"
+                "SELECT * FROM accounts WHERE id=? AND owner_id=?",
+                (account_id, owner_id),
+            ).fetchone()
+
+    def get_active_accounts(self, *, owner_id: int | None = None) -> list[sqlite3.Row]:
+        with self.lock:
+            if owner_id is None:
+                return self.conn.execute(
+                    "SELECT * FROM accounts WHERE status='active' ORDER BY id DESC"
+                ).fetchall()
+            return self.conn.execute(
+                "SELECT * FROM accounts WHERE owner_id=? AND status='active' ORDER BY id DESC",
+                (owner_id,),
             ).fetchall()
 
     def update_account_status(
@@ -465,9 +637,12 @@ class Database:
             )
             self.conn.commit()
 
-    def delete_account(self, account_id: int) -> sqlite3.Row | None:
+    def delete_account(self, account_id: int, *, owner_id: int | None = None) -> sqlite3.Row | None:
         with self.lock:
-            row = self.conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
+            if owner_id is None:
+                row = self.conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
+            else:
+                row = self.conn.execute("SELECT * FROM accounts WHERE id=? AND owner_id=?", (account_id, owner_id)).fetchone()
             if row:
                 self.conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
                 self.conn.commit()
@@ -499,16 +674,22 @@ class Database:
             )
             self.conn.commit()
 
-    def get_global_proxy(self) -> dict[str, Any] | None:
-        proxies = self.get_global_proxies()
+    def get_global_proxy(self, *, owner_id: int) -> dict[str, Any] | None:
+        proxies = self.get_global_proxies(owner_id=owner_id)
         if not proxies:
             return None
         return random.choice(proxies)
 
-    def get_global_proxies(self) -> list[dict[str, Any]]:
+    def get_global_proxies(self, *, owner_id: int) -> list[dict[str, Any]]:
         with self.lock:
-            pool_row = self.conn.execute("SELECT value FROM app_settings WHERE key='global_proxy_pool'").fetchone()
-            single_row = self.conn.execute("SELECT value FROM app_settings WHERE key='global_proxy'").fetchone()
+            pool_row = self.conn.execute(
+                "SELECT value FROM app_settings WHERE key=?",
+                (self._proxy_setting_key(owner_id, pooled=True),),
+            ).fetchone()
+            single_row = self.conn.execute(
+                "SELECT value FROM app_settings WHERE key=?",
+                (self._proxy_setting_key(owner_id, pooled=False),),
+            ).fetchone()
         rows_to_try = []
         if pool_row and pool_row[0]:
             rows_to_try.append(pool_row[0])
@@ -528,6 +709,7 @@ class Database:
     def set_global_proxy(
         self,
         *,
+        owner_id: int,
         proxy_type: str,
         proxy_host: str,
         proxy_port: int,
@@ -548,34 +730,37 @@ class Database:
             self.conn.execute(
                 """
                 INSERT INTO app_settings (key, value, updated_at)
-                VALUES ('global_proxy', ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(key) DO UPDATE SET
                     value=excluded.value,
                     updated_at=CURRENT_TIMESTAMP
                 """,
-                (payload,),
+                (self._proxy_setting_key(owner_id, pooled=False), payload),
             )
             self.conn.commit()
 
-    def set_global_proxies(self, proxies: list[dict[str, Any]]) -> None:
+    def set_global_proxies(self, proxies: list[dict[str, Any]], *, owner_id: int) -> None:
         payload = json.dumps(proxies, ensure_ascii=False)
         with self.lock:
             self.conn.execute(
                 """
                 INSERT INTO app_settings (key, value, updated_at)
-                VALUES ('global_proxy_pool', ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(key) DO UPDATE SET
                     value=excluded.value,
                     updated_at=CURRENT_TIMESTAMP
                 """,
-                (payload,),
+                (self._proxy_setting_key(owner_id, pooled=True), payload),
             )
             if proxies:
-                self.conn.execute("DELETE FROM app_settings WHERE key='global_proxy'")
+                self.conn.execute(
+                    "DELETE FROM app_settings WHERE key=?",
+                    (self._proxy_setting_key(owner_id, pooled=False),),
+                )
             self.conn.commit()
 
-    def add_global_proxies(self, proxies: list[dict[str, Any]]) -> int:
-        existing = self.get_global_proxies()
+    def add_global_proxies(self, proxies: list[dict[str, Any]], *, owner_id: int) -> int:
+        existing = self.get_global_proxies(owner_id=owner_id)
         seen: set[tuple[str, str, int, str, str]] = set()
         merged: list[dict[str, Any]] = []
         for item in [*existing, *proxies]:
@@ -593,13 +778,13 @@ class Database:
                 continue
             seen.add(key)
             merged.append(dict(item))
-        self.set_global_proxies(merged)
+        self.set_global_proxies(merged, owner_id=owner_id)
         return max(0, len(merged) - len(existing))
 
-    def clear_global_proxy(self) -> None:
+    def clear_global_proxy(self, *, owner_id: int) -> None:
         with self.lock:
-            self.conn.execute("DELETE FROM app_settings WHERE key='global_proxy'")
-            self.conn.execute("DELETE FROM app_settings WHERE key='global_proxy_pool'")
+            self.conn.execute("DELETE FROM app_settings WHERE key=?", (self._proxy_setting_key(owner_id, pooled=False),))
+            self.conn.execute("DELETE FROM app_settings WHERE key=?", (self._proxy_setting_key(owner_id, pooled=True),))
             self.conn.commit()
 
     # ---------- collection task storage ----------
@@ -642,25 +827,48 @@ class Database:
             self.conn.commit()
             return self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
 
-    def get_collect_task(self, task_id: int) -> sqlite3.Row | None:
+    def get_collect_task(self, task_id: int, *, requester_id: int | None = None) -> sqlite3.Row | None:
         with self.lock:
-            return self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
-
-    def list_collect_tasks(self, *, limit: int = 10, offset: int = 0, history: bool = False) -> list[sqlite3.Row]:
-        with self.lock:
-            if history:
-                query = "SELECT * FROM collect_tasks ORDER BY id DESC LIMIT ? OFFSET ?"
-                return self.conn.execute(query, (limit, offset)).fetchall()
-            query = "SELECT * FROM collect_tasks WHERE status IN ('queued','running','stopped','error','completed') ORDER BY id DESC LIMIT ? OFFSET ?"
-            return self.conn.execute(query, (limit, offset)).fetchall()
-
-    def count_collect_tasks(self, *, history: bool = False) -> int:
-        with self.lock:
-            if history:
-                return self.conn.execute("SELECT COUNT(*) FROM collect_tasks WHERE status IN ('completed','stopped','error')").fetchone()[0]
+            if requester_id is None:
+                return self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
             return self.conn.execute(
-                "SELECT COUNT(*) FROM collect_tasks WHERE status IN ('queued','running','stopped','error','completed')"
-            ).fetchone()[0]
+                "SELECT * FROM collect_tasks WHERE id=? AND requester_id=?",
+                (task_id, requester_id),
+            ).fetchone()
+
+    def list_collect_tasks(self, *, requester_id: int | None = None, limit: int = 10, offset: int = 0, history: bool = False) -> list[sqlite3.Row]:
+        with self.lock:
+            where: list[str] = []
+            params: list[object] = []
+            if requester_id is not None:
+                where.append("requester_id=?")
+                params.append(requester_id)
+            if history:
+                query = "SELECT * FROM collect_tasks"
+            else:
+                where.append("status IN ('queued','running','stopped','error','completed')")
+                query = "SELECT * FROM collect_tasks"
+            if where:
+                query += f" WHERE {' AND '.join(where)}"
+            query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+            return self.conn.execute(query, params).fetchall()
+
+    def count_collect_tasks(self, *, requester_id: int | None = None, history: bool = False) -> int:
+        with self.lock:
+            where: list[str] = []
+            params: list[object] = []
+            if requester_id is not None:
+                where.append("requester_id=?")
+                params.append(requester_id)
+            if history:
+                where.append("status IN ('completed','stopped','error')")
+            else:
+                where.append("status IN ('queued','running','stopped','error','completed')")
+            query = "SELECT COUNT(*) FROM collect_tasks"
+            if where:
+                query += f" WHERE {' AND '.join(where)}"
+            return self.conn.execute(query, params).fetchone()[0]
 
     def list_collect_task_channels(self, task_id: int) -> list[sqlite3.Row]:
         with self.lock:
@@ -817,18 +1025,25 @@ class Database:
             self.conn.commit()
             return self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
 
-    def recover_interrupted_tasks(self, *, reason: str) -> int:
+    def recover_interrupted_tasks(self, *, reason: str, requester_id: int | None = None) -> int:
         with self.lock:
-            rows = self.conn.execute(
-                "SELECT id FROM collect_tasks WHERE status IN ('queued', 'running') ORDER BY id ASC"
-            ).fetchall()
+            if requester_id is None:
+                rows = self.conn.execute(
+                    "SELECT id FROM collect_tasks WHERE status IN ('queued', 'running') ORDER BY id ASC"
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT id FROM collect_tasks WHERE requester_id=? AND status IN ('queued', 'running') ORDER BY id ASC",
+                    (requester_id,),
+                ).fetchall()
         for row in rows:
             self.stop_collect_task_now(row["id"], reason=reason)
-        with self.lock:
-            self.conn.execute(
-                "UPDATE accounts SET status='active', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE status='collecting'"
-            )
-            self.conn.commit()
+        if requester_id is None:
+            with self.lock:
+                self.conn.execute(
+                    "UPDATE accounts SET status='active', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE status='collecting'"
+                )
+                self.conn.commit()
         return len(rows)
 
     def should_stop_task(self, task_id: int) -> bool:
@@ -1097,9 +1312,12 @@ class Database:
             )
             self.conn.commit()
 
-    def delete_collect_task(self, task_id: int) -> sqlite3.Row | None:
+    def delete_collect_task(self, task_id: int, *, requester_id: int | None = None) -> sqlite3.Row | None:
         with self.lock:
-            row = self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
+            if requester_id is None:
+                row = self.conn.execute("SELECT * FROM collect_tasks WHERE id=?", (task_id,)).fetchone()
+            else:
+                row = self.conn.execute("SELECT * FROM collect_tasks WHERE id=? AND requester_id=?", (task_id, requester_id)).fetchone()
             if not row:
                 return None
             self.conn.execute("DELETE FROM collect_task_usernames WHERE task_id=?", (task_id,))
@@ -1109,18 +1327,29 @@ class Database:
             self.conn.commit()
             return row
 
-    def list_history_tasks(self, *, limit: int = 10, offset: int = 0) -> list[sqlite3.Row]:
+    def list_history_tasks(self, *, requester_id: int | None = None, limit: int = 10, offset: int = 0) -> list[sqlite3.Row]:
         with self.lock:
+            if requester_id is None:
+                return self.conn.execute(
+                    "SELECT * FROM collect_tasks WHERE status IN ('completed','stopped','error') ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
             return self.conn.execute(
-                "SELECT * FROM collect_tasks WHERE status IN ('completed','stopped','error') ORDER BY id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                "SELECT * FROM collect_tasks WHERE requester_id=? AND status IN ('completed','stopped','error') ORDER BY id DESC LIMIT ? OFFSET ?",
+                (requester_id, limit, offset),
             ).fetchall()
 
-    def delete_history_tasks(self) -> list[sqlite3.Row]:
+    def delete_history_tasks(self, *, requester_id: int | None = None) -> list[sqlite3.Row]:
         with self.lock:
-            rows = self.conn.execute(
-                "SELECT * FROM collect_tasks WHERE status IN ('completed','stopped','error') ORDER BY id DESC"
-            ).fetchall()
+            if requester_id is None:
+                rows = self.conn.execute(
+                    "SELECT * FROM collect_tasks WHERE status IN ('completed','stopped','error') ORDER BY id DESC"
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT * FROM collect_tasks WHERE requester_id=? AND status IN ('completed','stopped','error') ORDER BY id DESC",
+                    (requester_id,),
+                ).fetchall()
             if not rows:
                 return []
             task_ids = [int(row['id']) for row in rows]

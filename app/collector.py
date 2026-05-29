@@ -699,7 +699,13 @@ class CollectionManager:
             )
 
     async def connect_client(self, session_file: Path, *, account_row=None, receive_updates: bool = False) -> TelegramClient:
-        proxy_pool = self.db.get_global_proxies()
+        owner_id = None
+        if account_row is not None:
+            try:
+                owner_id = int(account_row["owner_id"])
+            except Exception:
+                owner_id = None
+        proxy_pool = self.db.get_global_proxies(owner_id=owner_id) if owner_id else []
         if not proxy_pool:
             client = self._build_client(session_file, account_row=account_row, proxy_row=None, receive_updates=receive_updates)
             await client.connect()

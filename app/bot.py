@@ -125,6 +125,7 @@ class DmCollectorBot:
         self.dm_progress_snapshots: dict[int, dict[str, float | int | str]] = {}
         self.application.bot_data["settings"] = settings
         self.application.bot_data["db"] = self.db
+        self.db.bootstrap_access(list(settings.admin_ids))
         recovered = self.db.recover_interrupted_tasks(reason="机器人重启，已停止上次未完成任务并释放账号")
         if recovered:
             logger.info("启动时已回收中断采集任务: %s", recovered)
@@ -233,7 +234,7 @@ class DmCollectorBot:
         query = update.callback_query
         if not query or not update.effective_user:
             return
-        if not await self._ensure_admin(update):
+        if not await self._ensure_authorized(update):
             return
 
         data = query.data or ""
@@ -252,6 +253,11 @@ class DmCollectorBot:
         if data == "menu:accounts":
             await self._show_accounts_menu(query, page=1)
             return
+        if data == "menu:users":
+            if not await self._ensure_admin(update):
+                return
+            await self._show_authorized_users(query)
+            return
         if data == "menu:collect":
             await self._show_collect_menu(query)
             return
@@ -268,6 +274,18 @@ class DmCollectorBot:
         if data == "account:upload":
             self.user_states[update.effective_user.id] = {"mode": "await_session_upload"}
             await self._safe_edit(query, self._upload_prompt_text(), self._single_back_keyboard("menu:accounts"))
+            return
+        if data == "user:grant":
+            if not await self._ensure_admin(update):
+                return
+            self.user_states[update.effective_user.id] = {"mode": "await_grant_user"}
+            await self._safe_edit(query, self._grant_user_prompt_text(), self._single_back_keyboard("menu:users"))
+            return
+        if data.startswith("user:revoke:"):
+            if not await self._ensure_admin(update):
+                return
+            target_user_id = int(data.split(":")[-1])
+            await self._revoke_authorized_user(query, target_user_id)
             return
         if data.startswith("account:list:"):
             page = int(data.split(":")[-1])
@@ -581,7 +599,7 @@ class DmCollectorBot:
     async def handle_document_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_message or not update.effective_chat:
             return
-        if not self._is_admin(update.effective_user.id):
+        if not self._has_access(update.effective_user.id):
             return
 
         document = update.effective_message.document
@@ -609,7 +627,7 @@ class DmCollectorBot:
 
         try:
             await self.application.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
-            session_files = await self._save_uploaded_session_files(document)
+            session_files = await self._save_uploaded_session_files(document, owner_id=update.effective_user.id)
         except zipfile.BadZipFile:
             await update.effective_message.reply_text(
                 f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 这个 zip 看起来不是有效压缩包，请重新打包后再传。",
@@ -634,6 +652,7 @@ class DmCollectorBot:
         imported_accounts = []
         for session_file in session_files:
             account = self.db.upsert_account(
+                owner_id=update.effective_user.id,
                 session_name=session_file.stem,
                 session_file=str(session_file),
                 tg_user_id=None,
@@ -699,10 +718,10 @@ class DmCollectorBot:
             parse_mode=ParseMode.HTML,
         )
         valid, invalid = await self._resolve_proxy_lines(cleaned_lines)
-        added = self.db.add_global_proxies(valid) if valid else 0
+        added = self.db.add_global_proxies(valid, owner_id=update.effective_user.id) if valid else 0
         self._clear_state(update.effective_user.id)
         await message.reply_text(
-            self._format_proxy_import_result(valid, invalid, added),
+            self._format_proxy_import_result(valid, invalid, added, owner_id=update.effective_user.id),
             parse_mode=ParseMode.HTML,
             reply_markup=self._build_proxy_manage_keyboard(),
         )
@@ -724,10 +743,10 @@ class DmCollectorBot:
             text = bytes(raw_bytes).decode("utf-8-sig", errors="ignore")
         lines = parse_proxy_lines(text)
         valid, invalid = await self._resolve_proxy_lines(lines)
-        added = self.db.add_global_proxies(valid) if valid else 0
+        added = self.db.add_global_proxies(valid, owner_id=update.effective_user.id) if valid else 0
         self._clear_state(update.effective_user.id)
         await message.reply_text(
-            self._format_proxy_import_result(valid, invalid, added),
+            self._format_proxy_import_result(valid, invalid, added, owner_id=update.effective_user.id),
             parse_mode=ParseMode.HTML,
             reply_markup=self._build_proxy_manage_keyboard(),
         )
@@ -754,8 +773,8 @@ class DmCollectorBot:
                 invalid.append(payload)
         return valid, invalid
 
-    def _format_proxy_import_result(self, valid: list[dict], invalid: list[str], added: int) -> str:
-        proxies = self.db.get_global_proxies()
+    def _format_proxy_import_result(self, valid: list[dict], invalid: list[str], added: int, *, owner_id: int) -> str:
+        proxies = self.db.get_global_proxies(owner_id=owner_id)
         lines = [
             f"{tg_emoji(self.settings.emoji_success_id, '🆗')} <b>代理导入完成</b>",
             f"本次可用：<code>{len(valid)}</code>",
@@ -1025,7 +1044,7 @@ class DmCollectorBot:
     async def handle_admin_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.effective_message:
             return
-        if not self._is_admin(update.effective_user.id):
+        if not self._has_access(update.effective_user.id):
             return
 
         state = self.user_states.get(update.effective_user.id)
@@ -1034,6 +1053,35 @@ class DmCollectorBot:
 
         mode = state.get("mode")
         text = (update.effective_message.text or "").strip()
+        if mode == "await_grant_user":
+            if not self._is_admin(update.effective_user.id):
+                return
+            target_user_id: int | None = None
+            known_user = None
+            if text.startswith("@"):
+                known_user = self.db.get_known_user_by_username(text)
+                if known_user is not None:
+                    target_user_id = int(known_user["tg_user_id"])
+            else:
+                digits = re.sub(r"\D+", "", text)
+                if digits:
+                    target_user_id = int(digits)
+            if not target_user_id or target_user_id <= 0:
+                await update.effective_message.reply_text(
+                    f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 请输入正确的用户 ID，或先让对方给机器人发 /start 后再用 @username 授权。",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            self.db.grant_user_access(target_user_id, granted_by=update.effective_user.id)
+            self._clear_state(update.effective_user.id)
+            known_username = str(known_user["username"] or "").strip() if known_user else ""
+            suffix = f" (@{html.escape(known_username, quote=False)})" if known_username else ""
+            await update.effective_message.reply_text(
+                f"{tg_emoji(self.settings.emoji_success_id, '🆗')} 已开通用户 <code>{target_user_id}</code>{suffix} 的使用权。",
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._single_back_keyboard("menu:users"),
+            )
+            return
         if mode == "await_channels":
             channels = self._parse_channels(text)
             if not channels:
@@ -1277,7 +1325,7 @@ class DmCollectorBot:
             raw_json=raw_json,
         )
 
-        if self._is_admin(user.id):
+        if self._has_access(user.id):
             state = self.user_states.get(user.id) or {}
             mode = state.get("mode")
             if mode == "await_dm_media" and (message.photo or message.video):
@@ -1298,10 +1346,11 @@ class DmCollectorBot:
 
     # ---------- callbacks / menu rendering ----------
     async def _show_accounts_menu(self, query, page: int = 1) -> None:
-        count = self.db.count_accounts()
-        stats = self.db.get_account_status_counts()
-        restriction_stats = self.dm_repository.get_account_restriction_summary_counts()
-        global_proxies = self.db.get_global_proxies()
+        owner_id = int(query.from_user.id)
+        count = self.db.count_accounts(owner_id=owner_id)
+        stats = self.db.get_account_status_counts(owner_id=owner_id)
+        restriction_stats = self.dm_repository.get_account_restriction_summary_counts(owner_id=owner_id)
+        global_proxies = self.db.get_global_proxies(owner_id=owner_id)
         text = (
             f"{tg_emoji(ACCOUNTS_EMOJI_ID, '😃')} <b>账号管理</b>\n"
             f"当前存活账号：<code>{count}</code>\n"
@@ -1338,9 +1387,10 @@ class DmCollectorBot:
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
 
     async def _show_account_list(self, query, page: int = 1) -> None:
+        owner_id = int(query.from_user.id)
         per_page = 6
-        total = self.db.count_accounts()
-        rows = self.db.list_accounts(limit=per_page, offset=(page - 1) * per_page)
+        total = self.db.count_accounts(owner_id=owner_id)
+        rows = self.db.list_accounts(owner_id=owner_id, limit=per_page, offset=(page - 1) * per_page)
         total_pages = max(1, ceil(total / per_page))
         lines = [
             f"{tg_emoji(ACCOUNT_LIST_EMOJI_ID, '🚩')} <b>账号列表</b>",
@@ -1395,14 +1445,16 @@ class DmCollectorBot:
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
     async def _show_account_detail(self, query, account_id: int) -> None:
-        account = self.db.get_account(account_id)
+        owner_id = int(query.from_user.id)
+        account = self.db.get_account(account_id, owner_id=owner_id)
         if not account:
             await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
             return
         await self._safe_edit(query, self._format_account_text(account), self._build_account_detail_keyboard(account_id))
 
     async def _show_proxy_manage_menu(self, query) -> None:
-        proxies = self.db.get_global_proxies()
+        owner_id = int(query.from_user.id)
+        proxies = self.db.get_global_proxies(owner_id=owner_id)
         lines = [
             f"{tg_emoji(PROXY_EMOJI_ID, '🔗')} <b>代理管理</b>",
             f"当前代理池：<code>{html.escape(summarize_proxy_pool(proxies), quote=False)}</code>",
@@ -1432,7 +1484,7 @@ class DmCollectorBot:
             "mode": "await_global_proxy",
             "draft": {},
         }
-        current_proxy = self.db.get_global_proxies()
+        current_proxy = self.db.get_global_proxies(owner_id=user_id)
         text = (
             f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>导入代理</b>\n"
             f"当前代理池：<code>{html.escape(summarize_proxy_pool(current_proxy), quote=False)}</code>\n\n"
@@ -1444,12 +1496,13 @@ class DmCollectorBot:
         await self._safe_edit(query, text, self._single_back_keyboard("account:proxy:manage"))
 
     async def _clear_global_proxy(self, query) -> None:
-        self.db.clear_global_proxy()
+        self.db.clear_global_proxy(owner_id=int(query.from_user.id))
         await self._show_proxy_manage_menu(query)
         await self._safe_answer_callback(query, "代理池已清空", show_alert=False)
 
     async def _check_global_proxy_pool(self, query) -> None:
-        proxies = self.db.get_global_proxies()
+        owner_id = int(query.from_user.id)
+        proxies = self.db.get_global_proxies(owner_id=owner_id)
         if not proxies:
             await self._safe_answer_callback(query, "当前没有代理可检测", show_alert=True)
             return
@@ -1470,7 +1523,7 @@ class DmCollectorBot:
                 valid.append(proxy)
             else:
                 invalid.append(format_account_proxy_label(proxy))
-        self.db.set_global_proxies(valid)
+        self.db.set_global_proxies(valid, owner_id=owner_id)
         lines = [
             f"{tg_emoji(self.settings.emoji_stats_id, '🎚️')} <b>代理检测完成</b>",
             f"保留可用：<code>{len(valid)}</code>",
@@ -1845,8 +1898,64 @@ class DmCollectorBot:
         ]
         await self._safe_edit(query, text, InlineKeyboardMarkup(keyboard))
 
+    async def _show_authorized_users(self, query) -> None:
+        rows = self.db.list_authorized_users()
+        lines = [
+            f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} <b>用户授权管理</b>",
+            f"已授权用户：<code>{len(rows)}</code>",
+            "",
+            "说明：env 配置的管理员可给其他 Telegram 用户开通使用权；每个人的账号、代理、采集任务、私信任务、历史结果都会按自己的用户 ID 隔离。",
+        ]
+        keyboard: list[list] = [[
+            premium_button("添加使用权", SELECT_ACTION_EMOJI_ID, callback_data="user:grant"),
+            premium_button("刷新", self.settings.emoji_refresh_id, callback_data="menu:users"),
+        ]]
+        if rows:
+            lines.append("")
+            lines.append("<b>已授权列表</b>")
+            for row in rows:
+                user_id = int(row["tg_user_id"])
+                username = str(row["username"] or "").strip()
+                first_name = str(row["first_name"] or "").strip()
+                last_name = str(row["last_name"] or "").strip()
+                display_name = (first_name + (f" {last_name}" if last_name else "")).strip() or "-"
+                granted_by = int(row["granted_by"] or 0) if row["granted_by"] is not None else 0
+                label_parts = [f"<code>{user_id}</code>"]
+                if username:
+                    label_parts.append(f"@{html.escape(username, quote=False)}")
+                if display_name and display_name != "-":
+                    label_parts.append(html.escape(display_name, quote=False))
+                lines.append(f"• {' ｜ '.join(label_parts)}")
+                lines.append(f"  授权人：<code>{granted_by or user_id}</code>")
+                if not self._is_admin(user_id):
+                    keyboard.append([
+                        premium_button(f"移除 {user_id}", TRASH_EMOJI_ID, callback_data=f"user:revoke:{user_id}"),
+                    ])
+        else:
+            lines.append("")
+            lines.append("当前还没有额外授权的普通用户。")
+        keyboard.append([
+            premium_button("返回首页", self.settings.emoji_back_id, callback_data="menu:main"),
+        ])
+        await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
+
+    def _grant_user_prompt_text(self) -> str:
+        return (
+            f"{tg_emoji(self.settings.emoji_upload_id, '📷')} <b>添加用户使用权</b>\n"
+            f"请直接发送 Telegram 用户 ID，或发送 <code>@username</code>。\n\n"
+            f"注意：如果发的是用户名，对方必须先和这个机器人说过话，系统里才能识别到。"
+        )
+
+    async def _revoke_authorized_user(self, query, target_user_id: int) -> None:
+        if self._is_admin(target_user_id):
+            await self._safe_answer_callback(query, "env 管理员不能在这里被移除", show_alert=True)
+            return
+        self.db.revoke_user_access(target_user_id)
+        await self._safe_answer_callback(query, f"已移除用户 {target_user_id} 的使用权", show_alert=False)
+        await self._show_authorized_users(query)
+
     async def _start_dm_wizard(self, query, user_id: int) -> None:
-        active_accounts = self.db.get_active_accounts()
+        active_accounts = self.db.get_active_accounts(owner_id=user_id)
         if not active_accounts:
             await self._safe_edit(
                 query,
@@ -1857,6 +1966,7 @@ class DmCollectorBot:
         self.user_states[user_id] = {
             "mode": "await_dm_targets",
             "draft": {
+                "owner_id": user_id,
                 "message_mode": "single",
                 "content_type": "text",
                 "worker_count": 1,
@@ -1888,7 +1998,7 @@ class DmCollectorBot:
     async def _dm_wizard_auto_accounts(self, query, user_id: int) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
-        draft["account_ids"] = [int(row["id"]) for row in self.db.get_active_accounts()]
+        draft["account_ids"] = [int(row["id"]) for row in self.db.get_active_accounts(owner_id=user_id)]
         self._sync_dm_worker_count(draft)
         await self._render_dm_account_selection(query, draft)
 
@@ -2137,7 +2247,7 @@ class DmCollectorBot:
             return
 
         targets = [ParsedTarget(**item) for item in raw_targets]
-        recipient_ids = self.dm_repository.create_or_get_recipients(targets)
+        recipient_ids = self.dm_repository.create_or_get_recipients(targets, owner_id=user_id)
         policy = draft.get("policy") or {}
         worker_count = self._sync_dm_worker_count(draft)
         payload = self._build_dm_payload_from_draft(draft)
@@ -2458,11 +2568,12 @@ class DmCollectorBot:
         return "document"
 
     async def _show_dm_task_list(self, query, page: int = 1) -> None:
+        requester_id = int(query.from_user.id)
         per_page = 6
-        total = self.dm_repository.count_dm_tasks()
+        total = self.dm_repository.count_dm_tasks(requester_id=requester_id)
         total_pages = max(1, ceil(total / per_page))
         page = max(1, min(page, total_pages))
-        tasks = self.dm_repository.list_dm_tasks(limit=per_page, offset=(page - 1) * per_page)
+        tasks = self.dm_repository.list_dm_tasks(requester_id=requester_id, limit=per_page, offset=(page - 1) * per_page)
         lines = [
             f"{tg_emoji(DM_TASK_LIST_EMOJI_ID, '📋')} <b>私信任务列表</b>",
             f"页码：<code>{page}/{total_pages}</code>",
@@ -2505,7 +2616,7 @@ class DmCollectorBot:
         await self._safe_edit(query, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
     async def _confirm_clear_dm_tasks(self, query) -> None:
-        total = self.dm_repository.count_dm_tasks()
+        total = self.dm_repository.count_dm_tasks(requester_id=int(query.from_user.id))
         text = (
             f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>确认清空私信任务</b>\n"
             f"当前列表任务：<code>{total}</code>\n"
@@ -2520,7 +2631,7 @@ class DmCollectorBot:
         await self._safe_edit(query, text, keyboard)
 
     async def _clear_dm_tasks(self, query) -> None:
-        cleared = self.dm_repository.clear_dm_finished_tasks()
+        cleared = self.dm_repository.clear_dm_finished_tasks(requester_id=int(query.from_user.id))
         await self._safe_answer_callback(query, f"已清空 {cleared} 个已结束任务", show_alert=False)
         await self._show_dm_task_list(query, page=1)
 
@@ -2550,12 +2661,13 @@ class DmCollectorBot:
         await self._show_dm_task_detail(query, task_id, page=page)
 
     async def _show_task_list(self, query, page: int = 1) -> None:
+        requester_id = int(query.from_user.id)
         per_page = 6
-        total = self.db.count_collect_tasks()
+        total = self.db.count_collect_tasks(requester_id=requester_id)
         total_pages = max(1, ceil(total / per_page))
         page = max(1, min(page, total_pages))
-        tasks = self.db.list_collect_tasks(limit=per_page, offset=(page - 1) * per_page)
-        history_total = self.db.count_collect_tasks(history=True)
+        tasks = self.db.list_collect_tasks(requester_id=requester_id, limit=per_page, offset=(page - 1) * per_page)
+        history_total = self.db.count_collect_tasks(requester_id=requester_id, history=True)
         lines = [
             f"{tg_emoji(self.settings.emoji_progress_id, '🎚️')} <b>任务列表</b>",
             f"页码：<code>{page}/{total_pages}</code>",
@@ -2602,11 +2714,12 @@ class DmCollectorBot:
         await self._safe_edit(query, text, self._build_task_keyboard(task_id, page=page, source=source))
 
     async def _show_history(self, query, page: int = 1) -> None:
+        requester_id = int(query.from_user.id)
         per_page = 6
-        total = self.db.count_collect_tasks(history=True)
+        total = self.db.count_collect_tasks(requester_id=requester_id, history=True)
         total_pages = max(1, ceil(total / per_page))
         page = max(1, min(page, total_pages))
-        tasks = self.db.list_history_tasks(limit=per_page, offset=(page - 1) * per_page)
+        tasks = self.db.list_history_tasks(requester_id=requester_id, limit=per_page, offset=(page - 1) * per_page)
         lines = [
             f"{tg_emoji(HISTORY_RESULT_EMOJI_ID, '📝')} <b>历史结果</b>",
             f"页码：<code>{page}/{total_pages}</code>",
@@ -2673,7 +2786,7 @@ class DmCollectorBot:
             await self._show_task_list(query, page=target_page)
 
     async def _clear_task_history(self, query) -> None:
-        rows = self.db.delete_history_tasks()
+        rows = self.db.delete_history_tasks(requester_id=int(query.from_user.id))
         if not rows:
             await self._show_task_list(query, page=1)
             return
@@ -2682,7 +2795,7 @@ class DmCollectorBot:
         await self._show_task_list(query, page=1)
 
     async def _start_collect_wizard(self, query, user_id: int) -> None:
-        active_accounts = self.db.get_active_accounts()
+        active_accounts = self.db.get_active_accounts(owner_id=user_id)
         if not active_accounts:
             await self._safe_edit(
                 query,
@@ -2690,11 +2803,11 @@ class DmCollectorBot:
                 self._single_back_keyboard("menu:accounts"),
             )
             return
-        self.user_states[user_id] = {"mode": "await_channels", "draft": {"task_type": "channel"}}
+        self.user_states[user_id] = {"mode": "await_channels", "draft": {"task_type": "channel", "owner_id": user_id}}
         await self._safe_edit(query, self._channels_prompt_text(), self._single_back_keyboard("collect:new"))
 
     async def _start_group_collect_wizard(self, query, user_id: int) -> None:
-        active_accounts = self.db.get_active_accounts()
+        active_accounts = self.db.get_active_accounts(owner_id=user_id)
         if not active_accounts:
             await self._safe_edit(
                 query,
@@ -2706,6 +2819,7 @@ class DmCollectorBot:
             "mode": "await_group_targets",
             "draft": {
                 "task_type": "group",
+                "owner_id": user_id,
                 "filters": {
                     "bot_mode": "non_bot_only",
                     "admin_mode": "non_admin_only",
@@ -3187,10 +3301,14 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(self.settings.emoji_welcome_id, '🌠')} <b>DM Collector Bot</b> <code>v{__version__}</code>",
             f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} {html.escape(self.settings.welcome_text, quote=False)}",
-            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} 当前已接入：账号上传 / 多频道采集 / 群组发言采集 / txt 去重导出。",
+            f"{tg_emoji(self.settings.emoji_success_id, '🆗')} 当前已接入：账号上传 / 多频道采集 / 群组发言采集 / 私信任务 / txt 去重导出。",
         ]
         if self._is_admin(user_id):
-            lines.append(f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} 你是管理员，可直接用下面按钮进入账号管理和采集用户。")
+            lines.append(f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} 你是管理员，可管理授权用户；每个用户的数据都会按自己的 Telegram ID 独立隔离。")
+        elif self._has_access(user_id):
+            lines.append(f"{tg_emoji(self.settings.emoji_stats_id, '🧠')} 你已获得使用权；你的账号、代理、采集任务、私信任务和历史结果都只归你自己。")
+        else:
+            lines.append(f"{tg_emoji(self.settings.emoji_error_id, '🔴')} 你目前还没有使用权限，请联系管理员开通。")
         return "\n\n".join(lines)
 
     def _build_stats_text(self) -> str:
@@ -3219,7 +3337,7 @@ class DmCollectorBot:
             f"用户名：<code>{html.escape(str(account['username'] or '-'), quote=False)}</code>",
             f"手机号：<code>{html.escape(str(account['phone'] or '-'), quote=False)}</code>",
             f"User ID：<code>{account['tg_user_id'] or '-'}</code>",
-            f"代理池：<code>{html.escape(summarize_proxy_pool(self.db.get_global_proxies()), quote=False)}</code>",
+            f"代理池：<code>{html.escape(summarize_proxy_pool(self.db.get_global_proxies(owner_id=int(account['owner_id'] or 0))), quote=False)}</code>",
             f"最近检测：<code>{account['last_checked_at'] or '-'}</code>",
         ]
         if account["restriction_checked_at"]:
@@ -3954,7 +4072,7 @@ class DmCollectorBot:
 
     # ---------- keyboards ----------
     def _build_main_menu(self, user_id: int) -> InlineKeyboardMarkup | None:
-        if not self._is_admin(user_id):
+        if not self._has_access(user_id):
             return None
         keyboard = [
             [
@@ -3965,6 +4083,10 @@ class DmCollectorBot:
                 premium_button("私信任务", DM_MENU_EMOJI_ID, callback_data="menu:dm"),
             ],
         ]
+        if self._is_admin(user_id):
+            keyboard.append([
+                premium_button("用户授权", self.settings.emoji_stats_id, callback_data="menu:users"),
+            ])
         return InlineKeyboardMarkup(keyboard)
 
     def _build_account_detail_keyboard(self, account_id: int) -> InlineKeyboardMarkup:
@@ -4588,16 +4710,30 @@ class DmCollectorBot:
             except Exception:  # noqa: BLE001
                 logger.exception("转发私信到管理员失败: admin_id=%s user_id=%s", admin_id, user.id)
 
+    async def _ensure_authorized(self, update: Update) -> bool:
+        user = update.effective_user
+        if user and self._has_access(user.id):
+            return True
+        denied_text = (
+            f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>暂无使用权限</b>\n"
+            f"请联系管理员先给你开通使用权；开通后重新发送 /start 即可。"
+        )
+        if update.callback_query:
+            await self._safe_answer_callback(update.callback_query, "暂无使用权限", show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(denied_text, parse_mode=ParseMode.HTML)
+        return False
+
     async def _ensure_admin(self, update: Update) -> bool:
         user = update.effective_user
         if user and self._is_admin(user.id):
             return True
         denied_text = (
-            f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>无权限</b>\n"
-            f"这个功能目前只开放给管理员。"
+            f"{tg_emoji(self.settings.emoji_inbox_id, '🔵')} <b>仅管理员可操作</b>\n"
+            f"这个功能目前只开放给 env 配置的管理员。"
         )
         if update.callback_query:
-            await self._safe_answer_callback(update.callback_query, "无权限", show_alert=True)
+            await self._safe_answer_callback(update.callback_query, "仅管理员可操作", show_alert=True)
         elif update.effective_message:
             await update.effective_message.reply_text(denied_text, parse_mode=ParseMode.HTML)
         return False
@@ -4653,15 +4789,17 @@ class DmCollectorBot:
             return text[: limit - len(suffix)] + suffix
         return "\n".join(kept) + suffix
 
-    async def _save_uploaded_session_files(self, document) -> list[Path]:
+    async def _save_uploaded_session_files(self, document, *, owner_id: int) -> list[Path]:
         original_name = Path(document.file_name or f"upload_{int(time.time())}")
         safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", original_name.name)
-        temp_target = self.settings.session_dir / f"upload_{int(time.time())}_{safe_name}"
+        owner_dir = self.settings.session_dir / str(owner_id)
+        owner_dir.mkdir(parents=True, exist_ok=True)
+        temp_target = owner_dir / f"upload_{int(time.time())}_{safe_name}"
         tg_file = await document.get_file()
         await tg_file.download_to_drive(custom_path=str(temp_target))
 
         if temp_target.suffix.lower() == ".session":
-            final_session = self._unique_session_path(temp_target.name)
+            final_session = self._unique_session_path(temp_target.name, owner_id=owner_id)
             temp_target.replace(final_session)
             return [final_session]
 
@@ -4683,7 +4821,7 @@ class DmCollectorBot:
                         archive_sessions.append((entry_name, zf.read(info)))
 
                 for entry_name, content in archive_sessions:
-                    final_session = self._unique_session_path(entry_name)
+                    final_session = self._unique_session_path(entry_name, owner_id=owner_id)
                     final_session.write_bytes(content)
                     sidecar = extracted_json.get(Path(entry_name).stem.lower())
                     if sidecar is not None:
@@ -4693,14 +4831,16 @@ class DmCollectorBot:
         finally:
             temp_target.unlink(missing_ok=True)
 
-    def _unique_session_path(self, file_name: str) -> Path:
+    def _unique_session_path(self, file_name: str, *, owner_id: int) -> Path:
         safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", Path(file_name).name)
         if not safe_name.lower().endswith(".session"):
             safe_name = f"{Path(safe_name).stem}.session"
-        target = self.settings.session_dir / safe_name
+        owner_dir = self.settings.session_dir / str(owner_id)
+        owner_dir.mkdir(parents=True, exist_ok=True)
+        target = owner_dir / safe_name
         if not target.exists():
             return target
-        return self.settings.session_dir / f"{target.stem}_{int(time.time() * 1000)}.session"
+        return owner_dir / f"{target.stem}_{int(time.time() * 1000)}.session"
 
     def _parse_channels(self, text: str) -> list[str]:
         result = []
@@ -4873,6 +5013,9 @@ class DmCollectorBot:
 
     def _is_admin(self, user_id: int) -> bool:
         return user_id in self.settings.admin_ids
+
+    def _has_access(self, user_id: int) -> bool:
+        return self._is_admin(user_id) or self.db.is_user_authorized(user_id)
 
     @staticmethod
     def _detect_message_type(message) -> str:

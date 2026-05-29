@@ -61,7 +61,8 @@ class DmSenderManager:
         fallback_account_ids: list[int] = []
         if active_policy.auto_switch_account:
             selected_account_id_set = set(selected_account_ids)
-            for row in self.db.get_active_accounts():
+            requester_id = int(task["requester_id"] or 0)
+            for row in self.db.get_active_accounts(owner_id=requester_id):
                 account_id = int(row["id"])
                 if account_id in selected_account_id_set:
                     continue

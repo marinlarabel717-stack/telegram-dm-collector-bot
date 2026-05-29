@@ -266,11 +266,17 @@ class DmRepository:
             )
             self.db.conn.commit()
 
-    def get_account_restriction_summary_counts(self) -> dict[str, int]:
+    def get_account_restriction_summary_counts(self, *, owner_id: int | None = None) -> dict[str, int]:
         with self.db.lock:
-            rows = self.db.conn.execute(
-                "SELECT restriction_status, COUNT(*) AS total FROM accounts WHERE status IN ('active','checking','collecting') GROUP BY restriction_status"
-            ).fetchall()
+            if owner_id is None:
+                rows = self.db.conn.execute(
+                    "SELECT restriction_status, COUNT(*) AS total FROM accounts WHERE status IN ('active','checking','collecting') GROUP BY restriction_status"
+                ).fetchall()
+            else:
+                rows = self.db.conn.execute(
+                    "SELECT restriction_status, COUNT(*) AS total FROM accounts WHERE owner_id=? AND status IN ('active','checking','collecting') GROUP BY restriction_status",
+                    (owner_id,),
+                ).fetchall()
         summary = {"unrestricted": 0, "geo_limited": 0, "limited": 0, "frozen": 0, "unknown": 0, "invalid": 0}
         limited_statuses = {"temp_mutual", "permanent_mutual", "spam_limited", "restricted"}
         for row in rows:
@@ -326,23 +332,48 @@ class DmRepository:
             self.db.conn.commit()
             return self.db.conn.execute("SELECT * FROM dm_tasks WHERE id=?", (task_id,)).fetchone()
 
-    def get_dm_task(self, task_id: int) -> sqlite3.Row | None:
+    def get_dm_task(self, task_id: int, *, requester_id: int | None = None) -> sqlite3.Row | None:
         with self.db.lock:
-            return self.db.conn.execute("SELECT * FROM dm_tasks WHERE id=?", (task_id,)).fetchone()
+            if requester_id is None:
+                return self.db.conn.execute("SELECT * FROM dm_tasks WHERE id=?", (task_id,)).fetchone()
+            return self.db.conn.execute(
+                "SELECT * FROM dm_tasks WHERE id=? AND requester_id=?",
+                (task_id, requester_id),
+            ).fetchone()
 
-    def list_dm_tasks(self, *, limit: int = 10, offset: int = 0, history: bool = False) -> list[sqlite3.Row]:
+    def list_dm_tasks(self, *, requester_id: int | None = None, limit: int = 10, offset: int = 0, history: bool = False) -> list[sqlite3.Row]:
         with self.db.lock:
+            where: list[str] = []
+            params: list[object] = []
+            if requester_id is not None:
+                where.append("requester_id=?")
+                params.append(requester_id)
             if history:
-                query = "SELECT * FROM dm_tasks ORDER BY id DESC LIMIT ? OFFSET ?"
-                return self.db.conn.execute(query, (limit, offset)).fetchall()
-            query = "SELECT * FROM dm_tasks WHERE status IN ('queued','running','paused','stopped','error','completed') ORDER BY id DESC LIMIT ? OFFSET ?"
-            return self.db.conn.execute(query, (limit, offset)).fetchall()
+                query = "SELECT * FROM dm_tasks"
+            else:
+                where.append("status IN ('queued','running','paused','stopped','error','completed')")
+                query = "SELECT * FROM dm_tasks"
+            if where:
+                query += f" WHERE {' AND '.join(where)}"
+            query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+            return self.db.conn.execute(query, params).fetchall()
 
-    def count_dm_tasks(self, *, history: bool = False) -> int:
+    def count_dm_tasks(self, *, requester_id: int | None = None, history: bool = False) -> int:
         with self.db.lock:
+            where: list[str] = []
+            params: list[object] = []
+            if requester_id is not None:
+                where.append("requester_id=?")
+                params.append(requester_id)
             if history:
-                return int(self.db.conn.execute("SELECT COUNT(*) FROM dm_tasks WHERE status IN ('completed','stopped','error')").fetchone()[0])
-            return int(self.db.conn.execute("SELECT COUNT(*) FROM dm_tasks WHERE status IN ('queued','running','paused','stopped','error','completed')").fetchone()[0])
+                where.append("status IN ('completed','stopped','error')")
+            else:
+                where.append("status IN ('queued','running','paused','stopped','error','completed')")
+            query = "SELECT COUNT(*) FROM dm_tasks"
+            if where:
+                query += f" WHERE {' AND '.join(where)}"
+            return int(self.db.conn.execute(query, params).fetchone()[0])
 
     def list_dm_task_accounts(self, task_id: int) -> list[sqlite3.Row]:
         with self.db.lock:
@@ -429,11 +460,17 @@ class DmRepository:
                 (task_id, limit),
             ).fetchall()
 
-    def clear_dm_finished_tasks(self) -> int:
+    def clear_dm_finished_tasks(self, *, requester_id: int | None = None) -> int:
         with self.db.lock:
-            rows = self.db.conn.execute(
-                "SELECT id FROM dm_tasks WHERE status IN ('completed','stopped','error')"
-            ).fetchall()
+            if requester_id is None:
+                rows = self.db.conn.execute(
+                    "SELECT id FROM dm_tasks WHERE status IN ('completed','stopped','error')"
+                ).fetchall()
+            else:
+                rows = self.db.conn.execute(
+                    "SELECT id FROM dm_tasks WHERE requester_id=? AND status IN ('completed','stopped','error')",
+                    (requester_id,),
+                ).fetchall()
             task_ids = [int(row["id"]) for row in rows]
             if not task_ids:
                 return 0
@@ -549,9 +586,15 @@ class DmRepository:
             row = self.db.conn.execute("SELECT stop_requested FROM dm_tasks WHERE id=?", (task_id,)).fetchone()
             return bool(row and int(row[0]))
 
-    def recover_interrupted_dm_tasks(self, *, reason: str) -> int:
+    def recover_interrupted_dm_tasks(self, *, reason: str, requester_id: int | None = None) -> int:
         with self.db.lock:
-            rows = self.db.conn.execute("SELECT id FROM dm_tasks WHERE status IN ('queued', 'running') ORDER BY id ASC").fetchall()
+            if requester_id is None:
+                rows = self.db.conn.execute("SELECT id FROM dm_tasks WHERE status IN ('queued', 'running') ORDER BY id ASC").fetchall()
+            else:
+                rows = self.db.conn.execute(
+                    "SELECT id FROM dm_tasks WHERE requester_id=? AND status IN ('queued', 'running') ORDER BY id ASC",
+                    (requester_id,),
+                ).fetchall()
             task_ids = [int(row["id"]) for row in rows]
             if not task_ids:
                 return 0
