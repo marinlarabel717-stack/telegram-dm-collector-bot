@@ -84,6 +84,11 @@ HISTORY_RESULT_EMOJI_ID = "5215209935188534658"   # 📝
 SELECT_RANGE_EMOJI_ID = "5359535585251838264"    # ⏰
 DAY_OPTION_EMOJI_ID = "5215553987838749679"      # 🟡
 CANCEL_EMOJI_ID = "5226886710020820160"          # 🔴
+GROUP_FILTER_BOT_EMOJI_ID = "5416028144794617466"      # 🤖
+GROUP_FILTER_ADMIN_EMOJI_ID = "5240216991427469985"    # 🟢
+GROUP_FILTER_PHOTO_EMOJI_ID = "5406936308914333383"    # 🏷
+GROUP_FILTER_USERNAME_EMOJI_ID = "6235699516247379290" # 🧠
+GROUP_FILTER_PREMIUM_EMOJI_ID = "5274026806477857971"  # ⭐
 
 
 class DmCollectorBot:
@@ -525,10 +530,22 @@ class DmCollectorBot:
             days = int(data.split(":")[-1])
             await self._wizard_set_days(query, update.effective_user.id, days)
             return
+        if data == "wizard:back:targets":
+            await self._wizard_back_to_targets(query, update.effective_user.id)
+            return
+        if data == "wizard:back:days":
+            await self._wizard_back_to_days(query, update.effective_user.id)
+            return
+        if data == "wizard:back:accounts":
+            await self._wizard_back_to_accounts(query, update.effective_user.id)
+            return
+        if data == "wizard:back:workers":
+            await self._wizard_back_to_workers(query, update.effective_user.id)
+            return
         if data == "wizard:days_custom":
             state = self.user_states.setdefault(update.effective_user.id, {"draft": {}})
             state["mode"] = "await_custom_days"
-            await self._safe_edit(query, self._custom_days_prompt_text(), self._single_back_keyboard("collect:new"))
+            await self._safe_edit(query, self._custom_days_prompt_text(), self._single_back_keyboard("wizard:back:days"))
             return
         if data == "wizard:acc:auto":
             await self._wizard_auto_accounts(query, update.effective_user.id)
@@ -544,7 +561,7 @@ class DmCollectorBot:
             state = self.user_states.setdefault(update.effective_user.id, {"draft": {}})
             draft = state.setdefault("draft", {})
             state["mode"] = "await_custom_workers"
-            await self._safe_edit(query, self._custom_workers_prompt_text(draft), self._single_back_keyboard("collect:new"))
+            await self._safe_edit(query, self._custom_workers_prompt_text(draft), self._single_back_keyboard("wizard:back:accounts"))
             return
         if data.startswith("wizard:wrk:"):
             worker_count = int(data.split(":")[-1])
@@ -2692,7 +2709,7 @@ class DmCollectorBot:
             )
             return
         self.user_states[user_id] = {"mode": "await_channels", "draft": {"task_type": "channel"}}
-        await self._safe_edit(query, self._channels_prompt_text(), self._single_back_keyboard("wizard:cancel"))
+        await self._safe_edit(query, self._channels_prompt_text(), self._single_back_keyboard("collect:new"))
 
     async def _start_group_collect_wizard(self, query, user_id: int) -> None:
         active_accounts = self.db.get_active_accounts()
@@ -2716,7 +2733,7 @@ class DmCollectorBot:
                 },
             },
         }
-        await self._safe_edit(query, self._group_targets_prompt_text(), self._single_back_keyboard("wizard:cancel"))
+        await self._safe_edit(query, self._group_targets_prompt_text(), self._single_back_keyboard("collect:new"))
 
     async def _wizard_set_days(self, query, user_id: int, days: int, reply_message=None) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
@@ -2730,11 +2747,58 @@ class DmCollectorBot:
         else:
             state["mode"] = "select_accounts"
             text = self._select_accounts_text(draft["channels"], days, draft["account_ids"], task_type=draft.get("task_type", "channel"), filters=draft.get("filters"))
-            markup = self._build_account_selection_keyboard(draft["account_ids"])
+            markup = self._build_account_selection_keyboard(draft)
         if query is not None:
             await self._safe_edit(query, text, markup)
         elif reply_message is not None:
             await reply_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+    async def _wizard_back_to_targets(self, query, user_id: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        task_type = draft.get("task_type", "channel")
+        if task_type == "group":
+            state["mode"] = "await_group_targets"
+            await self._safe_edit(query, self._group_targets_prompt_text(), self._single_back_keyboard("collect:new"))
+            return
+        state["mode"] = "await_channels"
+        await self._safe_edit(query, self._channels_prompt_text(), self._single_back_keyboard("collect:new"))
+
+    async def _wizard_back_to_days(self, query, user_id: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        channels = draft.get("channels") or []
+        if not channels:
+            await self._wizard_back_to_targets(query, user_id)
+            return
+        state["mode"] = "select_days"
+        await self._safe_edit(query, self._select_days_text(channels, task_type=draft.get("task_type", "channel")), self._build_days_keyboard())
+
+    async def _wizard_back_to_accounts(self, query, user_id: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        if draft.get("task_type") == "group":
+            state["mode"] = "select_group_filters"
+            await self._safe_edit(query, self._group_filters_text(draft), self._build_group_filters_keyboard(draft))
+            return
+        state["mode"] = "select_accounts"
+        await self._safe_edit(
+            query,
+            self._select_accounts_text(
+                draft.get("channels", []),
+                int(draft.get("days") or 1),
+                draft.get("account_ids") or [],
+                task_type=draft.get("task_type", "channel"),
+                filters=draft.get("filters"),
+            ),
+            self._build_account_selection_keyboard(draft),
+        )
+
+    async def _wizard_back_to_workers(self, query, user_id: int) -> None:
+        state = self.user_states.setdefault(user_id, {"draft": {}})
+        draft = state.setdefault("draft", {})
+        state["mode"] = "select_workers"
+        await self._safe_edit(query, self._select_workers_text(draft), self._build_workers_keyboard(draft))
 
     async def _toggle_group_filter(self, query, user_id: int, key: str) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
@@ -2780,7 +2844,7 @@ class DmCollectorBot:
                 task_type=draft.get("task_type", "channel"),
                 filters=draft.get("filters"),
             ),
-            self._build_account_selection_keyboard(draft.get("account_ids") or []),
+            self._build_account_selection_keyboard(draft),
         )
 
     async def _wizard_auto_accounts(self, query, user_id: int) -> None:
@@ -2795,7 +2859,7 @@ class DmCollectorBot:
             task_type=draft.get("task_type", "channel"),
             filters=draft.get("filters"),
         )
-        await self._safe_edit(query, text, self._build_account_selection_keyboard(draft["account_ids"]))
+        await self._safe_edit(query, text, self._build_account_selection_keyboard(draft))
 
     async def _wizard_toggle_account(self, query, user_id: int, account_id: int) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
@@ -2813,7 +2877,7 @@ class DmCollectorBot:
             task_type=draft.get("task_type", "channel"),
             filters=draft.get("filters"),
         )
-        await self._safe_edit(query, text, self._build_account_selection_keyboard(draft["account_ids"]))
+        await self._safe_edit(query, text, self._build_account_selection_keyboard(draft))
 
     async def _wizard_finish_accounts(self, query, user_id: int) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
@@ -2823,7 +2887,7 @@ class DmCollectorBot:
             await self._safe_edit(
                 query,
                 f"{tg_emoji(self.settings.emoji_error_id, '❌')} 至少选择一个可用账号。",
-                self._build_account_selection_keyboard(account_ids),
+                self._build_account_selection_keyboard(draft),
             )
             return
         state["mode"] = "select_workers"
@@ -3838,7 +3902,7 @@ class DmCollectorBot:
             ],
             [
                 premium_button("自定义", self.settings.emoji_idea_id, callback_data="wizard:days_custom"),
-                premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
+                premium_button("返回上层", self.settings.emoji_back_id, callback_data="wizard:back:targets"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -3847,24 +3911,25 @@ class DmCollectorBot:
         filters = self._parse_group_filters(draft.get("filters"))
         keyboard = [
             [
-                premium_button(f"机器人：{self._bot_mode_label(filters.get('bot_mode'))}", self.settings.emoji_error_id, callback_data="wizard:gflt:toggle:bot_mode"),
-                premium_button(f"管理员：{self._admin_mode_label(filters.get('admin_mode'))}", self.settings.emoji_stats_id, callback_data="wizard:gflt:toggle:admin_mode"),
+                premium_button(f"机器人：{self._bot_mode_label(filters.get('bot_mode'))}", GROUP_FILTER_BOT_EMOJI_ID, callback_data="wizard:gflt:toggle:bot_mode"),
+                premium_button(f"管理员：{self._admin_mode_label(filters.get('admin_mode'))}", GROUP_FILTER_ADMIN_EMOJI_ID, callback_data="wizard:gflt:toggle:admin_mode"),
             ],
             [
-                premium_button(f"头像：{self._photo_mode_label(filters.get('photo_mode'))}", self.settings.emoji_upload_id, callback_data="wizard:gflt:toggle:photo_mode"),
-                premium_button(f"用户名：{self._username_mode_label(filters.get('username_mode'))}", self.settings.emoji_inbox_id, callback_data="wizard:gflt:toggle:username_mode"),
+                premium_button(f"头像：{self._photo_mode_label(filters.get('photo_mode'))}", GROUP_FILTER_PHOTO_EMOJI_ID, callback_data="wizard:gflt:toggle:photo_mode"),
+                premium_button(f"用户名：{self._username_mode_label(filters.get('username_mode'))}", GROUP_FILTER_USERNAME_EMOJI_ID, callback_data="wizard:gflt:toggle:username_mode"),
             ],
             [
-                premium_button(f"会员：{self._premium_mode_label(filters.get('premium_mode'))}", self.settings.emoji_all_id, callback_data="wizard:gflt:toggle:premium_mode"),
+                premium_button(f"会员：{self._premium_mode_label(filters.get('premium_mode'))}", GROUP_FILTER_PREMIUM_EMOJI_ID, callback_data="wizard:gflt:toggle:premium_mode"),
             ],
             [
-                premium_button("完成设置", self.settings.emoji_ok_id, callback_data="wizard:gflt:done"),
-                premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
+                premium_button("完成设置", SELECT_ACTION_EMOJI_ID, callback_data="wizard:gflt:done"),
+                premium_button("返回上层", self.settings.emoji_back_id, callback_data="wizard:back:days"),
             ],
         ]
         return InlineKeyboardMarkup(keyboard)
 
-    def _build_account_selection_keyboard(self, selected_ids: list[int]) -> InlineKeyboardMarkup:
+    def _build_account_selection_keyboard(self, draft: dict) -> InlineKeyboardMarkup:
+        selected_ids = [int(item) for item in (draft.get("account_ids") or [])]
         keyboard = []
         row_buffer = []
         for row in self.db.get_active_accounts():
@@ -3884,7 +3949,7 @@ class DmCollectorBot:
             premium_button("完成选择", SELECT_ACTION_EMOJI_ID, callback_data="wizard:acc:done"),
         ])
         keyboard.append([
-            premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
+            premium_button("返回上层", self.settings.emoji_back_id, callback_data="wizard:back:accounts"),
             premium_button("重新开始", self.settings.emoji_idea_id, callback_data="collect:new"),
         ])
         return InlineKeyboardMarkup(keyboard)
@@ -4012,7 +4077,7 @@ class DmCollectorBot:
             keyboard.append(row_buffer)
         keyboard.append([
             premium_button("自定义线程", self.settings.emoji_idea_id, callback_data="wizard:wrk_custom"),
-            premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
+            premium_button("返回上层", self.settings.emoji_back_id, callback_data="wizard:back:accounts"),
         ])
         return InlineKeyboardMarkup(keyboard)
 
@@ -4020,7 +4085,7 @@ class DmCollectorBot:
         keyboard = [
             [
                 premium_button("开始采集", self.settings.emoji_start_id, callback_data="wizard:start"),
-                premium_button("取消", CANCEL_EMOJI_ID, callback_data="wizard:cancel"),
+                premium_button("返回上层", self.settings.emoji_back_id, callback_data="wizard:back:workers"),
             ]
         ]
         return InlineKeyboardMarkup(keyboard)
