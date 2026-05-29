@@ -1354,7 +1354,7 @@ class DmCollectorBot:
             for row in rows:
                 label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
                 lines.append(
-                    f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {status_badge(row['status'])} · {self._format_account_restriction_summary(row, compact=True)}"
+                    f"• #{self._account_display_code(row)} {html.escape(str(label), quote=False)} · {self._format_account_list_status(row)}"
                 )
 
         keyboard: list[list] = [
@@ -3235,6 +3235,14 @@ class DmCollectorBot:
             if reason == default_reasons.get(status):
                 return badge
         return f"{badge}（<code>{html.escape(reason, quote=False)}</code>）"
+
+    def _format_account_list_status(self, account) -> str:
+        runtime_status = str(account["status"] or "")
+        restriction_status = str(account["restriction_status"] or "unknown")
+        restriction_summary = self._format_account_restriction_summary(account, compact=True)
+        if runtime_status == "checking" and restriction_status in {"unknown", "checking"}:
+            return restriction_badge("unknown")
+        return f"{status_badge(runtime_status)} · {restriction_summary}"
 
     def _short_restriction_expiry_text(self, reason: str) -> str | None:
         match = re.search(r"北京时间\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})(?::\d{2})?\s*解除", str(reason or ""))
