@@ -71,9 +71,9 @@ DM_TYPING_EMOJI_ID = "5276483738224582009"    # 📘
 DM_SWITCH_EMOJI_ID = "5278330174729907327"    # 📦
 DM_PIN_EMOJI_ID = "5278346822023142994"       # 🚀
 DM_PIN_DELAY_EMOJI_ID = "5278398821192196191" # 🧭
-DM_DELETE_EMOJI_ID = "5301020349515712616"    # 🔴
-DM_DELETE_DELAY_EMOJI_ID = "5301020349515712616"  # 🔴
-DM_CONTINUE_EMOJI_ID = "5465644758049251661"  # ✔️
+DM_DELETE_EMOJI_ID = "5276234999488602967"    # ❌
+DM_DELETE_DELAY_EMOJI_ID = "5278219575027063997"  # ❌
+DM_CONTINUE_EMOJI_ID = "5278283484140429419"  # ✅
 REPORT_EXPORT_EMOJI_ID = "5350398227013188928"  # 📊
 SUCCESS_LIST_EMOJI_ID = "5188234920639632382"  # 🟢
 FAILED_LIST_EMOJI_ID = "5411225014148014586"   # 🔴
@@ -89,6 +89,8 @@ GROUP_FILTER_ADMIN_EMOJI_ID = "5240216991427469985"    # 🟢
 GROUP_FILTER_PHOTO_EMOJI_ID = "5406936308914333383"    # 🏷
 GROUP_FILTER_USERNAME_EMOJI_ID = "6235699516247379290" # 🧠
 GROUP_FILTER_PREMIUM_EMOJI_ID = "5274026806477857971"  # ⭐
+ACCOUNT_SELECTED_EMOJI_ID = "5465644758049251661"      # ✔️
+ACCOUNT_UNSELECTED_EMOJI_ID = "5301020349515712616"    # 🔴
 
 
 class DmCollectorBot:
@@ -3934,7 +3936,7 @@ class DmCollectorBot:
         row_buffer = []
         for row in self.db.get_active_accounts():
             is_selected = row["id"] in selected_ids
-            icon = self.settings.emoji_ok_id if is_selected else self.settings.emoji_error_id
+            icon = ACCOUNT_SELECTED_EMOJI_ID if is_selected else ACCOUNT_UNSELECTED_EMOJI_ID
             title = row["username"] or row["phone"] or row["session_name"]
             row_buffer.append(
                 premium_button(f"#{self._account_display_code(row)} {str(title)[:28]}", icon, callback_data=f"wizard:acc:toggle:{row['id']}")
@@ -3961,7 +3963,7 @@ class DmCollectorBot:
         row_buffer = []
         for row in rows:
             is_selected = int(row["id"]) in selected_ids
-            icon = self.settings.emoji_ok_id if is_selected else self.settings.emoji_error_id
+            icon = ACCOUNT_SELECTED_EMOJI_ID if is_selected else ACCOUNT_UNSELECTED_EMOJI_ID
             title = row["username"] or row["phone"] or row["session_name"]
             row_buffer.append(
                 premium_button(f"#{self._account_display_code(row)} {str(title)[:28]}", icon, callback_data=f"dm:wizard:acc:toggle:{row['id']}")
