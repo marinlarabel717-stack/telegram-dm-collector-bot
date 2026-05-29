@@ -768,7 +768,11 @@ class DmRepository:
                        ta.sent_success_count,
                        ta.sent_fail_count,
                        ta.status,
-                       ta.last_error
+                       ta.last_error,
+                       EXISTS(
+                           SELECT 1 FROM dm_send_logs l
+                           WHERE l.task_id = ta.task_id AND l.account_id = ta.account_id
+                       ) AS has_logs
                 FROM dm_task_accounts ta
                 JOIN accounts a ON a.id = ta.account_id
                 WHERE ta.task_id=?
@@ -796,6 +800,14 @@ class DmRepository:
         success_txt.write_text("\n".join(str(row["normalized_input"]) for row in success_rows), encoding="utf-8-sig")
         failed_txt.write_text("\n".join(str(row["normalized_input"]) for row in failed_rows), encoding="utf-8-sig")
         pending_txt.write_text("\n".join(str(row["normalized_input"]) for row in pending_rows), encoding="utf-8-sig")
+        used_account_rows = [
+            row for row in account_rows
+            if int(row["sent_success_count"] or 0) > 0
+            or int(row["sent_fail_count"] or 0) > 0
+            or bool(int(row["has_logs"] or 0))
+            or str(row["last_error"] or "").strip() not in {"", "-"}
+        ]
+
         with report_csv.open("w", newline="", encoding="utf-8-sig") as fp:
             writer = csv.writer(fp)
             writer.writerow(["本次私信日志统计"])
@@ -811,7 +823,7 @@ class DmRepository:
                 writer.writerow([])
                 writer.writerow(["顶部概览"])
                 writer.writerow(["时间", "线程数", "账号手机号", "成功数量", "失败数量", "失败原因"])
-                for row in account_rows:
+                for row in used_account_rows:
                     account_phone = str(row["account_phone"] or row["account_label"] or "-")
                     writer.writerow([
                         report_time,
@@ -839,7 +851,7 @@ class DmRepository:
             writer.writerow([])
             writer.writerow(["各账号成功统计"])
             writer.writerow(["账号手机号", "成功数量", "失败数量", "账号状态"])
-            for row in account_rows:
+            for row in used_account_rows:
                 account_phone = str(row["account_phone"] or row["account_label"] or "-")
                 writer.writerow([
                     account_phone,
