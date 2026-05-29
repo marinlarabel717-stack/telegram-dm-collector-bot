@@ -193,7 +193,20 @@ class CollectionManager:
                 asyncio.create_task(worker_fn(task_id, queue, active_workers[index]))
                 for index in range(worker_count)
             ]
-            await asyncio.gather(*workers, return_exceptions=True)
+            worker_results = await asyncio.gather(*workers, return_exceptions=True)
+
+            worker_errors = [result for result in worker_results if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError)]
+            if worker_errors:
+                first_error = self._short_error(worker_errors[0])
+                logger.warning("%s worker 存在异常，准备收尾｜errors=%s｜first=%s", self._task_tag(task_id), len(worker_errors), first_error)
+                self._append_collect_log(task_id, f"worker 异常退出，任务提前收尾｜{first_error}", level="error")
+
+            unfinished_channels = self.db.count_unfinished_task_channels(task_id)
+            if unfinished_channels > 0 and not self.db.should_stop_task(task_id):
+                reason = f"仍有 {unfinished_channels} 个子任务未完成，任务已提前结束"
+                logger.warning("%s %s", self._task_tag(task_id), reason)
+                self._append_collect_log(task_id, reason, level="warning")
+                self.db.stop_collect_task_now(task_id, reason=reason)
 
             unique_total = self.db.count_unique_usernames(task_id)
             self.db.increment_task_metrics(task_id, unique_total=unique_total)

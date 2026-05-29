@@ -669,6 +669,15 @@ class Database:
                 (task_id,),
             ).fetchall()
 
+    def count_unfinished_task_channels(self, task_id: int) -> int:
+        with self.lock:
+            return int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM collect_task_channels WHERE task_id=? AND status IN ('queued','running')",
+                    (task_id,),
+                ).fetchone()[0]
+            )
+
     def add_collect_task_log(self, task_id: int, *, message: str, account_id: int | None = None, channel: str | None = None, level: str = "info") -> None:
         with self.lock:
             self.conn.execute(
