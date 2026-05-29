@@ -16,6 +16,7 @@ from .dm_policy import DMTaskPolicy, DelayWindow, RetryPolicy
 from .dm_repository import DmRepository
 
 logger = logging.getLogger(__name__)
+DM_SEND_RECONNECT_RETRIES = 2
 
 
 class DmSenderManager:
@@ -111,6 +112,9 @@ class DmSenderManager:
         try:
             await asyncio.gather(*workers, return_exceptions=False)
         except asyncio.CancelledError:
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
             current_task = self.repository.get_dm_task(task_id)
             stop_reason = str((current_task["last_error"] if current_task else "") or "").strip()
             if stop_reason == "管理员手动停止任务":
@@ -126,6 +130,10 @@ class DmSenderManager:
             self.repository.mark_dm_task_status(task_id, "stopped", last_error=final_reason)
             raise
         except Exception as exc:  # noqa: BLE001
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
             logger.exception(compose_log(f"发送器异常｜{exc}", task_id=task_id))
             self.repository.mark_dm_task_status(task_id, "error", last_error=self.collection_manager._short_error(exc))
         else:
@@ -233,32 +241,53 @@ class DmSenderManager:
                 retry_count = int(recipient["retry_count"] or 0)
                 post_attempt_delay = 0.0
                 self.repository.mark_dm_recipient_sending(task_id, recipient_id, account_id)
+                send_attempt = 0
                 try:
-                    self._append_runtime_log(task_id, account_id=account_id, recipient_id=recipient_id, message="正在解析目标")
-                    entity = await client.get_input_entity(target)
-                    self._append_runtime_log(
-                        task_id,
-                        account_id=account_id,
-                        recipient_id=recipient_id,
-                        message=self._dispatch_progress_message(content_type, payload, policy),
-                    )
-                    sent_message, sent_messages = await self._dispatch_payload(client, entity, payload, content_type, policy)
-                    await self._apply_post_send_actions(
-                        client,
-                        entity,
-                        sent_message,
-                        sent_messages,
-                        policy,
-                        task_id=task_id,
-                        account_id=account_id,
-                        recipient_id=recipient_id,
-                    )
-                    success_count += 1
-                    post_attempt_delay = policy.delay_window.next_delay()
-                    self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
-                    self.repository.update_dm_task_account(task_id, account_id, success_delta=1, last_error=None)
-                    self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="success", message=self._action_success_message(content_type))
-                    logger.info(compose_log("发送成功", task_id=task_id, account_id=account_id, recipient=target))
+                    while True:
+                        try:
+                            self._append_runtime_log(task_id, account_id=account_id, recipient_id=recipient_id, message="正在解析目标")
+                            entity = await client.get_input_entity(target)
+                            self._append_runtime_log(
+                                task_id,
+                                account_id=account_id,
+                                recipient_id=recipient_id,
+                                message=self._dispatch_progress_message(content_type, payload, policy),
+                            )
+                            sent_message, sent_messages = await self._dispatch_payload(client, entity, payload, content_type, policy)
+                            await self._apply_post_send_actions(
+                                client,
+                                entity,
+                                sent_message,
+                                sent_messages,
+                                policy,
+                                task_id=task_id,
+                                account_id=account_id,
+                                recipient_id=recipient_id,
+                            )
+                            success_count += 1
+                            post_attempt_delay = policy.delay_window.next_delay()
+                            self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
+                            self.repository.update_dm_task_account(task_id, account_id, success_delta=1, last_error=None)
+                            self.repository.add_send_log(task_id=task_id, account_id=account_id, recipient_id=recipient_id, action="send", status="success", message=self._action_success_message(content_type))
+                            logger.info(compose_log("发送成功", task_id=task_id, account_id=account_id, recipient=target))
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            if send_attempt >= DM_SEND_RECONNECT_RETRIES or not self.collection_manager._is_disconnect_error(exc) or self.repository.should_stop_dm_task(task_id):
+                                raise
+                            send_attempt += 1
+                            short_error = self.collection_manager._short_error(exc)
+                            logger.warning(compose_log(f"连接中断，重连后重试｜第{send_attempt}次｜{short_error}", task_id=task_id, account_id=account_id, recipient=target))
+                            self.repository.add_send_log(
+                                task_id=task_id,
+                                account_id=account_id,
+                                recipient_id=recipient_id,
+                                action="send",
+                                status="retry",
+                                message=f"连接中断，正在重连后重试（第{send_attempt}次）",
+                                raw_error=short_error,
+                            )
+                            client = await self.collection_manager._reconnect_client(client, session_file, account_row=account_row)
+                            self.db.update_account_status(account_id, status="collecting", last_error=None)
                 except FloodWaitError as exc:
                     wait_seconds = int(getattr(exc, "seconds", 0) or 0)
                     if retry_count + 1 > policy.retry_policy.max_retries:

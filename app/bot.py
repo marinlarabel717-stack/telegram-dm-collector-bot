@@ -599,7 +599,7 @@ class DmCollectorBot:
             return
 
         await update.effective_message.reply_text(
-            f"{tg_emoji(WAIT_FILE_EMOJI_ID, '⌛')} 已收到文件，正在保存并检测，请稍等……",
+            f"{tg_emoji(WAIT_FILE_EMOJI_ID, '⌛')} 已收到文件，正在保存并导入，请稍等……",
             parse_mode=ParseMode.HTML,
         )
 
@@ -628,46 +628,27 @@ class DmCollectorBot:
             return
 
         imported_accounts = []
-        deleted_broken: list[tuple[str, str]] = []
-        deleted_banned: list[tuple[str, str]] = []
-        kept_other_errors: list[tuple[str, str]] = []
-
-        verify_parallel = min(6, max(1, len(session_files)))
-        verify_semaphore = asyncio.Semaphore(verify_parallel)
-
-        async def _verify_one(session_file: Path):
-            async with verify_semaphore:
-                result = await self.collection_manager.verify_session_file(session_file)
-                return session_file, result
-
-        verify_results = await asyncio.gather(*(_verify_one(session_file) for session_file in session_files))
-        for session_file, result in verify_results:
-            issue_text = self._humanize_account_issue(result.status, result.last_error)
-            if result.status == "active":
-                account = self.db.upsert_account(
-                    session_name=session_file.stem,
-                    session_file=str(session_file),
-                    tg_user_id=result.tg_user_id,
-                    phone=result.phone,
-                    username=result.username,
-                    display_name=result.display_name,
-                    status=result.status,
-                    last_error=result.last_error,
-                )
-                imported_accounts.append(account)
-                continue
-
-            self._purge_session_artifacts(session_file)
-            if self._should_auto_purge_account(result.status, result.last_error):
-                if "损坏" in issue_text:
-                    deleted_broken.append((session_file.name, issue_text))
-                else:
-                    deleted_banned.append((session_file.name, issue_text))
-            else:
-                kept_other_errors.append((session_file.name, issue_text))
+        for session_file in session_files:
+            account = self.db.upsert_account(
+                session_name=session_file.stem,
+                session_file=str(session_file),
+                tg_user_id=None,
+                phone=None,
+                username=None,
+                display_name=None,
+                status="checking",
+                last_error="待手动检查",
+            )
+            self.dm_repository.update_account_restriction(
+                int(account["id"]),
+                restriction_status="unknown",
+                restriction_reason="待手动检查",
+                raw_reply=None,
+            )
+            imported_accounts.append(account)
 
         self._clear_state(update.effective_user.id)
-        if len(imported_accounts) == 1 and not deleted_broken and not deleted_banned and not kept_other_errors:
+        if len(imported_accounts) == 1:
             await update.effective_message.reply_text(
                 self._format_account_text(imported_accounts[0]),
                 parse_mode=ParseMode.HTML,
@@ -679,32 +660,18 @@ class DmCollectorBot:
         lines = [
             f"{tg_emoji(IMPORT_DONE_EMOJI_ID, '➕')} <b>导入处理完成</b>",
             f"成功导入：<code>{len(imported_accounts)}</code>",
-            f"自动删除损坏：<code>{len(deleted_broken)}</code>",
-            f"自动删除封禁/失效：<code>{len(deleted_banned)}</code>",
+            "说明：本次导入已跳过自动检测，账号会先进入待检查状态。",
         ]
-        if not imported_accounts:
-            lines.append("\n<b>本次没有保留下任何可用账号</b>")
         if imported_accounts:
             lines.append("")
-            lines.append("<b>已保留可用账号</b>")
+            lines.append("<b>已导入账号</b>")
             for account in imported_accounts[:10]:
                 label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
                 lines.append(f"• #{self._account_display_code(account)} {html.escape(str(label), quote=False)} · {status_badge(account['status'])}")
-        if deleted_broken:
-            lines.append("")
-            lines.append("<b>已删除：session 已损坏</b>")
-            for failed_name, failed_error in deleted_broken[:5]:
-                lines.append(f"• <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
-        if deleted_banned:
-            lines.append("")
-            lines.append("<b>已删除：封禁 / 失效</b>")
-            for failed_name, failed_error in deleted_banned[:5]:
-                lines.append(f"• <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
-        if kept_other_errors:
-            lines.append("")
-            lines.append("<b>暂未保留到账号列表：其他异常</b>")
-            for failed_name, failed_error in kept_other_errors[:5]:
-                lines.append(f"• <code>{html.escape(failed_name, quote=False)}</code> · <code>{html.escape(failed_error, quote=False)[:120]}</code>")
+            if len(imported_accounts) > 10:
+                lines.append(f"• 其余 <code>{len(imported_accounts) - 10}</code> 个已省略")
+        lines.append("")
+        lines.append("你现在可以直接点【检查全部账号】再批量跑状态。")
         await update.effective_message.reply_text(
             "\n".join(lines),
             parse_mode=ParseMode.HTML,
@@ -1610,7 +1577,7 @@ class DmCollectorBot:
             kept_other_errors: list[str] = []
             total_checked = len(rows)
             processed = 0
-            parallel = min(10, total_checked)
+            parallel = min(20, total_checked)
 
             semaphore = asyncio.Semaphore(parallel)
 
@@ -2509,6 +2476,9 @@ class DmCollectorBot:
                 row_buffer = []
         if row_buffer:
             keyboard.append(row_buffer)
+        for task in tasks:
+            if str(task["status"] or "") in {"queued", "running", "paused", "error"}:
+                keyboard.append([premium_button(f"停止任务 #{task['id']}", STOP_EMOJI_ID, callback_data=f"dm:stop:{task['id']}:{page}")])
         nav = []
         if page > 1:
             nav.append(premium_button("上一页", self.settings.emoji_back_id, callback_data=f"dm:tasks:{page - 1}"))
@@ -4136,7 +4106,7 @@ class DmCollectorBot:
                 keyboard.append(stats_row[:2])
             if pending_count > 0:
                 keyboard.append([premium_button(f"待发送 {pending_count}", self.settings.emoji_waiting_id, callback_data=f"dm:refresh:{task_id}:{page}")])
-        if task and task["status"] in {"queued", "running"}:
+        if task and task["status"] not in {"completed", "stopped"}:
             keyboard.append([premium_button("停止任务", STOP_EMOJI_ID, callback_data=f"dm:stop:{task_id}:{page}")])
         keyboard.extend([
             [

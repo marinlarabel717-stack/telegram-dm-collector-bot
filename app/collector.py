@@ -639,7 +639,7 @@ class CollectionManager:
                 request_retries=TELEGRAM_REQUEST_RETRIES,
                 connection_retries=TELEGRAM_CONNECTION_RETRIES,
                 retry_delay=TELEGRAM_RETRY_DELAY,
-                auto_reconnect=True,
+                auto_reconnect=False,
             )
         except ValueError as exc:
             if "too many values to unpack" not in str(exc):
@@ -657,7 +657,7 @@ class CollectionManager:
                 request_retries=TELEGRAM_REQUEST_RETRIES,
                 connection_retries=TELEGRAM_CONNECTION_RETRIES,
                 retry_delay=TELEGRAM_RETRY_DELAY,
-                auto_reconnect=True,
+                auto_reconnect=False,
             )
 
     async def connect_client(self, session_file: Path, *, account_row=None) -> TelegramClient:
@@ -734,6 +734,7 @@ class CollectionManager:
             "connection reset",
             "incompletereaderror",
             "bytes read on a total",
+            "already waiting for incoming data",
         )
         return any(keyword in text for keyword in keywords)
 

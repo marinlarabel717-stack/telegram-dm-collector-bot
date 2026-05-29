@@ -341,6 +341,10 @@ class Database:
             existing = None
             if tg_user_id is not None:
                 existing = self.conn.execute("SELECT * FROM accounts WHERE tg_user_id=?", (tg_user_id,)).fetchone()
+            if existing is None:
+                existing = self.conn.execute("SELECT * FROM accounts WHERE session_file=?", (session_file,)).fetchone()
+            if existing is None:
+                existing = self.conn.execute("SELECT * FROM accounts WHERE session_name=?", (session_name,)).fetchone()
             if existing:
                 self.conn.execute(
                     """
