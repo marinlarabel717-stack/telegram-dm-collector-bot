@@ -4189,13 +4189,13 @@ class DmCollectorBot:
             pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
             stats_row = []
             if int(task['success_count'] or 0) > 0:
-                stats_row.append(premium_button(f"成功 {task['success_count']}", self.settings.emoji_success_id, callback_data=f"dm:refresh:{task_id}:{page}"))
+                stats_row.append(premium_button(f"成功 {task['success_count']}", SUCCESS_LIST_EMOJI_ID, callback_data=f"dm:refresh:{task_id}:{page}"))
             if int(task['failed_count'] or 0) > 0:
-                stats_row.append(premium_button(f"失败 {task['failed_count']}", self.settings.emoji_error_id, callback_data=f"dm:refresh:{task_id}:{page}"))
+                stats_row.append(premium_button(f"失败 {task['failed_count']}", FAILED_LIST_EMOJI_ID, callback_data=f"dm:refresh:{task_id}:{page}"))
             if stats_row:
                 keyboard.append(stats_row[:2])
             if pending_count > 0:
-                keyboard.append([premium_button(f"待发送 {pending_count}", self.settings.emoji_waiting_id, callback_data=f"dm:refresh:{task_id}:{page}")])
+                keyboard.append([premium_button(f"待发送 {pending_count}", PENDING_LIST_EMOJI_ID, callback_data=f"dm:refresh:{task_id}:{page}")])
         if task and task["status"] not in {"completed", "stopped"}:
             keyboard.append([premium_button("停止任务", STOP_EMOJI_ID, callback_data=f"dm:stop:{task_id}:{page}")])
         keyboard.extend([
