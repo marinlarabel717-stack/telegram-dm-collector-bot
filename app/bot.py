@@ -3153,7 +3153,7 @@ class DmCollectorBot:
             or failed_delta >= 5
             or skipped_delta >= 1
         )
-        return (5.0 if changed else 10.0), current
+        return (10.0 if changed else 20.0), current
 
     async def _on_dm_task_progress(self, task_id: int, force: bool = False) -> bool:
         task = self.dm_repository.get_dm_task(task_id)
@@ -3251,7 +3251,7 @@ class DmCollectorBot:
     async def _dm_task_progress_heartbeat(self, task_id: int) -> None:
         try:
             while True:
-                await asyncio.sleep(45)
+                await asyncio.sleep(15)
                 task = self.dm_repository.get_dm_task(task_id)
                 if not task or task["status"] not in {"queued", "running"}:
                     return
