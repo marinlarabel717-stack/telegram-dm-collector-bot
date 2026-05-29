@@ -269,7 +269,7 @@ class DmSenderManager:
                     while True:
                         try:
                             self._append_runtime_log(task_id, account_id=account_id, recipient_id=recipient_id, message="正在解析目标")
-                            entity = await client.get_input_entity(target)
+                            entity = await self._resolve_target_entity(client, target)
                             self._append_runtime_log(
                                 task_id,
                                 account_id=account_id,
@@ -725,7 +725,7 @@ class DmSenderManager:
         if "等待对方回复超时" in short:
             return "reply_timeout", "等了很久，对方一直没回复", False
         if "username not occupied" in lowered or "cannot find" in lowered or "no user has" in lowered or "entity not found" in lowered or "nobody is using this username" in lowered or "username is unacceptable" in lowered:
-            return "user_not_found", "用户不存在", False
+            return "user_not_found", "目标用户名无效或当前账号无法解析", False
         if "bot method invalid" in lowered or "bot invalid" in lowered:
             return "bot_target", "目标不是可私信的普通用户", False
         if "user is blocked" in lowered or "you blocked" in lowered:
@@ -737,6 +737,30 @@ class DmSenderManager:
         if "frozen" in lowered:
             return "frozen", "账号疑似冻结", True
         return "send_failed", short or exc.__class__.__name__, False
+
+    async def _resolve_target_entity(self, client, target: str):
+        last_error: Exception | None = None
+        candidates = [str(target or "").strip()]
+        normalized = candidates[0]
+        if normalized.startswith("@"):
+            stripped = normalized[1:].strip()
+            if stripped:
+                candidates.append(stripped)
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return await client.get_input_entity(candidate)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+            try:
+                entity = await client.get_entity(candidate)
+                return await client.get_input_entity(entity)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("目标为空，无法解析")
 
     def _append_runtime_log(self, task_id: int, *, account_id: int | None = None, recipient_id: int | None = None, message: str) -> None:
         self.repository.add_send_log(
