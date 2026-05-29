@@ -74,6 +74,12 @@ DM_PIN_DELAY_EMOJI_ID = "5278398821192196191" # 🧭
 DM_DELETE_EMOJI_ID = "5276234999488602967"    # ❌
 DM_DELETE_DELAY_EMOJI_ID = "5278219575027063997"  # ❌
 DM_CONTINUE_EMOJI_ID = "5278283484140429419"  # ✅
+REPORT_EXPORT_EMOJI_ID = "5350398227013188928"  # 📊
+SUCCESS_LIST_EMOJI_ID = "5188234920639632382"  # 🟢
+FAILED_LIST_EMOJI_ID = "5411225014148014586"   # 🔴
+PENDING_LIST_EMOJI_ID = "5359535585251838264"  # ⏰
+COLLECT_CHANNEL_EMOJI_ID = "5402471432712113737"  # 📢
+COLLECT_GROUP_EMOJI_ID = "6048783222425260180"    # 👥
 
 
 class DmCollectorBot:
@@ -1812,8 +1818,8 @@ class DmCollectorBot:
         )
         keyboard = [
             [
-                premium_button("采集频道", self.settings.emoji_progress_id, callback_data="collect:new:channel"),
-                premium_button("采集群组", self.settings.emoji_list_id, callback_data="collect:new:group"),
+                premium_button("采集频道", COLLECT_CHANNEL_EMOJI_ID, callback_data="collect:new:channel"),
+                premium_button("采集群组", COLLECT_GROUP_EMOJI_ID, callback_data="collect:new:group"),
             ],
             [
                 premium_button("返回采集用户", self.settings.emoji_back_id, callback_data="menu:collect"),
@@ -2579,7 +2585,7 @@ class DmCollectorBot:
             keyboard.append(nav)
         if history_total > 0:
             keyboard.append([
-                premium_button("一键清空任务历史", self.settings.emoji_error_id, callback_data="task:clear_history"),
+                premium_button("一键清空任务历史", TRASH_EMOJI_ID, callback_data="task:clear_history"),
                 premium_button("历史结果", self.settings.emoji_history_id, callback_data="menu:history:1"),
             ])
         keyboard.append([
@@ -4037,7 +4043,6 @@ class DmCollectorBot:
         else:
             keyboard.append([
                 premium_button("返回首页", self.settings.emoji_home_id, callback_data="menu:main"),
-                premium_button(back_label, self.settings.emoji_list_id, callback_data=back_callback),
             ])
         return InlineKeyboardMarkup(keyboard)
 
@@ -4281,10 +4286,10 @@ class DmCollectorBot:
         paths = self.dm_repository.export_task_results(task_id, self.settings.export_dir)
         pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
         captions = [
-            (paths.success_txt, int(task['success_count'] or 0), f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>私信成功名单</b>\n成功：<code>{task['success_count']}</code>"),
-            (paths.failed_txt, int(task['failed_count'] or 0), f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>私信失败名单</b>\n失败：<code>{task['failed_count']}</code>"),
-            (paths.report_csv, max(1, int(task['success_count'] or 0) + int(task['failed_count'] or 0) + int(task['skipped_count'] or 0)), f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>本次私信任务日志 / 统计视图</b>"),
-            (paths.pending_txt, pending_count, f"{tg_emoji(EXPORT_EMOJI_ID, '📤')} <b>私信剩余待发送</b>\n待发送：<code>{pending_count}</code>"),
+            (paths.success_txt, int(task['success_count'] or 0), f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>私信成功名单</b>\n{tg_emoji(SUCCESS_LIST_EMOJI_ID, '🟢')} 成功：<code>{task['success_count']}</code>"),
+            (paths.failed_txt, int(task['failed_count'] or 0), f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>私信失败名单</b>\n{tg_emoji(FAILED_LIST_EMOJI_ID, '🔴')} 失败：<code>{task['failed_count']}</code>"),
+            (paths.report_csv, max(1, int(task['success_count'] or 0) + int(task['failed_count'] or 0) + int(task['skipped_count'] or 0)), f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>本次私信任务日志 / 统计视图</b>"),
+            (paths.pending_txt, pending_count, f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>私信剩余待发送</b>\n{tg_emoji(PENDING_LIST_EMOJI_ID, '⏰')} 待发送：<code>{pending_count}</code>"),
         ]
         sent_any = False
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
