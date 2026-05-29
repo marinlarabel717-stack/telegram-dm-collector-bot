@@ -1577,7 +1577,7 @@ class DmCollectorBot:
             kept_other_errors: list[str] = []
             total_checked = len(rows)
             processed = 0
-            parallel = min(20, total_checked)
+            parallel = min(30, total_checked)
 
             semaphore = asyncio.Semaphore(parallel)
 
@@ -1611,11 +1611,13 @@ class DmCollectorBot:
             )
 
             tasks = [asyncio.create_task(_verify_one(row)) for row in rows]
+            last_progress_label = "准备开始"
             for finished in asyncio.as_completed(tasks):
                 original, refreshed, result = await finished
                 processed += 1
                 account = refreshed or original
                 label = account["username"] or account["phone"] or account["display_name"] or account["session_name"]
+                last_progress_label = str(label)
                 issue_text = result.summary
                 if result.restriction_status == "unrestricted":
                     unrestricted += 1
@@ -1639,28 +1641,30 @@ class DmCollectorBot:
                     unknown += 1
                     kept_other_errors.append(f"{label}｜{issue_text}")
 
-                await self._safe_edit(
-                    query,
-                    self._format_check_all_progress_text(
-                        total=total_checked,
-                        processed=processed,
-                        current_label=str(label),
-                        unrestricted=unrestricted,
-                        limited=limited,
-                        frozen=frozen,
-                        unknown=unknown,
-                        deleted_broken=len(deleted_broken),
-                        deleted_banned=len(deleted_banned) + len(deleted_frozen),
-                        kept_other_errors=len(kept_other_errors),
-                        parallel=parallel,
-                    ),
-                    InlineKeyboardMarkup([
-                        [
-                            premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
-                            premium_button("账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
-                        ],
-                    ]),
-                )
+                should_refresh_progress = processed == total_checked or processed == 1 or processed % max(2, parallel // 3) == 0
+                if should_refresh_progress:
+                    await self._safe_edit(
+                        query,
+                        self._format_check_all_progress_text(
+                            total=total_checked,
+                            processed=processed,
+                            current_label=last_progress_label,
+                            unrestricted=unrestricted,
+                            limited=limited,
+                            frozen=frozen,
+                            unknown=unknown,
+                            deleted_broken=len(deleted_broken),
+                            deleted_banned=len(deleted_banned) + len(deleted_frozen),
+                            kept_other_errors=len(kept_other_errors),
+                            parallel=parallel,
+                        ),
+                        InlineKeyboardMarkup([
+                            [
+                                premium_button("返回账号管理", self.settings.emoji_back_id, callback_data="menu:accounts"),
+                                premium_button("账号列表", ACCOUNT_LIST_EMOJI_ID, callback_data="account:list:1"),
+                            ],
+                        ]),
+                    )
 
             export_warnings: list[str] = []
             if removed_invalid_rows:

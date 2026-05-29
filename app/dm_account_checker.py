@@ -15,6 +15,9 @@ from .dm_repository import DmRepository
 
 logger = logging.getLogger(__name__)
 BEIJING_TZ = timezone(timedelta(hours=8))
+ACCOUNT_CHECK_RECONNECT_RETRIES = 2
+SPAMBOT_REPLY_POLL_INTERVAL_SECONDS = 0.5
+SPAMBOT_REPLY_MAX_POLLS = 16
 
 
 @dataclass(slots=True)
@@ -35,26 +38,38 @@ class DmAccountChecker:
         account_id = int(account_row["id"])
         client: TelegramClient | None = None
         try:
-            client = await self.collection_manager.connect_client(Path(account_row["session_file"]), account_row=account_row)
-            if not await client.is_user_authorized():
-                summary = self._humanize_session_issue("unauthorized", "session 未登录")
-                self.collection_manager.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
-                self.repository.update_account_restriction(
-                    account_id,
-                    restriction_status="session_invalid",
-                    restriction_reason=summary,
-                    raw_reply=None,
-                )
-                logger.warning(compose_log(f"状态检查失败｜{summary}", account_id=account_id))
-                return AccountStatusCheckResult(
-                    login_status="unauthorized",
-                    restriction_status="session_invalid",
-                    summary=summary,
-                    spambot_reply=None,
-                    last_error="session 未登录",
-                )
+            session_file = Path(account_row["session_file"])
+            connect_attempt = 0
+            while True:
+                try:
+                    if client is None:
+                        client = await self.collection_manager.connect_client(session_file, account_row=account_row)
+                    if not await client.is_user_authorized():
+                        summary = self._humanize_session_issue("unauthorized", "session 未登录")
+                        self.collection_manager.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
+                        self.repository.update_account_restriction(
+                            account_id,
+                            restriction_status="session_invalid",
+                            restriction_reason=summary,
+                            raw_reply=None,
+                        )
+                        logger.warning(compose_log(f"状态检查失败｜{summary}", account_id=account_id))
+                        return AccountStatusCheckResult(
+                            login_status="unauthorized",
+                            restriction_status="session_invalid",
+                            summary=summary,
+                            spambot_reply=None,
+                            last_error="session 未登录",
+                        )
+                    me = await client.get_me()
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if connect_attempt >= ACCOUNT_CHECK_RECONNECT_RETRIES or not self.collection_manager._is_disconnect_error(exc):
+                        raise
+                    connect_attempt += 1
+                    logger.warning(compose_log(f"状态检查连接中断，准备重连｜第{connect_attempt}次｜{self.collection_manager._short_error(exc)}", account_id=account_id))
+                    client = await self.collection_manager._reconnect_client(client, session_file, account_row=account_row)
 
-            me = await client.get_me()
             self.collection_manager.db.update_account_status(
                 account_id,
                 status="active",
@@ -137,8 +152,8 @@ class DmAccountChecker:
                 last_incoming_id = max(last_incoming_id, int(getattr(message, "id", 0) or 0))
             await client.send_message(entity, "/start")
 
-            for _ in range(15):
-                await asyncio.sleep(1)
+            for _ in range(SPAMBOT_REPLY_MAX_POLLS):
+                await asyncio.sleep(SPAMBOT_REPLY_POLL_INTERVAL_SECONDS)
                 async for message in client.iter_messages(entity, limit=10):
                     if message.out:
                         continue
