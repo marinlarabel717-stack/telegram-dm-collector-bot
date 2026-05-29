@@ -312,6 +312,37 @@ class DmSenderManager:
                             self.db.update_account_status(account_id, status="collecting", last_error=None)
                 except FloodWaitError as exc:
                     wait_seconds = int(getattr(exc, "seconds", 0) or 0)
+                    should_switch_account = self._should_retry_with_other_account(
+                        task_id,
+                        account_id,
+                        error_code="flood_wait",
+                        retry_count=retry_count,
+                        policy=policy,
+                        active_account_ids=active_account_ids,
+                    )
+                    if should_switch_account:
+                        self.repository.mark_dm_recipient_result(
+                            task_id,
+                            recipient_id,
+                            account_id=account_id,
+                            status="pending",
+                            error_code="flood_wait",
+                            error_message=f"FloodWait {wait_seconds}s",
+                            increment_retry=True,
+                        )
+                        self.repository.update_dm_task_account(task_id, account_id, fail_delta=1, last_error=f"FloodWait {wait_seconds}s", status="stopped")
+                        self.repository.add_send_log(
+                            task_id=task_id,
+                            account_id=account_id,
+                            recipient_id=recipient_id,
+                            action="send",
+                            status="retry",
+                            message="当前账号触发限速，目标已回退队列并换号重试",
+                            raw_error=f"FloodWait {wait_seconds}s",
+                        )
+                        logger.warning(compose_log(f"命中限速，目标回退队列换号重试｜等待={wait_seconds}s", task_id=task_id, account_id=account_id, recipient=target))
+                        queue.put_nowait(recipient)
+                        break
                     if retry_count + 1 > policy.retry_policy.max_retries:
                         post_attempt_delay = self._failure_backoff_delay("flood_wait_exhausted", policy)
                         self.repository.mark_dm_recipient_result(
@@ -364,6 +395,44 @@ class DmSenderManager:
                         frequent_errors += 1
                     if error_code == "too_many_requests":
                         too_many_requests_hits += 1
+                    should_switch_account = self._should_retry_with_other_account(
+                        task_id,
+                        account_id,
+                        error_code=error_code,
+                        retry_count=retry_count,
+                        policy=policy,
+                        active_account_ids=active_account_ids,
+                    )
+                    if should_switch_account:
+                        self.repository.mark_dm_recipient_result(
+                            task_id,
+                            recipient_id,
+                            account_id=account_id,
+                            status="pending",
+                            error_code=error_code,
+                            error_message=error_message,
+                            increment_retry=True,
+                        )
+                        self.repository.update_dm_task_account(
+                            task_id,
+                            account_id,
+                            status="stopped",
+                            fail_delta=1,
+                            frequent_delta=1 if frequent_hit and error_code != "too_many_requests" else 0,
+                            last_error=error_message,
+                        )
+                        self.repository.add_send_log(
+                            task_id=task_id,
+                            account_id=account_id,
+                            recipient_id=recipient_id,
+                            action="send",
+                            status="retry",
+                            message=f"{error_message}，目标已回退队列并换号重试",
+                            raw_error=raw_error,
+                        )
+                        logger.warning(compose_log(f"发送失败，目标回退队列换号重试｜{error_code}｜{error_message}", task_id=task_id, account_id=account_id, recipient=target))
+                        queue.put_nowait(recipient)
+                        break
                     self.repository.mark_dm_recipient_result(
                         task_id,
                         recipient_id,
@@ -694,6 +763,28 @@ class DmSenderManager:
 
     def _is_account_terminal_error(self, error_code: str) -> bool:
         return error_code in {"account_disconnected", "session_invalid", "frozen"}
+
+    def _should_retry_with_other_account(
+        self,
+        task_id: int,
+        account_id: int,
+        *,
+        error_code: str,
+        retry_count: int,
+        policy: DMTaskPolicy,
+        active_account_ids: set[int] | None = None,
+    ) -> bool:
+        if not policy.auto_switch_account:
+            return False
+        if retry_count + 1 > int(policy.retry_policy.max_retries or 0):
+            return False
+        if error_code not in {"flood_wait", "account_disconnected", "session_invalid", "frozen", "peer_flood", "too_many_requests", "mutual_limit"}:
+            return False
+        return not self._task_has_no_other_usable_accounts(
+            task_id,
+            exclude_account_id=account_id,
+            active_account_ids=active_account_ids,
+        )
 
     def _request_task_auto_stop(self, task_id: int, reason: str) -> str:
         current_task = self.repository.get_dm_task(task_id)
