@@ -889,6 +889,8 @@ class DmCollectorBot:
         if not message:
             return
         raw_link = (message.text or message.caption or "").strip()
+        if not raw_link:
+            return
         link = normalize_channel_post_link(raw_link)
         if not link:
             await message.reply_text(
@@ -1188,6 +1190,8 @@ class DmCollectorBot:
             return
 
         if mode == "await_dm_forward":
+            if not text:
+                return
             await self._handle_dm_forward_input(update, state)
             return
 
