@@ -123,6 +123,8 @@ class DmCollectorBot:
         self.dm_progress_throttle: dict[int, float] = {}
         self.progress_snapshots: dict[int, dict[str, float | int]] = {}
         self.dm_progress_snapshots: dict[int, dict[str, float | int | str]] = {}
+        self.dm_task_complete_inflight: set[int] = set()
+        self.dm_task_complete_done: set[int] = set()
         self.application.bot_data["settings"] = settings
         self.application.bot_data["db"] = self.db
         self.db.bootstrap_access(list(settings.admin_ids))
@@ -2269,6 +2271,8 @@ class DmCollectorBot:
             reply_markup=self._build_dm_task_keyboard(int(task["id"])),
         )
         self.dm_repository.set_dm_task_progress_message(int(task["id"]), sent.chat_id, sent.message_id)
+        self.dm_task_complete_inflight.discard(int(task["id"]))
+        self.dm_task_complete_done.discard(int(task["id"]))
         self._clear_state(user_id)
         runner = asyncio.create_task(self.dm_sender.run_task(int(task["id"])))
         self.dm_task_runners[int(task["id"])] = runner
@@ -3215,38 +3219,47 @@ class DmCollectorBot:
             return False
 
     async def _on_dm_task_complete(self, task_id: int) -> None:
-        refreshed = await self._on_dm_task_progress(task_id, force=True)
-        heartbeat = self.dm_task_watchers.pop(task_id, None)
-        if heartbeat and not heartbeat.done():
-            heartbeat.cancel()
-        self.dm_progress_throttle.pop(task_id, None)
-        self.dm_progress_snapshots.pop(task_id, None)
-        task = self.dm_repository.get_dm_task(task_id)
-        if not task:
+        if task_id in self.dm_task_complete_done or task_id in self.dm_task_complete_inflight:
+            logger.info("跳过重复的私信任务完成回调: task_id=%s", task_id)
             return
-        counts = self.dm_repository.get_dm_task_recipient_counts(task_id)
-        pending_count = int(counts["pending"])
-        if str(task["status"] or "") != "completed" and pending_count > 0:
-            logger.info("私信任务未全部完成，跳过自动结果推送: task_id=%s status=%s pending=%s", task_id, task["status"], pending_count)
-            await self.application.bot.send_message(
-                chat_id=task["requester_id"],
-                text=(
-                    f"{tg_emoji(self.settings.emoji_waiting_id, '⏰')} <b>私信任务已停止</b>\n"
-                    f"当前还有 <code>{pending_count}</code> 个待发送，暂不自动推送结果文件。\n"
-                    f"如需查看阶段性结果，可在任务详情里手动导出。"
-                ),
-                parse_mode=ParseMode.HTML,
-            )
-            return
-        if not refreshed:
-            await self.application.bot.send_message(
-                chat_id=task["requester_id"],
-                text=self._format_dm_task_progress_text(task_id),
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-                reply_markup=self._build_dm_task_keyboard(task_id),
-            )
-        await self._send_dm_task_result(task["requester_id"], task_id)
+        self.dm_task_complete_inflight.add(task_id)
+        try:
+            refreshed = await self._on_dm_task_progress(task_id, force=True)
+            heartbeat = self.dm_task_watchers.pop(task_id, None)
+            if heartbeat and not heartbeat.done():
+                heartbeat.cancel()
+            self.dm_progress_throttle.pop(task_id, None)
+            self.dm_progress_snapshots.pop(task_id, None)
+            task = self.dm_repository.get_dm_task(task_id)
+            if not task:
+                return
+            counts = self.dm_repository.get_dm_task_recipient_counts(task_id)
+            pending_count = int(counts["pending"])
+            if str(task["status"] or "") != "completed" and pending_count > 0:
+                logger.info("私信任务未全部完成，跳过自动结果推送: task_id=%s status=%s pending=%s", task_id, task["status"], pending_count)
+                await self.application.bot.send_message(
+                    chat_id=task["requester_id"],
+                    text=(
+                        f"{tg_emoji(self.settings.emoji_waiting_id, '⏰')} <b>私信任务已停止</b>\n"
+                        f"当前还有 <code>{pending_count}</code> 个待发送，暂不自动推送结果文件。\n"
+                        f"如需查看阶段性结果，可在任务详情里手动导出。"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+                self.dm_task_complete_done.add(task_id)
+                return
+            if not refreshed:
+                await self.application.bot.send_message(
+                    chat_id=task["requester_id"],
+                    text=self._format_dm_task_progress_text(task_id),
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=self._build_dm_task_keyboard(task_id),
+                )
+            await self._send_dm_task_result(task["requester_id"], task_id)
+            self.dm_task_complete_done.add(task_id)
+        finally:
+            self.dm_task_complete_inflight.discard(task_id)
 
     async def _dm_task_progress_heartbeat(self, task_id: int) -> None:
         try:
