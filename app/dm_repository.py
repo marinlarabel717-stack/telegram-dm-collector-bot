@@ -771,8 +771,11 @@ class DmRepository:
                        ta.last_error,
                        EXISTS(
                            SELECT 1 FROM dm_send_logs l
-                           WHERE l.task_id = ta.task_id AND l.account_id = ta.account_id
-                       ) AS has_logs
+                           WHERE l.task_id = ta.task_id
+                             AND l.account_id = ta.account_id
+                             AND l.action = 'send'
+                             AND l.status IN ('success', 'failed', 'retry')
+                       ) AS has_effective_send_logs
                 FROM dm_task_accounts ta
                 JOIN accounts a ON a.id = ta.account_id
                 WHERE ta.task_id=?
@@ -780,6 +783,18 @@ class DmRepository:
                 """,
                 (task_id,),
             ).fetchall()
+            task_counts = self.db.conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END), 0) AS success_count,
+                    COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+                    COALESCE(SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END), 0) AS skipped_count,
+                    COALESCE(SUM(CASE WHEN status IN ('pending','sending') THEN 1 ELSE 0 END), 0) AS pending_count
+                FROM dm_task_recipients
+                WHERE task_id=?
+                """,
+                (task_id,),
+            ).fetchone()
             log_rows = self.db.conn.execute(
                 """
                 SELECT l.created_at, l.action, l.status,
@@ -804,22 +819,19 @@ class DmRepository:
             row for row in account_rows
             if int(row["sent_success_count"] or 0) > 0
             or int(row["sent_fail_count"] or 0) > 0
-            or bool(int(row["has_logs"] or 0))
+            or bool(int(row["has_effective_send_logs"] or 0))
             or str(row["last_error"] or "").strip() not in {"", "-"}
         ]
+        live_success_count = int(task_counts["success_count"] or 0) if task_counts else len(success_rows)
+        live_failed_count = int(task_counts["failed_count"] or 0) if task_counts else len(failed_rows)
+        live_skipped_count = int(task_counts["skipped_count"] or 0) if task_counts else 0
+        live_pending_count = int(task_counts["pending_count"] or 0) if task_counts else len(pending_rows)
 
         with report_csv.open("w", newline="", encoding="utf-8-sig") as fp:
             writer = csv.writer(fp)
             writer.writerow(["本次私信日志统计"])
             if task_row is not None:
                 report_time = format_beijing_timestamp(task_row["started_at"] or task_row["created_at"])
-                pending_count = max(
-                    0,
-                    int(task_row["total_targets"] or 0)
-                    - int(task_row["success_count"] or 0)
-                    - int(task_row["failed_count"] or 0)
-                    - int(task_row["skipped_count"] or 0),
-                )
                 writer.writerow([])
                 writer.writerow(["顶部概览"])
                 writer.writerow(["时间", "线程数", "账号手机号", "成功数量", "失败数量", "失败原因"])
@@ -841,10 +853,10 @@ class DmRepository:
                     task_id,
                     dm_task_status_label(task_row["status"]),
                     int(task_row["total_targets"] or 0),
-                    int(task_row["success_count"] or 0),
-                    int(task_row["failed_count"] or 0),
-                    pending_count,
-                    int(task_row["skipped_count"] or 0),
+                    live_success_count,
+                    live_failed_count,
+                    live_pending_count,
+                    live_skipped_count,
                     int(task_row["active_accounts"] or 0),
                 ])
 

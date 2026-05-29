@@ -3041,19 +3041,19 @@ class DmCollectorBot:
         )
         return (5.0 if changed else 10.0), current
 
-    async def _on_dm_task_progress(self, task_id: int, force: bool = False) -> None:
+    async def _on_dm_task_progress(self, task_id: int, force: bool = False) -> bool:
         task = self.dm_repository.get_dm_task(task_id)
         if not task or not task["progress_chat_id"] or not task["progress_message_id"]:
-            return
+            return False
         now = time.time()
         if not force:
             next_allowed = float(self.dm_progress_throttle.get(task_id, 0.0) or 0.0)
             if now < next_allowed:
-                return
+                return False
             interval, snapshot = self._dm_progress_interval(task_id, task)
             last_refresh = float((self.dm_progress_snapshots.get(task_id) or {}).get("last_refresh", 0.0) or 0.0)
             if now - last_refresh < interval:
-                return
+                return False
         else:
             _, snapshot = self._dm_progress_interval(task_id, task)
         self.dm_progress_throttle[task_id] = now
@@ -3068,14 +3068,40 @@ class DmCollectorBot:
             )
             snapshot["last_refresh"] = time.time()
             self.dm_progress_snapshots[task_id] = snapshot
+            return True
         except RetryAfter as exc:
-            self.dm_progress_throttle[task_id] = time.time() + float(exc.retry_after or 1)
+            retry_after = float(exc.retry_after or 1)
+            self.dm_progress_throttle[task_id] = time.time() + retry_after
+            if force:
+                await asyncio.sleep(max(0.5, retry_after + 0.2))
+                task = self.dm_repository.get_dm_task(task_id)
+                if not task or not task["progress_chat_id"] or not task["progress_message_id"]:
+                    return False
+                try:
+                    await self.application.bot.edit_message_text(
+                        chat_id=task["progress_chat_id"],
+                        message_id=task["progress_message_id"],
+                        text=self._format_dm_task_progress_text(task_id),
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                        reply_markup=self._build_dm_task_keyboard(task_id),
+                    )
+                    snapshot["last_refresh"] = time.time()
+                    self.dm_progress_snapshots[task_id] = snapshot
+                    return True
+                except Exception:
+                    logger.exception("私信任务完成后的最终进度刷新仍失败: task_id=%s", task_id)
+                    return False
+            return False
         except BadRequest as exc:
-            if "Message is not modified" not in str(exc):
+            if "Message is not modified" in str(exc):
+                return True
+            else:
                 logger.exception("刷新私信任务进度失败: task_id=%s", task_id)
+            return False
 
     async def _on_dm_task_complete(self, task_id: int) -> None:
-        await self._on_dm_task_progress(task_id, force=True)
+        refreshed = await self._on_dm_task_progress(task_id, force=True)
         heartbeat = self.dm_task_watchers.pop(task_id, None)
         if heartbeat and not heartbeat.done():
             heartbeat.cancel()
@@ -3098,6 +3124,14 @@ class DmCollectorBot:
                 parse_mode=ParseMode.HTML,
             )
             return
+        if not refreshed:
+            await self.application.bot.send_message(
+                chat_id=task["requester_id"],
+                text=self._format_dm_task_progress_text(task_id),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=self._build_dm_task_keyboard(task_id),
+            )
         await self._send_dm_task_result(task["requester_id"], task_id)
 
     async def _dm_task_progress_heartbeat(self, task_id: int) -> None:
@@ -4410,12 +4444,16 @@ class DmCollectorBot:
         task = self.dm_repository.get_dm_task(task_id)
         if not task:
             return
+        counts = self.dm_repository.get_dm_task_recipient_counts(task_id)
+        success_count = int(counts["success"])
+        failed_count = int(counts["failed"])
+        skipped_count = int(counts["skipped"])
+        pending_count = int(counts["pending"])
         paths = self.dm_repository.export_task_results(task_id, self.settings.export_dir)
-        pending_count = max(0, int(task['total_targets'] or 0) - int(task['success_count'] or 0) - int(task['failed_count'] or 0) - int(task['skipped_count'] or 0))
         captions = [
-            (paths.success_txt, int(task['success_count'] or 0), f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>私信成功名单</b>\n{tg_emoji(SUCCESS_LIST_EMOJI_ID, '🟢')} 成功：<code>{task['success_count']}</code>"),
-            (paths.failed_txt, int(task['failed_count'] or 0), f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>私信失败名单</b>\n{tg_emoji(FAILED_LIST_EMOJI_ID, '🔴')} 失败：<code>{task['failed_count']}</code>"),
-            (paths.report_csv, max(1, int(task['success_count'] or 0) + int(task['failed_count'] or 0) + int(task['skipped_count'] or 0)), f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>本次私信任务日志 / 统计视图</b>"),
+            (paths.success_txt, success_count, f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>私信成功名单</b>\n{tg_emoji(SUCCESS_LIST_EMOJI_ID, '🟢')} 成功：<code>{success_count}</code>"),
+            (paths.failed_txt, failed_count, f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>私信失败名单</b>\n{tg_emoji(FAILED_LIST_EMOJI_ID, '🔴')} 失败：<code>{failed_count}</code>"),
+            (paths.report_csv, max(1, success_count + failed_count + skipped_count), f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>本次私信任务日志 / 统计视图</b>"),
             (paths.pending_txt, pending_count, f"{tg_emoji(REPORT_EXPORT_EMOJI_ID, '📊')} <b>私信剩余待发送</b>\n{tg_emoji(PENDING_LIST_EMOJI_ID, '⏰')} 待发送：<code>{pending_count}</code>"),
         ]
         sent_any = False
