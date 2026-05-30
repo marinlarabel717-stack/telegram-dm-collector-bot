@@ -5153,3 +5153,6 @@ def configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    # Suppress long-polling noise like repeated getUpdates 200 OK lines.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
