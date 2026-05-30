@@ -528,6 +528,17 @@ class DmSenderManager:
                             status="stopped",
                             last_error=reason_text,
                         )
+                        if self._all_accounts_hit_too_many_requests_limit(
+                            task_id,
+                            limit=int(policy.retry_policy.stop_account_after_too_many_requests or 0),
+                            active_account_ids=active_account_ids,
+                        ):
+                            stop_reason = self._build_all_accounts_too_many_requests_stop_reason(
+                                task_id,
+                                limit=int(policy.retry_policy.stop_account_after_too_many_requests or 0),
+                                active_account_ids=active_account_ids,
+                            )
+                            self._request_task_auto_stop(task_id, stop_reason)
                         break
                     if policy.should_stop_account_for_frequent(frequent_errors):
                         logger.warning(compose_log(f"达到频繁阈值，停止该账号｜count={frequent_errors}", task_id=task_id, account_id=account_id))
@@ -998,6 +1009,34 @@ class DmSenderManager:
         stopped_accounts = sum(1 for row in scoped_rows if str(row["status"] or "") in {"stopped", "error", "completed"})
         pending = fallback_pending if fallback_pending is not None else self.repository.count_dm_pending_recipients(task_id)
         return f"已停账号 {stopped_accounts}/{total_accounts} 个，剩余目标 {pending} 个"
+
+    def _all_accounts_hit_too_many_requests_limit(
+        self,
+        task_id: int,
+        *,
+        limit: int,
+        active_account_ids: set[int] | None = None,
+    ) -> bool:
+        if limit <= 0:
+            return False
+        rows = self.repository.list_dm_task_accounts(task_id)
+        scoped_rows = [row for row in rows if active_account_ids is None or int(row["account_id"]) in active_account_ids]
+        if not scoped_rows:
+            return False
+        for row in scoped_rows:
+            if int(row["too_many_requests_count"] or 0) < limit:
+                return False
+        return True
+
+    def _build_all_accounts_too_many_requests_stop_reason(
+        self,
+        task_id: int,
+        *,
+        limit: int,
+        active_account_ids: set[int] | None = None,
+    ) -> str:
+        summary = self._build_task_stop_summary(task_id, active_account_ids=active_account_ids)
+        return f"自动停止：本任务全部账号请求过于频繁次数都已达到阈值（每个账号 {limit} 次）｜{summary}"
 
     @staticmethod
     def _format_too_many_requests_reason(current_hits: int, limit: int) -> str:
