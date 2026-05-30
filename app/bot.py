@@ -1706,7 +1706,7 @@ class DmCollectorBot:
             kept_other_errors: list[str] = []
             total_checked = len(rows)
             processed = 0
-            parallel = min(50, total_checked)
+            parallel = min(10, total_checked)
 
             semaphore = asyncio.Semaphore(parallel)
 
@@ -4584,7 +4584,7 @@ class DmCollectorBot:
                 matched.append(row)
             elif bucket == "frozen" and restriction == "frozen":
                 matched.append(row)
-            elif bucket == "invalid" and (restriction == "session_invalid" or runtime_status in {"unauthorized", "error"}):
+            elif bucket == "invalid" and (restriction == "session_invalid" or runtime_status == "unauthorized"):
                 matched.append(row)
         return matched
 

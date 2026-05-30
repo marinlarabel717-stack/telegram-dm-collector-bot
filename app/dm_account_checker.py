@@ -44,18 +44,18 @@ class DmAccountChecker:
                     if client is None:
                         client = await self.collection_manager.connect_client(session_file, account_row=account_row, receive_updates=True)
                     if not await client.is_user_authorized():
-                        summary = self._humanize_session_issue("unauthorized", "session 未登录")
+                        restriction_status, summary = self._classify_session_issue("unauthorized", "session 未登录")
                         self.collection_manager.db.update_account_status(account_id, status="unauthorized", last_error="session 未登录")
                         self.repository.update_account_restriction(
                             account_id,
-                            restriction_status="session_invalid",
+                            restriction_status=restriction_status,
                             restriction_reason=summary,
                             raw_reply=None,
                         )
                         logger.warning(compose_log(f"状态检查失败｜{summary}", account_id=account_id))
                         return AccountStatusCheckResult(
                             login_status="unauthorized",
-                            restriction_status="session_invalid",
+                            restriction_status=restriction_status,
                             summary=summary,
                             spambot_reply=None,
                             last_error="session 未登录",
@@ -80,18 +80,21 @@ class DmAccountChecker:
             )
         except Exception as exc:  # noqa: BLE001
             last_error = self.collection_manager._short_error(exc)
-            summary = self._humanize_session_issue("error", last_error)
-            self.collection_manager.db.update_account_status(account_id, status="error", last_error=last_error)
+            restriction_status, summary = self._classify_session_issue("error", last_error)
+            runtime_status = "error" if restriction_status == "session_invalid" else str(account_row["status"] or "active")
+            if runtime_status not in {"active", "checking", "collecting"}:
+                runtime_status = "active"
+            self.collection_manager.db.update_account_status(account_id, status=runtime_status, last_error=last_error)
             self.repository.update_account_restriction(
                 account_id,
-                restriction_status="session_invalid",
+                restriction_status=restriction_status,
                 restriction_reason=summary,
                 raw_reply=None,
             )
             logger.warning(compose_log(f"状态检查失败｜{summary}", account_id=account_id))
             return AccountStatusCheckResult(
-                login_status="error",
-                restriction_status="session_invalid",
+                login_status=runtime_status,
+                restriction_status=restriction_status,
                 summary=summary,
                 spambot_reply=None,
                 last_error=last_error,
@@ -257,12 +260,47 @@ class DmAccountChecker:
 
     @staticmethod
     def _humanize_session_issue(status: str, last_error: str | None) -> str:
+        return DmAccountChecker._classify_session_issue(status, last_error)[1]
+
+    @staticmethod
+    def _classify_session_issue(status: str, last_error: str | None) -> tuple[str, str]:
         raw = (last_error or "").strip()
         text = raw.lower()
         if any(key in text for key in ["session 格式与当前环境不兼容", "too many values to unpack"]):
-            return "session 格式不兼容（原文件未改写）"
-        if status == "unauthorized" or any(key in text for key in ["user_deactivated", "banned", "revoked", "phone_number_banned"]):
-            return "session 已失效或已封禁"
+            return "session_invalid", "session 格式不兼容（原文件未改写）"
+        if status == "unauthorized" or any(
+            key in text
+            for key in [
+                "user_deactivated",
+                "input_user_deactivated",
+                "banned",
+                "revoked",
+                "phone_number_banned",
+                "auth key duplicated",
+                "the key is not registered in the system",
+            ]
+        ):
+            return "session_invalid", "session 已失效或已封禁"
         if any(key in text for key in ["malformed", "not valid sqlite", "file is not a database", "缺少 sessions 表", "已损坏"]):
-            return "session 已损坏"
-        return raw or "账号状态异常"
+            return "session_invalid", "session 已损坏"
+        if any(key in text for key in ["timeout", "timed out", "time out", "proxy"]):
+            return "unknown", "连接 Telegram 超时，请稍后重试"
+        if any(
+            key in text
+            for key in [
+                "while disconnected",
+                "connection closed while receiving data",
+                "server closed the connection",
+                "automatic reconnection failed",
+                "not connected",
+                "connection was closed",
+                "connection reset",
+                "incompletereaderror",
+                "bytes read on a total",
+                "already waiting for incoming data",
+            ]
+        ):
+            return "unknown", "连接 Telegram 中断，请稍后重试"
+        if "floodwait" in text:
+            return "unknown", "触发 Telegram 限流，请稍后再试"
+        return "unknown", raw or "账号状态异常"
