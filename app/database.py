@@ -277,6 +277,10 @@ class Database:
     def _proxy_setting_key(owner_id: int, *, pooled: bool) -> str:
         return f"owner:{int(owner_id)}:{'global_proxy_pool' if pooled else 'global_proxy'}"
 
+    @staticmethod
+    def _dm_wizard_config_key(owner_id: int) -> str:
+        return f"owner:{int(owner_id)}:dm_wizard_config"
+
     def is_user_authorized(self, user_id: int) -> bool:
         with self.lock:
             row = self.conn.execute(
@@ -785,6 +789,35 @@ class Database:
         with self.lock:
             self.conn.execute("DELETE FROM app_settings WHERE key=?", (self._proxy_setting_key(owner_id, pooled=False),))
             self.conn.execute("DELETE FROM app_settings WHERE key=?", (self._proxy_setting_key(owner_id, pooled=True),))
+            self.conn.commit()
+
+    def get_dm_wizard_config(self, *, owner_id: int) -> dict[str, Any]:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT value FROM app_settings WHERE key=?",
+                (self._dm_wizard_config_key(owner_id),),
+            ).fetchone()
+        if not row or not row[0]:
+            return {}
+        try:
+            data = json.loads(str(row[0]))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def set_dm_wizard_config(self, config: dict[str, Any], *, owner_id: int) -> None:
+        payload = json.dumps(config, ensure_ascii=False)
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (self._dm_wizard_config_key(owner_id), payload),
+            )
             self.conn.commit()
 
     # ---------- collection task storage ----------

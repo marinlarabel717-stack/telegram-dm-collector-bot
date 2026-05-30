@@ -136,6 +136,67 @@ class DmCollectorBot:
             logger.info("启动时已回收中断私信任务: %s", recovered_dm)
         self._register_handlers()
 
+    def _default_dm_policy(self) -> dict:
+        return {
+            "per_account_success_limit": 40,
+            "delay_min": 8,
+            "delay_max": 15,
+            "stage1_delay_seconds": 5,
+            "stage2_delay_seconds": 3,
+            "reply_delay_seconds": 5,
+            "reply_wait_timeout_seconds": 300,
+            "pin_after_send": False,
+            "pin_delay_seconds": 3,
+            "delete_dialog_after_send": False,
+            "delete_dialog_delay_seconds": 10,
+            "auto_switch_account": True,
+            "auto_stop_when_accounts_exhausted": True,
+            "typing_simulation": True,
+            "max_retries": 3,
+            "stop_account_after_user_frequent": 30,
+            "stop_account_after_too_many_requests": 40,
+        }
+
+    def _load_dm_wizard_config(self, owner_id: int) -> dict:
+        raw = self.db.get_dm_wizard_config(owner_id=owner_id)
+        if not isinstance(raw, dict):
+            return {}
+        content_type = str(raw.get("content_type") or "text")
+        message_mode = str(raw.get("message_mode") or "single")
+        config = {
+            "content_type": content_type if content_type in {"text", "reply", "media", "forward", "post"} else "text",
+            "message_mode": message_mode if message_mode in {"single", "three_stage"} else "single",
+            "worker_count": max(1, int(raw.get("worker_count") or 1)),
+            "policy": self._default_dm_policy(),
+        }
+        if isinstance(raw.get("policy"), dict):
+            config["policy"].update(raw["policy"])
+        return config
+
+    def _build_dm_wizard_draft(self, owner_id: int) -> dict:
+        draft = {
+            "owner_id": owner_id,
+            "message_mode": "single",
+            "content_type": "text",
+            "worker_count": 1,
+            "account_ids": [],
+            "account_page": 1,
+            "policy": self._default_dm_policy(),
+        }
+        draft.update(self._load_dm_wizard_config(owner_id))
+        return draft
+
+    def _persist_dm_wizard_config(self, owner_id: int, draft: dict) -> None:
+        self.db.set_dm_wizard_config(
+            {
+                "message_mode": str(draft.get("message_mode") or "single"),
+                "content_type": str(draft.get("content_type") or "text"),
+                "worker_count": int(self._sync_dm_worker_count(draft)),
+                "policy": dict(draft.get("policy") or {}),
+            },
+            owner_id=owner_id,
+        )
+
     def _register_handlers(self) -> None:
         self.application.add_handler(CommandHandler("start", self.start), group=0)
         self.application.add_handler(CommandHandler("stats", self.stats), group=0)
@@ -892,6 +953,7 @@ class DmCollectorBot:
         draft["media_path"] = payload["media_path"]
         draft["media_file_name"] = payload["file_name"]
         draft["media_caption"] = payload.get("caption") or ""
+        self._persist_dm_wizard_config(int(draft.get("owner_id") or update.effective_user.id), draft)
         if draft.get("message_mode") == "three_stage":
             state["mode"] = "await_dm_closing"
             await message.reply_text(
@@ -929,6 +991,7 @@ class DmCollectorBot:
         draft["forward_preview"] = link
         draft["forward_message_preview"] = preview_text or ""
         draft["forward_preview_error"] = preview_error or ""
+        self._persist_dm_wizard_config(int(draft.get("owner_id") or update.effective_user.id), draft)
         if draft.get("message_mode") == "three_stage":
             state["mode"] = "await_dm_closing"
             await message.reply_text(
@@ -1265,6 +1328,7 @@ class DmCollectorBot:
                 )
                 return
             policy["delete_dialog_delay_seconds"] = seconds
+            self._persist_dm_wizard_config(update.effective_user.id, draft)
             state["mode"] = "dm_config"
             await update.effective_message.reply_text(
                 self._dm_config_text(draft),
@@ -1967,33 +2031,7 @@ class DmCollectorBot:
             return
         self.user_states[user_id] = {
             "mode": "await_dm_targets",
-            "draft": {
-                "owner_id": user_id,
-                "message_mode": "single",
-                "content_type": "text",
-                "worker_count": 1,
-                "account_ids": [],
-                "account_page": 1,
-                "policy": {
-                    "per_account_success_limit": 40,
-                    "delay_min": 8,
-                    "delay_max": 15,
-                    "stage1_delay_seconds": 5,
-                    "stage2_delay_seconds": 3,
-                    "reply_delay_seconds": 5,
-                    "reply_wait_timeout_seconds": 300,
-                    "pin_after_send": False,
-                    "pin_delay_seconds": 3,
-                    "delete_dialog_after_send": False,
-                    "delete_dialog_delay_seconds": 10,
-                    "auto_switch_account": True,
-                    "auto_stop_when_accounts_exhausted": True,
-                    "typing_simulation": True,
-                    "max_retries": 3,
-                    "stop_account_after_user_frequent": 30,
-                    "stop_account_after_too_many_requests": 40,
-                },
-            },
+            "draft": self._build_dm_wizard_draft(user_id),
         }
         await self._safe_edit(query, self._dm_targets_prompt_text(), self._single_back_keyboard("dm:wizard:cancel"))
 
@@ -2068,10 +2106,12 @@ class DmCollectorBot:
         draft = state.get("draft") or {}
         if (draft.get("content_type") or "text") == "reply":
             draft["message_mode"] = "three_stage"
+            self._persist_dm_wizard_config(user_id, draft)
             await self._safe_answer_callback(query, "回复模式固定走：先打招呼，再等对方回复后发送文案", show_alert=True)
             await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
             return
         draft["message_mode"] = "three_stage" if draft.get("message_mode") == "single" else "single"
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_content_type(self, query, user_id: int) -> None:
@@ -2085,6 +2125,7 @@ class DmCollectorBot:
             draft["message_mode"] = "three_stage"
         for key in ("text", "body", "post_code", "media_kind", "media_path", "media_file_name", "media_caption", "forward_link", "forward_preview", "forward_message_preview", "forward_preview_error", "reply_keyword_rules"):
             draft.pop(key, None)
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_limit(self, query, user_id: int) -> None:
@@ -2095,6 +2136,7 @@ class DmCollectorBot:
         current = int(policy.get("per_account_success_limit") or 40)
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else 40
         policy["per_account_success_limit"] = next_value
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_delay(self, query, user_id: int) -> None:
@@ -2105,6 +2147,7 @@ class DmCollectorBot:
         current = (int(policy.get("delay_min") or 8), int(policy.get("delay_max") or 15))
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else (8, 15)
         policy["delay_min"], policy["delay_max"] = next_value
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_too_many_requests(self, query, user_id: int) -> None:
@@ -2115,6 +2158,7 @@ class DmCollectorBot:
         current = int(policy.get("stop_account_after_too_many_requests") or 40)
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else 40
         policy["stop_account_after_too_many_requests"] = next_value
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_reply_delay(self, query, user_id: int) -> None:
@@ -2125,6 +2169,7 @@ class DmCollectorBot:
         current = int(policy.get("reply_delay_seconds") or 5)
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else 5
         policy["reply_delay_seconds"] = next_value
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_worker_count(self, query, user_id: int) -> None:
@@ -2139,6 +2184,7 @@ class DmCollectorBot:
             next_preset = next((value for value in presets if value > current), presets[0])
             next_value = min(max_workers, next_preset)
         draft["worker_count"] = next_value
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_stage1_delay(self, query, user_id: int) -> None:
@@ -2149,6 +2195,7 @@ class DmCollectorBot:
         current = int(policy.get("stage1_delay_seconds") or 5)
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else 5
         policy["stage1_delay_seconds"] = next_value
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_stage2_delay(self, query, user_id: int) -> None:
@@ -2159,6 +2206,7 @@ class DmCollectorBot:
         current = int(policy.get("stage2_delay_seconds") or 3)
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else 3
         policy["stage2_delay_seconds"] = next_value
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_toggle_pin(self, query, user_id: int) -> None:
@@ -2166,6 +2214,7 @@ class DmCollectorBot:
         draft = state.get("draft") or {}
         policy = draft.setdefault("policy", {})
         policy["pin_after_send"] = not bool(policy.get("pin_after_send", False))
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_cycle_pin_delay(self, query, user_id: int) -> None:
@@ -2176,6 +2225,7 @@ class DmCollectorBot:
         current = int(policy.get("pin_delay_seconds") or 3)
         next_value = options[(options.index(current) + 1) % len(options)] if current in options else 3
         policy["pin_delay_seconds"] = next_value
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_toggle_delete_dialog(self, query, user_id: int) -> None:
@@ -2186,6 +2236,7 @@ class DmCollectorBot:
         policy["delete_dialog_after_send"] = next_value
         if next_value and "delete_dialog_delay_seconds" not in policy:
             policy["delete_dialog_delay_seconds"] = 10
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_start_delete_delay_input(self, query, user_id: int) -> None:
@@ -2199,6 +2250,7 @@ class DmCollectorBot:
         draft = state.get("draft") or {}
         policy = draft.setdefault("policy", {})
         policy["typing_simulation"] = not bool(policy.get("typing_simulation", True))
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_toggle_switch(self, query, user_id: int) -> None:
@@ -2208,6 +2260,7 @@ class DmCollectorBot:
         current = bool(policy.get("auto_switch_account", True))
         policy["auto_switch_account"] = not current
         policy["auto_stop_when_accounts_exhausted"] = not current
+        self._persist_dm_wizard_config(user_id, draft)
         await self._safe_edit(query, self._dm_config_text(draft), self._build_dm_config_keyboard(draft))
 
     async def _dm_wizard_finish_config(self, query, user_id: int) -> None:
@@ -2215,6 +2268,7 @@ class DmCollectorBot:
         draft = state.get("draft") or {}
         if (draft.get("content_type") or "text") == "reply":
             draft["message_mode"] = "three_stage"
+        self._persist_dm_wizard_config(user_id, draft)
         if draft.get("message_mode") == "three_stage":
             state["mode"] = "await_dm_greeting"
             await self._safe_edit(query, self._dm_message_prompt_text(draft), self._single_back_keyboard("dm:wizard:back:config"))
