@@ -1620,7 +1620,8 @@ class DmCollectorBot:
         ])
 
     async def _check_account(self, query, account_id: int) -> None:
-        account = self.db.get_account(account_id)
+        owner_id = int(query.from_user.id)
+        account = self.db.get_account(account_id, owner_id=owner_id)
         if not account:
             await self._show_account_detail(query, account_id)
             return
@@ -1632,9 +1633,13 @@ class DmCollectorBot:
         try:
             self.db.update_account_status(account_id, status="checking", last_error=None)
             self.dm_repository.update_account_restriction(account_id, restriction_status="checking", restriction_reason="正在检测")
-            await self._safe_edit(query, self._format_account_text(self.db.get_account(account_id)), self._build_account_detail_keyboard(account_id))
+            await self._safe_edit(
+                query,
+                self._format_account_text(self.db.get_account(account_id, owner_id=owner_id)),
+                self._build_account_detail_keyboard(account_id),
+            )
             result = await self.dm_account_checker.check_account_status(account)
-            account = self.db.get_account(account_id)
+            account = self.db.get_account(account_id, owner_id=owner_id)
             if not account:
                 await self._safe_edit(query, self._not_found_text("账号不存在或已删除"), self._single_back_keyboard("account:list:1"))
                 return
@@ -1647,7 +1652,7 @@ class DmCollectorBot:
                     await self._send_account_export(query.message.chat_id, [account], bucket, auto_delete=True)
                 except FileNotFoundError:
                     self._purge_account_files(account)
-                    self.db.delete_account(account_id)
+                    self.db.delete_account(account_id, owner_id=owner_id)
                     backup_note = "未找到可导出的原始文件，已直接删除账号"
                 text = (
                     f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>账号已自动删除</b>\n"
@@ -1667,7 +1672,7 @@ class DmCollectorBot:
                 restriction_reason=previous_restriction_reason,
                 raw_reply=previous_restriction_raw_reply,
             )
-            account = self.db.get_account(account_id)
+            account = self.db.get_account(account_id, owner_id=owner_id)
             if account:
                 error_text = self._humanize_account_issue("error", str(exc))
                 text = (
@@ -1683,7 +1688,8 @@ class DmCollectorBot:
 
     async def _check_all_accounts(self, query) -> None:
         try:
-            rows = self.db.list_all_accounts()
+            owner_id = int(query.from_user.id)
+            rows = self.db.list_all_accounts(owner_id=owner_id)
             if not rows:
                 await self._safe_edit(query, self._not_found_text("当前没有可检测的账号。"), self._single_back_keyboard("menu:accounts"))
                 return
@@ -1707,7 +1713,7 @@ class DmCollectorBot:
             async def _verify_one(account_row):
                 async with semaphore:
                     result = await self.dm_account_checker.check_account_status(account_row)
-                    refreshed = self.db.get_account(account_row["id"])
+                    refreshed = self.db.get_account(account_row["id"], owner_id=owner_id)
                     return account_row, refreshed, result
 
             await self._safe_edit(
@@ -1751,7 +1757,7 @@ class DmCollectorBot:
                     deleted_frozen.append(str(label))
                     if refreshed:
                         removed_frozen_rows.append(refreshed)
-                        self.db.delete_account(refreshed["id"])
+                        self.db.delete_account(refreshed["id"], owner_id=owner_id)
                 elif result.restriction_status == "session_invalid":
                     if "损坏" in issue_text:
                         deleted_broken.append(str(label))
@@ -1759,7 +1765,7 @@ class DmCollectorBot:
                         deleted_banned.append(str(label))
                     if refreshed:
                         removed_invalid_rows.append(refreshed)
-                        self.db.delete_account(refreshed["id"])
+                        self.db.delete_account(refreshed["id"], owner_id=owner_id)
                 else:
                     unknown += 1
                     kept_other_errors.append(f"{label}｜{issue_text}")
@@ -1805,7 +1811,7 @@ class DmCollectorBot:
                         self._purge_account_files(row)
                     export_warnings.append("冻结账号没有找到可导出的原始文件")
 
-            total_alive = self.db.count_accounts()
+            total_alive = self.db.count_accounts(owner_id=owner_id)
             lines = [
                 f"{tg_emoji(ROCKET_EMOJI_ID, '🚀')} <b>批量检查状态完成</b>",
                 f"总检测账号：<code>{total_checked}</code>",
@@ -1869,7 +1875,8 @@ class DmCollectorBot:
                 pass
 
     async def _purge_invalid_accounts(self, query) -> None:
-        rows = self.db.list_invalid_accounts()
+        owner_id = int(query.from_user.id)
+        rows = self.db.list_invalid_accounts(owner_id=owner_id)
         if not rows:
             text = (
                 f"{tg_emoji(TRASH_EMOJI_ID, '🗑')} <b>没有可清理的无效账号</b>\n"
@@ -1888,12 +1895,12 @@ class DmCollectorBot:
             label = row["username"] or row["phone"] or row["display_name"] or row["session_name"]
             deleted_labels.append(str(label))
             self._purge_account_files(row)
-            self.db.delete_account(row["id"])
+            self.db.delete_account(row["id"], owner_id=owner_id)
 
         lines = [
             f"{tg_emoji(self.settings.emoji_error_id, '🔴')} <b>无效账号已清理</b>",
             f"已删除数量：<code>{len(deleted_labels)}</code>",
-            f"当前保留存活：<code>{self.db.count_accounts()}</code>",
+            f"当前保留存活：<code>{self.db.count_accounts(owner_id=owner_id)}</code>",
         ]
         if deleted_labels:
             lines.append("")
@@ -1908,7 +1915,7 @@ class DmCollectorBot:
         ]))
 
     async def _delete_account(self, query, account_id: int) -> None:
-        row = self.db.delete_account(account_id)
+        row = self.db.delete_account(account_id, owner_id=int(query.from_user.id))
         if row:
             self._purge_account_files(row)
         await self._show_account_list(query, page=1)
@@ -2892,6 +2899,7 @@ class DmCollectorBot:
     async def _wizard_set_days(self, query, user_id: int, days: int, reply_message=None) -> None:
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
+        draft["owner_id"] = user_id
         draft["days"] = days
         draft.setdefault("account_ids", [])
         if draft.get("task_type") == "group":
@@ -2900,7 +2908,15 @@ class DmCollectorBot:
             markup = self._build_group_filters_keyboard(draft)
         else:
             state["mode"] = "select_accounts"
-            text = self._select_accounts_text(draft["channels"], days, draft["account_ids"], task_type=draft.get("task_type", "channel"), filters=draft.get("filters"), page=int(draft.get("account_page") or 1))
+            text = self._select_accounts_text(
+                draft["channels"],
+                days,
+                draft["account_ids"],
+                task_type=draft.get("task_type", "channel"),
+                filters=draft.get("filters"),
+                page=int(draft.get("account_page") or 1),
+                owner_id=user_id,
+            )
             markup = self._build_account_selection_keyboard(draft)
         if query is not None:
             await self._safe_edit(query, text, markup)
@@ -2945,6 +2961,7 @@ class DmCollectorBot:
                 task_type=draft.get("task_type", "channel"),
                 filters=draft.get("filters"),
                 page=int(draft.get("account_page") or 1),
+                owner_id=user_id,
             ),
             self._build_account_selection_keyboard(draft),
         )
@@ -2999,14 +3016,16 @@ class DmCollectorBot:
                 task_type=draft.get("task_type", "channel"),
                 filters=draft.get("filters"),
                 page=int(draft.get("account_page") or 1),
+                owner_id=user_id,
             ),
             self._build_account_selection_keyboard(draft),
         )
 
     async def _wizard_auto_accounts(self, query, user_id: int) -> None:
-        active_accounts = self.db.get_active_accounts()
+        active_accounts = self.db.get_active_accounts(owner_id=user_id)
         state = self.user_states.setdefault(user_id, {"draft": {}})
         draft = state.setdefault("draft", {})
+        draft["owner_id"] = user_id
         draft["account_ids"] = [row["id"] for row in active_accounts]
         text = self._select_accounts_text(
             draft.get("channels", []),
@@ -3015,6 +3034,7 @@ class DmCollectorBot:
             task_type=draft.get("task_type", "channel"),
             filters=draft.get("filters"),
             page=int(draft.get("account_page") or 1),
+            owner_id=user_id,
         )
         await self._safe_edit(query, text, self._build_account_selection_keyboard(draft))
 
@@ -3029,6 +3049,7 @@ class DmCollectorBot:
             task_type=draft.get("task_type", "channel"),
             filters=draft.get("filters"),
             page=int(draft.get("account_page") or 1),
+            owner_id=user_id,
         )
         await self._safe_edit(query, text, self._build_account_selection_keyboard(draft))
 
@@ -3048,6 +3069,7 @@ class DmCollectorBot:
             task_type=draft.get("task_type", "channel"),
             filters=draft.get("filters"),
             page=int(draft.get("account_page") or 1),
+            owner_id=user_id,
         )
         await self._safe_edit(query, text, self._build_account_selection_keyboard(draft))
 
@@ -3600,7 +3622,8 @@ class DmCollectorBot:
         return "\n".join(lines)
 
     def _get_dm_account_page_rows(self, draft: dict) -> tuple[list, int, int]:
-        all_rows = self.db.get_active_accounts()
+        owner_id = int(draft.get("owner_id") or 0) or None
+        all_rows = self.db.get_active_accounts(owner_id=owner_id)
         per_page = 20
         total_pages = max(1, ceil(len(all_rows) / per_page))
         page = max(1, min(int(draft.get("account_page") or 1), total_pages))
@@ -4045,8 +4068,18 @@ class DmCollectorBot:
             f"<code>0</code> = 发送后立刻删除自己的聊天框消息。"
         )
 
-    def _select_accounts_text(self, channels: list[str], days: int, selected_ids: list[int], *, task_type: str = "channel", filters: dict | None = None, page: int = 1) -> str:
-        active = self.db.get_active_accounts()
+    def _select_accounts_text(
+        self,
+        channels: list[str],
+        days: int,
+        selected_ids: list[int],
+        *,
+        task_type: str = "channel",
+        filters: dict | None = None,
+        page: int = 1,
+        owner_id: int | None = None,
+    ) -> str:
+        active = self.db.get_active_accounts(owner_id=owner_id)
         per_page = 20
         total_pages = max(1, ceil(len(active) / per_page))
         page = max(1, min(int(page or 1), total_pages))
@@ -4069,7 +4102,8 @@ class DmCollectorBot:
         return "\n".join(lines)
 
     def _get_collect_account_page_rows(self, draft: dict) -> tuple[list, int, int]:
-        all_rows = self.db.get_active_accounts()
+        owner_id = int(draft.get("owner_id") or 0) or None
+        all_rows = self.db.get_active_accounts(owner_id=owner_id)
         per_page = 20
         total_pages = max(1, ceil(len(all_rows) / per_page))
         page = max(1, min(int(draft.get("account_page") or 1), total_pages))
@@ -4439,17 +4473,19 @@ class DmCollectorBot:
     def _single_back_keyboard(self, callback_data: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([[premium_button("返回", self.settings.emoji_back_id, callback_data=callback_data)]])
 
-    def _account_display_map(self) -> dict[int, int]:
+    def _account_display_map(self, owner_id: int | None = None) -> dict[int, int]:
         visible_rows = [
-            row for row in self.db.list_all_accounts()
+            row for row in self.db.list_all_accounts(owner_id=owner_id)
             if row["status"] in {"active", "checking", "collecting"}
         ]
         visible_rows.sort(key=lambda row: int(row["id"]))
         return {int(row["id"]): index for index, row in enumerate(visible_rows, start=1)}
 
-    def _account_display_code(self, account_or_id) -> int:
+    def _account_display_code(self, account_or_id, owner_id: int | None = None) -> int:
         account_id = int(account_or_id["id"] if hasattr(account_or_id, "keys") else account_or_id)
-        return self._account_display_map().get(account_id, account_id)
+        if owner_id is None and hasattr(account_or_id, "keys") and "owner_id" in account_or_id.keys():
+            owner_id = int(account_or_id["owner_id"] or 0) or None
+        return self._account_display_map(owner_id=owner_id).get(account_id, account_id)
 
     def _task_display_map(self) -> dict[int, int]:
         rows = self.db.list_collect_tasks(limit=1000000, offset=0, history=True)
@@ -4533,8 +4569,8 @@ class DmCollectorBot:
             "frozen": "冻结",
         }.get(bucket, bucket)
 
-    def _filter_account_rows_for_export(self, bucket: str) -> list:
-        rows = self.db.list_all_accounts()
+    def _filter_account_rows_for_export(self, bucket: str, *, owner_id: int | None = None) -> list:
+        rows = self.db.list_all_accounts(owner_id=owner_id)
         limited_statuses = {"temp_mutual", "permanent_mutual", "geo_limited", "spam_limited", "restricted"}
         matched = []
         for row in rows:
@@ -4596,7 +4632,7 @@ class DmCollectorBot:
                 self.db.delete_account(int(row["id"]))
 
     async def _export_accounts_by_bucket(self, query, chat_id: int, bucket: str) -> None:
-        rows = self._filter_account_rows_for_export(bucket)
+        rows = self._filter_account_rows_for_export(bucket, owner_id=int(query.from_user.id))
         if not rows:
             await self._safe_answer_callback(query, f"没有可导出的{self._account_export_bucket_label(bucket)}账号", show_alert=True)
             return
