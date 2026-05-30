@@ -23,8 +23,10 @@ class Settings:
     data_dir: Path
     session_dir: Path
     export_dir: Path
+    tg_matrix_dir: Path
     api_id: int
     api_hash: str
+    account_check_timeout_seconds: int
     forward_to_admins: bool
     save_raw_update: bool
     auto_reply_enabled: bool
@@ -96,6 +98,10 @@ def get_settings() -> Settings:
         export_dir = project_root / export_dir
     export_dir.mkdir(parents=True, exist_ok=True)
 
+    tg_matrix_dir = Path(os.getenv("TG_MATRIX_DIR", project_root.parent / "tg-group"))
+    if not tg_matrix_dir.is_absolute():
+        tg_matrix_dir = project_root / tg_matrix_dir
+
     return Settings(
         bot_token=token,
         admin_ids=_parse_admin_ids(os.getenv("ADMIN_IDS")),
@@ -103,8 +109,10 @@ def get_settings() -> Settings:
         data_dir=data_dir,
         session_dir=session_dir,
         export_dir=export_dir,
+        tg_matrix_dir=tg_matrix_dir.resolve(),
         api_id=TELEGRAM_2040_API_ID,
         api_hash=TELEGRAM_2040_API_HASH,
+        account_check_timeout_seconds=max(5, _parse_int(os.getenv("ACCOUNT_CHECK_TIMEOUT_SECONDS"), 25)),
         forward_to_admins=_parse_bool(os.getenv("FORWARD_TO_ADMINS"), True),
         save_raw_update=_parse_bool(os.getenv("SAVE_RAW_UPDATE"), True),
         auto_reply_enabled=_parse_bool(os.getenv("AUTO_REPLY_ENABLED"), False),

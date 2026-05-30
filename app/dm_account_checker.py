@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from telethon import TelegramClient
 
@@ -34,6 +37,103 @@ class DmAccountChecker:
         self.collection_manager = collection_manager
 
     async def check_account_status(self, account_row) -> AccountStatusCheckResult:
+        try:
+            return await self._check_account_status_via_tgmatrix(account_row)
+        except FileNotFoundError as exc:
+            logger.warning("TG-Matrix 检测脚本不存在，回退旧检查逻辑｜%s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("TG-Matrix 检测逻辑执行失败，回退旧检查逻辑｜account_id=%s｜%s", account_row["id"], exc)
+        return await self._check_account_status_legacy(account_row)
+
+    async def _check_account_status_via_tgmatrix(self, account_row) -> AccountStatusCheckResult:
+        account_id = int(account_row["id"])
+        session_file = Path(account_row["session_file"])
+        raw_result = await self._run_tgmatrix_spambot_check(session_file, account_row=account_row)
+
+        status = str(raw_result.get("status") or "unknown").strip().lower()
+        reason = str(raw_result.get("reason") or "").strip()
+        reply_text = str(raw_result.get("reply_text") or "").strip() or None
+        tg_user_id = raw_result.get("user_id")
+        phone = raw_result.get("phone")
+        username = raw_result.get("username")
+        display_name = (
+            raw_result.get("first_name")
+            or raw_result.get("username")
+            or account_row["display_name"]
+            or account_row["session_name"]
+        )
+
+        if status == "reply":
+            restriction_status, summary = self._map_tgmatrix_reply_status(reply_text or "")
+            if restriction_status == "session_invalid":
+                login_status = "unauthorized"
+                runtime_status = "unauthorized"
+                last_error = summary
+            else:
+                login_status = "active"
+                runtime_status = "active"
+                last_error = summary if restriction_status == "frozen" else None
+        elif status in {"alive", "ok"}:
+            restriction_status = "unrestricted"
+            summary = "无限制"
+            login_status = "active"
+            runtime_status = "active"
+            last_error = None
+        elif status in {"banned", "not_logged_in", "session_expired"}:
+            restriction_status = "session_invalid"
+            summary = self._map_tgmatrix_invalid_summary(status)
+            login_status = "unauthorized"
+            runtime_status = "unauthorized"
+            last_error = reason or summary
+        elif status == "frozen":
+            restriction_status = "frozen"
+            summary = self._format_tgmatrix_frozen_summary(raw_result)
+            login_status = "active"
+            runtime_status = "active"
+            last_error = reason or summary
+        elif status == "timeout":
+            restriction_status = "unknown"
+            summary = "连接 Telegram 超时，请稍后重试"
+            login_status = "active"
+            runtime_status = self._safe_runtime_status(account_row["status"])
+            last_error = reason or summary
+        else:
+            restriction_status = "unknown"
+            summary = self._humanize_tgmatrix_unknown(reason)
+            login_status = "active"
+            runtime_status = self._safe_runtime_status(account_row["status"])
+            last_error = reason or summary
+
+        self.collection_manager.db.update_account_status(
+            account_id,
+            status=runtime_status,
+            last_error=last_error,
+            tg_user_id=tg_user_id,
+            phone=phone,
+            username=username,
+            display_name=display_name,
+        )
+        self.repository.update_account_restriction(
+            account_id,
+            restriction_status=restriction_status,
+            restriction_reason=summary,
+            raw_reply=reply_text,
+        )
+
+        if restriction_status in {"session_invalid", "frozen"}:
+            logger.warning(compose_log(f"状态检查完成｜{summary}", account_id=account_id))
+        else:
+            logger.info(compose_log(f"状态检查完成｜{summary}", account_id=account_id))
+
+        return AccountStatusCheckResult(
+            login_status=login_status,
+            restriction_status=restriction_status,
+            summary=summary,
+            spambot_reply=reply_text,
+            last_error=last_error,
+        )
+
+    async def _check_account_status_legacy(self, account_row) -> AccountStatusCheckResult:
         account_id = int(account_row["id"])
         client: TelegramClient | None = None
         try:
@@ -138,6 +238,179 @@ class DmAccountChecker:
         finally:
             if client is not None:
                 await client.disconnect()
+
+    async def _run_tgmatrix_spambot_check(self, session_file: Path, *, account_row) -> dict[str, Any]:
+        script_path = self.collection_manager.settings.tg_matrix_dir / "electron" / "accounts" / "check-engine" / "telethon_spambot_check.py"
+        if not script_path.exists():
+            raise FileNotFoundError(str(script_path))
+
+        timeout_seconds = max(5, int(getattr(self.collection_manager.settings, "account_check_timeout_seconds", 25) or 25))
+        proxy_attempts = self._build_proxy_attempts(account_row)
+        last_result: dict[str, Any] | None = None
+
+        for proxy_row in proxy_attempts:
+            raw_proxy = self._build_tgmatrix_proxy_payload(proxy_row)
+            command = [sys.executable, str(script_path), str(session_file), str(timeout_seconds)]
+            if raw_proxy is not None:
+                command.append(raw_proxy)
+
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.collection_manager.settings.tg_matrix_dir),
+            )
+            stdout, stderr = await process.communicate()
+            result = self._parse_tgmatrix_script_result(process.returncode, stdout, stderr)
+            last_result = result
+
+            if proxy_row is not None and self._is_tgmatrix_proxy_retryable(result):
+                logger.warning(
+                    compose_log(
+                        f"TG-Matrix 检测代理重试｜{self.collection_manager._short_error(Exception(str(result.get('reason') or 'unknown')))}",
+                        account_id=int(account_row["id"]),
+                    )
+                )
+                continue
+
+            if proxy_row is not None:
+                self.collection_manager._remember_working_proxy(proxy_row)
+            return result
+
+        return last_result or {"status": "unknown", "reason": "account_check_no_result"}
+
+    def _build_proxy_attempts(self, account_row) -> list[dict[str, Any] | None]:
+        owner_id = 0
+        try:
+            owner_id = int(account_row["owner_id"] or 0)
+        except Exception:
+            owner_id = 0
+        proxy_pool = self.collection_manager.db.get_global_proxies(owner_id=owner_id) if owner_id else []
+        if not proxy_pool:
+            return [None]
+        ordered_pool = self.collection_manager._ordered_proxy_pool(proxy_pool)
+        return ordered_pool if len(ordered_pool) > 1 else ordered_pool * 2
+
+    @staticmethod
+    def _build_tgmatrix_proxy_payload(proxy_row) -> str | None:
+        if not proxy_row:
+            return None
+        payload = {
+            "type": str(proxy_row.get("proxy_type") or "").strip().lower(),
+            "host": str(proxy_row.get("proxy_host") or "").strip(),
+            "port": int(proxy_row.get("proxy_port") or 0),
+            "username": str(proxy_row.get("proxy_username") or "").strip(),
+            "password": str(proxy_row.get("proxy_password") or "").strip(),
+        }
+        if not payload["type"] or not payload["host"] or payload["port"] <= 0:
+            return None
+        return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _parse_tgmatrix_script_result(returncode: int, stdout: bytes, stderr: bytes) -> dict[str, Any]:
+        raw_stdout = stdout.decode("utf-8", errors="ignore").strip()
+        raw_stderr = stderr.decode("utf-8", errors="ignore").strip()
+        if returncode != 0:
+            return {"status": "unknown", "reason": raw_stderr or raw_stdout or f"process_exit_{returncode}"}
+        if not raw_stdout:
+            return {"status": "unknown", "reason": raw_stderr or "empty_stdout"}
+        try:
+            payload = json.loads(raw_stdout)
+        except json.JSONDecodeError:
+            return {"status": "unknown", "reason": f"invalid_json:{raw_stdout[:200]}"}
+        if not isinstance(payload, dict):
+            return {"status": "unknown", "reason": "invalid_payload"}
+        return payload
+
+    @staticmethod
+    def _is_tgmatrix_proxy_retryable(result: dict[str, Any]) -> bool:
+        status = str(result.get("status") or "").strip().lower()
+        reason = str(result.get("reason") or "").strip().lower()
+        if status == "timeout":
+            return True
+        retryable_keywords = (
+            "timeout",
+            "timed out",
+            "time out",
+            "proxy",
+            "connection reset",
+            "connection aborted",
+            "connection closed",
+            "server closed the connection",
+            "not connected",
+            "network is unreachable",
+            "failed to establish a new connection",
+        )
+        return status == "unknown" and any(keyword in reason for keyword in retryable_keywords)
+
+    @staticmethod
+    def _safe_runtime_status(current_status: str | None) -> str:
+        runtime_status = str(current_status or "active")
+        if runtime_status not in {"active", "checking", "collecting"}:
+            return "active"
+        return runtime_status
+
+    @classmethod
+    def _map_tgmatrix_reply_status(cls, reply_text: str) -> tuple[str, str]:
+        text = re.sub(r"\s+", " ", reply_text or "").strip()
+        lowered = text.lower()
+        restriction_until = cls._extract_restriction_until(text)
+
+        tgmatrix_rules: list[tuple[str, str, tuple[str, ...]]] = [
+            ("frozen", "冻结", ("frozen", "freeze state", "account frozen", "violations of the telegram terms of service", "已冻结", "冻结")),
+            ("restricted", "多 IP / 异地登录风险", ("multiple ip", "different ip", "many locations", "多ip", "异地登录")),
+            ("session_invalid", "session 已失效或已封禁", ("phone number banned", "this number is banned", "账号已封禁", "封禁")),
+            ("temp_mutual", "临时双向", ("temporary", "temporarily", "for now", "暂时限制", "临时双向")),
+            ("restricted", "双向限制", ("while the account is limited", "you will not be able to send messages to people who do not have your number", "add them to groups and channels", "cannot send messages", "some phone numbers may not receive your messages", "双向限制", "被限制", "limited")),
+            ("geo_limited", "地理位置限制", ("some phone numbers may trigger a harsh response", "some phone numbers may trigger", "地理位置限制")),
+            ("unrestricted", "无限制", ("no limits are currently applied", "good news", "free as a bird", "没有限制", "一切正常")),
+        ]
+
+        normalized_text = lowered.replace("multiple   ip", "multiple ip")
+        for restriction_status, summary, patterns in tgmatrix_rules:
+            if any(pattern in normalized_text or pattern in text for pattern in patterns):
+                if restriction_status == "temp_mutual":
+                    return "temp_mutual", cls._format_temp_mutual_summary(restriction_until)
+                return restriction_status, summary
+
+        if any(keyword in lowered for keyword in ("spam", "can't send", "can only send", "cannot send")):
+            if restriction_until is not None:
+                return "temp_mutual", cls._format_temp_mutual_summary(restriction_until)
+            return "restricted", "双向限制"
+        return "unknown", "待人工确认"
+
+    @staticmethod
+    def _map_tgmatrix_invalid_summary(status: str) -> str:
+        mapping = {
+            "banned": "session 已失效或已封禁",
+            "not_logged_in": "session 未登录",
+            "session_expired": "session 已失效",
+        }
+        return mapping.get(status, "session 已失效或已封禁")
+
+    @staticmethod
+    def _format_tgmatrix_frozen_summary(raw_result: dict[str, Any]) -> str:
+        freeze_until = str(raw_result.get("freeze_until_text") or "").strip()
+        freeze_since = str(raw_result.get("freeze_since_text") or "").strip()
+        if freeze_until:
+            return f"冻结（预计 {freeze_until} 解冻）"
+        if freeze_since:
+            return f"冻结（冻结时间 {freeze_since}）"
+        return "冻结"
+
+    @staticmethod
+    def _humanize_tgmatrix_unknown(reason: str | None) -> str:
+        raw = str(reason or "").strip()
+        text = raw.lower()
+        if not raw:
+            return "待人工确认"
+        if any(keyword in text for keyword in ("timeout", "timed out", "time out")):
+            return "连接 Telegram 超时，请稍后重试"
+        if any(keyword in text for keyword in ("proxy", "failed to establish a new connection", "network is unreachable")):
+            return "代理或网络异常，请稍后重试"
+        if any(keyword in text for keyword in ("not connected", "connection closed", "connection reset", "server closed the connection")):
+            return "连接 Telegram 中断，请稍后重试"
+        return raw
 
     async def _fetch_spambot_reply(self, account_row, *, client: TelegramClient | None = None) -> str:
         owns_client = client is None
