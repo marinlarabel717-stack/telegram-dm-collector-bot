@@ -206,17 +206,26 @@ class DmSenderManager:
             account_id = int(account_row["account_id"])
             logger.info(compose_log(f"槽位接管账号｜slot={slot_index}", task_id=task_id, account_id=account_id))
             try:
-                await self._account_worker(task_id, queue, account_row, policy, active_account_ids=active_account_ids)
+                await self._account_worker(task_id, queue, account_queue, account_row, policy, active_account_ids=active_account_ids)
             finally:
                 account_queue.task_done()
 
-    async def _account_worker(self, task_id: int, queue: asyncio.Queue, account_row, policy: DMTaskPolicy, *, active_account_ids: set[int]) -> None:
+    async def _account_worker(
+        self,
+        task_id: int,
+        queue: asyncio.Queue,
+        account_queue: asyncio.Queue,
+        account_row,
+        policy: DMTaskPolicy,
+        *,
+        active_account_ids: set[int],
+    ) -> None:
         account_id = int(account_row["account_id"])
         session_file = Path(account_row["session_file"])
         client = None
         success_count = int(account_row["sent_success_count"] or 0)
         frequent_errors = int(account_row["frequent_error_count"] or 0)
-        too_many_requests_hits = 0
+        too_many_requests_hits = int(account_row["too_many_requests_count"] or 0)
         task = self.repository.get_dm_task(task_id)
         payload = json.loads(str(task["payload_json"] or "{}")) if task else {}
         content_type = str((task["content_type"] if task else None) or payload.get("content_type") or "text")
@@ -383,8 +392,20 @@ class DmSenderManager:
                     post_attempt_delay = self._failure_backoff_delay(error_code, policy)
                     if frequent_hit and error_code != "too_many_requests":
                         frequent_errors += 1
+                    too_many_requests_delta = 0
+                    too_many_requests_limit = int(policy.retry_policy.stop_account_after_too_many_requests or 0)
+                    too_many_requests_reason = error_message
                     if error_code == "too_many_requests":
                         too_many_requests_hits += 1
+                        too_many_requests_delta = 1
+                        too_many_requests_reason = self._format_too_many_requests_reason(
+                            too_many_requests_hits,
+                            too_many_requests_limit,
+                        )
+                    threshold_reached = (
+                        error_code == "too_many_requests"
+                        and policy.should_stop_account_for_too_many_requests(too_many_requests_hits)
+                    )
                     should_switch_account = self._should_retry_with_other_account(
                         task_id,
                         account_id,
@@ -393,7 +414,18 @@ class DmSenderManager:
                         policy=policy,
                         active_account_ids=active_account_ids,
                     )
+                    if threshold_reached:
+                        should_switch_account = False
                     if should_switch_account:
+                        account_status = "stopped"
+                        account_error = error_message
+                        retry_message = f"{error_message}，目标已回退队列并换号重试"
+                        requeue_account = False
+                        if error_code == "too_many_requests":
+                            account_status = "queued"
+                            account_error = too_many_requests_reason
+                            retry_message = f"{too_many_requests_reason}，当前账号先回账号池，目标已回退队列并换号重试"
+                            requeue_account = True
                         self.repository.mark_dm_recipient_result(
                             task_id,
                             recipient_id,
@@ -406,10 +438,11 @@ class DmSenderManager:
                         self.repository.update_dm_task_account(
                             task_id,
                             account_id,
-                            status="stopped",
+                            status=account_status,
                             fail_delta=1,
                             frequent_delta=1 if frequent_hit and error_code != "too_many_requests" else 0,
-                            last_error=error_message,
+                            too_many_requests_delta=too_many_requests_delta,
+                            last_error=account_error,
                         )
                         self.repository.add_send_log(
                             task_id=task_id,
@@ -417,11 +450,15 @@ class DmSenderManager:
                             recipient_id=recipient_id,
                             action="send",
                             status="retry",
-                            message=f"{error_message}，目标已回退队列并换号重试",
+                            message=retry_message,
                             raw_error=raw_error,
                         )
                         logger.warning(compose_log(f"发送失败，目标回退队列换号重试｜{error_code}｜{error_message}", task_id=task_id, account_id=account_id, recipient=target))
                         queue.put_nowait(recipient)
+                        if requeue_account:
+                            refreshed_account_row = self.repository.get_dm_task_account(task_id, account_id)
+                            if refreshed_account_row is not None:
+                                account_queue.put_nowait(refreshed_account_row)
                         break
                     self.repository.mark_dm_recipient_result(
                         task_id,
@@ -437,15 +474,12 @@ class DmSenderManager:
                         account_id,
                         fail_delta=1,
                         frequent_delta=1 if frequent_hit and error_code != "too_many_requests" else 0,
-                        last_error=error_message,
+                        too_many_requests_delta=too_many_requests_delta,
+                        last_error=too_many_requests_reason if error_code == "too_many_requests" else error_message,
                     )
                     log_message = error_message
                     if error_code == "too_many_requests":
-                        log_message = self._append_limit_progress(
-                            log_message,
-                            too_many_requests_hits,
-                            policy.retry_policy.stop_account_after_too_many_requests,
-                        )
+                        log_message = too_many_requests_reason
                     elif frequent_hit:
                         log_message = self._append_limit_progress(log_message, success_count, policy)
                     self.repository.add_send_log(
@@ -516,6 +550,10 @@ class DmSenderManager:
             current_account_status = str(row_after_run["status"] or "") if row_after_run else ""
             if current_account_status in {"error", "stopped"}:
                 final_task_account_status = current_account_status
+                if row_after_run and row_after_run["last_error"]:
+                    last_error = row_after_run["last_error"]
+            elif current_account_status == "queued":
+                final_task_account_status = "queued"
                 if row_after_run and row_after_run["last_error"]:
                     last_error = row_after_run["last_error"]
             elif next_status in {"unauthorized", "error"}:
@@ -920,6 +958,12 @@ class DmSenderManager:
         stopped_accounts = sum(1 for row in scoped_rows if str(row["status"] or "") in {"stopped", "error", "completed"})
         pending = fallback_pending if fallback_pending is not None else self.repository.count_dm_pending_recipients(task_id)
         return f"已停账号 {stopped_accounts}/{total_accounts} 个，剩余目标 {pending} 个"
+
+    @staticmethod
+    def _format_too_many_requests_reason(current_hits: int, limit: int) -> str:
+        if limit > 0:
+            return f"请求过于频繁（{current_hits}/{limit}）"
+        return f"请求过于频繁（累计 {current_hits} 次）"
 
     def _task_has_no_other_usable_accounts(self, task_id: int, *, exclude_account_id: int, active_account_ids: set[int] | None = None) -> bool:
         for row in self.repository.list_dm_task_accounts(task_id):

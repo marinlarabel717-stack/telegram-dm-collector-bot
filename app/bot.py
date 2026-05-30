@@ -4491,10 +4491,9 @@ class DmCollectorBot:
         if "请求过于频繁" in detail:
             limit = int(policy.get("stop_account_after_too_many_requests") or 0)
             if limit > 0:
-                last_error = str(row["account_last_error"] or "") if "account_last_error" in row.keys() else ""
-                match = re.search(r"(\d+)\s*/\s*(\d+)", last_error)
-                if match:
-                    return f"{detail}[{match.group(1)}/{match.group(2)}]"
+                current = int(row["account_too_many_requests_count"] or 0) if "account_too_many_requests_count" in row.keys() else 0
+                if current > 0:
+                    return f"{detail}[{current}/{limit}]"
         if not self._is_dm_frequency_log(detail):
             return detail
         limit = int(policy.get("per_account_success_limit") or 0)

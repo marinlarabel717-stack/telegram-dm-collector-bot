@@ -153,6 +153,7 @@ def ensure_dm_schema(conn: sqlite3.Connection) -> None:
             sent_success_count INTEGER NOT NULL DEFAULT 0,
             sent_fail_count INTEGER NOT NULL DEFAULT 0,
             frequent_error_count INTEGER NOT NULL DEFAULT 0,
+            too_many_requests_count INTEGER NOT NULL DEFAULT 0,
             last_error TEXT,
             cooldown_until TEXT,
             last_sent_at TEXT,
@@ -224,6 +225,7 @@ def ensure_dm_schema(conn: sqlite3.Connection) -> None:
         "ALTER TABLE accounts ADD COLUMN restriction_checked_at TEXT",
         "ALTER TABLE dm_tasks ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE dm_tasks ADD COLUMN result_file_path TEXT",
+        "ALTER TABLE dm_task_accounts ADD COLUMN too_many_requests_count INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             conn.execute(statement)
@@ -389,6 +391,20 @@ class DmRepository:
                 (task_id,),
             ).fetchall()
 
+    def get_dm_task_account(self, task_id: int, account_id: int) -> sqlite3.Row | None:
+        with self.db.lock:
+            return self.db.conn.execute(
+                """
+                SELECT ta.*, a.session_file, a.session_name, a.username, a.phone, a.display_name, a.status AS account_runtime_status,
+                       a.restriction_status, a.restriction_reason, a.last_error AS account_last_error
+                FROM dm_task_accounts ta
+                LEFT JOIN accounts a ON a.id = ta.account_id
+                WHERE ta.task_id=? AND ta.account_id=?
+                LIMIT 1
+                """,
+                (task_id, account_id),
+            ).fetchone()
+
     def ensure_dm_task_account(self, task_id: int, account_id: int) -> None:
         with self.db.lock:
             self.db.conn.execute(
@@ -434,7 +450,7 @@ class DmRepository:
                 """
                 SELECT l.*, r.normalized_input, a.username AS account_username, a.phone AS account_phone, a.display_name AS account_display_name,
                        ta.sent_success_count AS account_sent_success_count, ta.sent_fail_count AS account_sent_fail_count,
-                       ta.last_error AS account_last_error
+                       ta.too_many_requests_count AS account_too_many_requests_count, ta.last_error AS account_last_error
                 FROM dm_send_logs l
                 LEFT JOIN dm_recipients r ON r.id = l.recipient_id
                 LEFT JOIN accounts a ON a.id = l.account_id
@@ -628,6 +644,7 @@ class DmRepository:
         success_delta: int = 0,
         fail_delta: int = 0,
         frequent_delta: int = 0,
+        too_many_requests_delta: int = 0,
         last_error: str | None = None,
     ) -> None:
         with self.db.lock:
@@ -635,10 +652,11 @@ class DmRepository:
                 "sent_success_count=sent_success_count + ?",
                 "sent_fail_count=sent_fail_count + ?",
                 "frequent_error_count=frequent_error_count + ?",
+                "too_many_requests_count=too_many_requests_count + ?",
                 "last_sent_at=CURRENT_TIMESTAMP",
                 "updated_at=CURRENT_TIMESTAMP",
             ]
-            params: list[object] = [success_delta, fail_delta, frequent_delta]
+            params: list[object] = [success_delta, fail_delta, frequent_delta, too_many_requests_delta]
             if status is not None:
                 fields.insert(0, "status=?")
                 params.insert(0, status)
