@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import re
+import shutil
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -679,7 +681,28 @@ class CollectionManager:
         except ValueError as exc:
             if "too many values to unpack" not in str(exc):
                 raise
-            raise ValueError(SESSION_SCHEMA_INCOMPATIBLE_MESSAGE) from exc
+            compat_file = self._build_compat_session_file(session_file)
+            compat_base = str(compat_file)
+            if compat_base.endswith(".session"):
+                compat_base = compat_base[:-8]
+            try:
+                return TelegramClient(
+                    compat_base,
+                    self.settings.api_id,
+                    self.settings.api_hash,
+                    connection=ConnectionTcpAbridged,
+                    proxy=proxy,
+                    timeout=TELEGRAM_CLIENT_TIMEOUT,
+                    request_retries=TELEGRAM_REQUEST_RETRIES,
+                    connection_retries=TELEGRAM_CONNECTION_RETRIES,
+                    retry_delay=TELEGRAM_RETRY_DELAY,
+                    auto_reconnect=False,
+                    receive_updates=receive_updates,
+                )
+            except ValueError as compat_exc:
+                if "too many values to unpack" in str(compat_exc):
+                    raise ValueError(SESSION_SCHEMA_INCOMPATIBLE_MESSAGE) from compat_exc
+                raise
 
     async def connect_client(self, session_file: Path, *, account_row=None, receive_updates: bool = False) -> TelegramClient:
         owner_id = None
@@ -832,6 +855,85 @@ class CollectionManager:
                 conn.commit()
         except sqlite3.DatabaseError as exc:
             raise ValueError(f"session 文件已损坏或不是有效 SQLite：{self._short_error(exc)}") from exc
+        return compat_file
+
+    def _build_compat_session_file(self, session_file: Path) -> Path:
+        compat_file = session_file.with_name(f"{session_file.stem}.compat_2040.session")
+        try:
+            if compat_file.exists():
+                try:
+                    if compat_file.stat().st_mtime >= session_file.stat().st_mtime:
+                        return compat_file
+                except OSError:
+                    pass
+                compat_file.unlink(missing_ok=True)
+            shutil.copy2(session_file, compat_file)
+        except OSError as exc:
+            raise ValueError(f"session compatibility conversion failed: copy source file failed | {self._short_error(exc)}") from exc
+
+        try:
+            with sqlite3.connect(compat_file) as conn:
+                conn.row_factory = sqlite3.Row
+                columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+                if not columns:
+                    raise ValueError("session file missing sessions table")
+                row = conn.execute("SELECT * FROM sessions LIMIT 1").fetchone()
+                if row is None:
+                    raise ValueError("session file has no usable login record")
+                row_dict = {key: row[key] for key in row.keys()}
+                required = {
+                    "dc_id": row_dict.get("dc_id"),
+                    "server_address": row_dict.get("server_address"),
+                    "port": row_dict.get("port"),
+                    "auth_key": row_dict.get("auth_key"),
+                    "takeout_id": row_dict.get("takeout_id"),
+                }
+                if required["dc_id"] is None or required["server_address"] is None or required["port"] is None or required["auth_key"] is None:
+                    raise ValueError("session file missing required telethon fields")
+
+                conn.execute("ALTER TABLE sessions RENAME TO sessions_backup")
+                conn.execute(
+                    """
+                    CREATE TABLE sessions (
+                        dc_id INTEGER PRIMARY KEY,
+                        server_address TEXT,
+                        port INTEGER,
+                        auth_key BLOB,
+                        takeout_id INTEGER
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO sessions (dc_id, server_address, port, auth_key, takeout_id) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        required["dc_id"],
+                        required["server_address"],
+                        required["port"],
+                        required["auth_key"],
+                        required["takeout_id"],
+                    ),
+                )
+                conn.execute("DROP TABLE sessions_backup")
+
+                version_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='version'"
+                ).fetchone()
+                if version_exists:
+                    conn.execute("DELETE FROM version")
+                    conn.execute("INSERT INTO version (version) VALUES (7)")
+                conn.commit()
+        except ValueError:
+            try:
+                compat_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        except sqlite3.DatabaseError as exc:
+            try:
+                compat_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ValueError(f"session file is broken or not valid SQLite: {self._short_error(exc)}") from exc
         return compat_file
 
     async def _ensure_group_entity(self, client: TelegramClient, target: str):
