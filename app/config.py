@@ -11,6 +11,9 @@ from .emoji import DEFAULT_EMOJI_IDS
 
 load_dotenv()
 
+TELEGRAM_2040_API_ID = 2040
+TELEGRAM_2040_API_HASH = "b18441a1ff607e10a989891a5462e627"
+
 
 @dataclass(slots=True)
 class Settings:
@@ -50,12 +53,10 @@ class Settings:
     emoji_all_id: str
 
 
-
 def _parse_bool(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
 
 
 def _parse_admin_ids(value: str | None) -> list[int]:
@@ -64,23 +65,16 @@ def _parse_admin_ids(value: str | None) -> list[int]:
     return [int(chunk.strip()) for chunk in value.split(",") if chunk.strip()]
 
 
-
 def _parse_int(value: str | None, default: int) -> int:
     if value is None or not value.strip():
         return default
     return int(value.strip())
 
 
-
 def get_settings() -> Settings:
     token = (os.getenv("BOT_TOKEN") or "").strip()
     if not token:
         raise RuntimeError("缺少 BOT_TOKEN，请先配置 .env")
-
-    api_id = _parse_int(os.getenv("API_ID"), 0)
-    api_hash = (os.getenv("API_HASH") or "").strip()
-    if not api_id or not api_hash:
-        raise RuntimeError("缺少 API_ID 或 API_HASH，session 账号登录与采集功能需要 Telethon 凭证")
 
     project_root = Path(__file__).resolve().parent.parent
     data_dir = Path(os.getenv("DATA_DIR", "data"))
@@ -109,8 +103,8 @@ def get_settings() -> Settings:
         data_dir=data_dir,
         session_dir=session_dir,
         export_dir=export_dir,
-        api_id=api_id,
-        api_hash=api_hash,
+        api_id=TELEGRAM_2040_API_ID,
+        api_hash=TELEGRAM_2040_API_HASH,
         forward_to_admins=_parse_bool(os.getenv("FORWARD_TO_ADMINS"), True),
         save_raw_update=_parse_bool(os.getenv("SAVE_RAW_UPDATE"), True),
         auto_reply_enabled=_parse_bool(os.getenv("AUTO_REPLY_ENABLED"), False),

@@ -105,15 +105,13 @@ pip install -r requirements.txt
 ```env
 BOT_TOKEN=你的机器人Token
 ADMIN_IDS=你的Telegram数字ID
-API_ID=你的Telegram API_ID
-API_HASH=你的Telegram API_HASH
 ```
 
 ### 关键环境变量
 
 - `BOT_TOKEN`：机器人 token
 - `ADMIN_IDS`：管理员 ID，多个用英文逗号分隔
-- `API_ID` / `API_HASH`：Telethon 连接用户 session 必填
+- 用户 session 连接已固定使用 Telegram 官方 `2040 / b18441a1ff607e10a989891a5462e627`
 - `DATA_DIR`：数据目录
 - `DB_PATH`：SQLite 路径
 - `SESSION_DIR`：session 文件目录

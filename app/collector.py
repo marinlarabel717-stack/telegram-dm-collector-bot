@@ -4,8 +4,6 @@ import asyncio
 import json
 import logging
 import re
-import shutil
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -779,8 +777,7 @@ class CollectionManager:
         return new_client
 
     def _build_compat_session_file(self, session_file: Path) -> Path:
-        compat_file = session_file.with_name(f"{session_file.stem}.compat.session")
-        shutil.copy2(session_file, compat_file)
+        raise RuntimeError(f"session 格式转换已禁用，请直接使用 2040 原始 session：{session_file.name}")
 
         try:
             with sqlite3.connect(compat_file) as conn:
