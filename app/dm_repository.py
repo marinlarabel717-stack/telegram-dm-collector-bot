@@ -511,7 +511,12 @@ class DmRepository:
                 "processed": int(row["processed_count"] or 0),
             }
 
-    def create_or_get_recipients(self, targets: Iterable[ParsedTarget]) -> list[int]:
+    def create_or_get_recipients(
+        self,
+        targets: Iterable[ParsedTarget],
+        *,
+        owner_id: int | None = None,
+    ) -> list[int]:
         recipient_ids: list[int] = []
         with self.db.lock:
             for item in targets:
