@@ -38,6 +38,7 @@ TELEGRAM_CLIENT_TIMEOUT = 20
 TELEGRAM_REQUEST_RETRIES = 5
 TELEGRAM_CONNECTION_RETRIES = 5
 TELEGRAM_RETRY_DELAY = 1
+SESSION_SCHEMA_INCOMPATIBLE_MESSAGE = "session 格式与当前环境不兼容，原文件未改写"
 TELEGRAM_RECONNECT_RETRIES = 2
 
 logger = logging.getLogger(__name__)
@@ -680,23 +681,7 @@ class CollectionManager:
         except ValueError as exc:
             if "too many values to unpack" not in str(exc):
                 raise
-            compat_session = self._build_compat_session_file(session_file)
-            compat_base = str(compat_session)
-            if compat_base.endswith(".session"):
-                compat_base = compat_base[:-8]
-            return TelegramClient(
-                compat_base,
-                self.settings.api_id,
-                self.settings.api_hash,
-                connection=ConnectionTcpAbridged,
-                proxy=proxy,
-                timeout=TELEGRAM_CLIENT_TIMEOUT,
-                request_retries=TELEGRAM_REQUEST_RETRIES,
-                connection_retries=TELEGRAM_CONNECTION_RETRIES,
-                retry_delay=TELEGRAM_RETRY_DELAY,
-                auto_reconnect=False,
-                receive_updates=receive_updates,
-            )
+            raise ValueError(SESSION_SCHEMA_INCOMPATIBLE_MESSAGE) from exc
 
     async def connect_client(self, session_file: Path, *, account_row=None, receive_updates: bool = False) -> TelegramClient:
         owner_id = None
