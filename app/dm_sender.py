@@ -17,6 +17,7 @@ from .dm_logging import compose_log
 from .dm_postbot import fetch_postbot_inline_result
 from .dm_policy import DMTaskPolicy, DelayWindow, RetryPolicy
 from .dm_repository import DmRepository
+from .dm_transport_tgmatrix import TgMatrixDmTransport
 
 logger = logging.getLogger(__name__)
 DM_SEND_RECONNECT_RETRIES = 2
@@ -30,6 +31,7 @@ class DmSenderManager:
         self.collection_manager = collection_manager
         self.on_progress = on_progress
         self.on_complete = on_complete
+        self.transport = TgMatrixDmTransport(self)
 
     async def run_task(self, task_id: int, policy: DMTaskPolicy | None = None) -> None:
         task = self.repository.get_dm_task(task_id)
@@ -270,16 +272,16 @@ class DmSenderManager:
                     while True:
                         try:
                             self._append_runtime_log(task_id, account_id=account_id, recipient_id=recipient_id, message="正在解析目标")
-                            entity, cleanup = await self._resolve_target_entity(client, target)
+                            entity, cleanup = await self.transport.resolve_target_entity(client, target)
                             try:
                                 self._append_runtime_log(
                                     task_id,
                                     account_id=account_id,
                                     recipient_id=recipient_id,
-                                    message=self._dispatch_progress_message(content_type, payload, policy),
+                                    message=self.transport.dispatch_progress_message(content_type, policy),
                                 )
-                                sent_message, sent_messages = await self._dispatch_payload(client, entity, payload, content_type, policy)
-                                await self._apply_post_send_actions(
+                                sent_message, sent_messages = await self.transport.dispatch_payload(client, entity, payload, content_type, policy)
+                                await self.transport.apply_post_send_actions(
                                     client,
                                     entity,
                                     sent_message,
@@ -290,7 +292,7 @@ class DmSenderManager:
                                     recipient_id=recipient_id,
                                 )
                             finally:
-                                await self._run_entity_cleanup(cleanup)
+                                await self.transport.run_entity_cleanup(cleanup)
                             success_count += 1
                             post_attempt_delay = policy.delay_window.next_delay()
                             self.repository.mark_dm_recipient_result(task_id, recipient_id, account_id=account_id, status="success")
@@ -394,7 +396,7 @@ class DmSenderManager:
                     queue.put_nowait(recipient)
                 except Exception as exc:  # noqa: BLE001
                     raw_error = self.collection_manager._short_error(exc)
-                    error_code, error_message, frequent_hit = self._classify_send_error(exc)
+                    error_code, error_message, frequent_hit = self.transport.classify_send_error(exc)
                     post_attempt_delay = self._failure_backoff_delay(error_code, policy)
                     if frequent_hit and error_code != "too_many_requests":
                         frequent_errors += 1
@@ -1369,6 +1371,56 @@ class DmSenderManager:
                 message=f"删除对话框失败｜{friendly}",
                 raw_error=raw,
             )
+
+    async def _send_text_message(self, client, entity, text: str, policy: DMTaskPolicy, *, parse_mode: str | None = None):
+        return await self.transport.send_text_message(client, entity, text, policy, parse_mode=parse_mode)
+
+    async def _dispatch_single_payload(self, client, entity, payload: dict, content_type: str, policy: DMTaskPolicy):
+        return await self.transport.dispatch_single_payload(client, entity, payload, content_type, policy)
+
+    async def _dispatch_payload(self, client, entity, payload: dict, content_type: str, policy: DMTaskPolicy):
+        return await self.transport.dispatch_payload(client, entity, payload, content_type, policy)
+
+    async def _dispatch_reply_payload(self, client, entity, payload: dict, policy: DMTaskPolicy):
+        return await self.transport.dispatch_reply_payload(client, entity, payload, policy)
+
+    async def _resolve_channel_post_link(self, client, link: str):
+        return await self.transport.resolve_channel_post_link(client, link)
+
+    @staticmethod
+    def _dispatch_progress_message(content_type: str, payload: dict, policy: DMTaskPolicy) -> str:
+        del payload
+        return TgMatrixDmTransport.dispatch_progress_message(content_type, policy)
+
+    async def _send_with_recovery(self, client, entity, sender, *, expected_text: str = "", expect_media: bool = False):
+        return await self.transport.send_with_recovery(
+            client,
+            entity,
+            sender,
+            expected_text=expected_text,
+            expect_media=expect_media,
+        )
+
+    def _classify_send_error(self, exc: Exception) -> tuple[str, str, bool]:
+        return self.transport.classify_send_error(exc)
+
+    async def _resolve_target_entity(self, client, target: str):
+        return await self.transport.resolve_target_entity(client, target)
+
+    async def _run_entity_cleanup(self, cleanup) -> None:
+        await self.transport.run_entity_cleanup(cleanup)
+
+    async def _apply_post_send_actions(self, client, entity, sent_message, sent_messages, policy: DMTaskPolicy, *, task_id: int, account_id: int, recipient_id: int) -> None:
+        await self.transport.apply_post_send_actions(
+            client,
+            entity,
+            sent_message,
+            sent_messages,
+            policy,
+            task_id=task_id,
+            account_id=account_id,
+            recipient_id=recipient_id,
+        )
 
     async def _emit_progress(self, task_id: int) -> None:
         if self.on_progress:
