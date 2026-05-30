@@ -35,6 +35,7 @@ class DmAccountChecker:
     def __init__(self, repository: DmRepository, collection_manager: CollectionManager):
         self.repository = repository
         self.collection_manager = collection_manager
+        self._missing_tgmatrix_script_logged = False
 
     async def check_account_status(self, account_row) -> AccountStatusCheckResult:
         try:
@@ -240,8 +241,11 @@ class DmAccountChecker:
                 await client.disconnect()
 
     async def _run_tgmatrix_spambot_check(self, session_file: Path, *, account_row) -> dict[str, Any]:
-        script_path = self.collection_manager.settings.tg_matrix_dir / "electron" / "accounts" / "check-engine" / "telethon_spambot_check.py"
+        script_path = self._resolve_tgmatrix_script_path()
         if not script_path.exists():
+            if not self._missing_tgmatrix_script_logged:
+                self._missing_tgmatrix_script_logged = True
+                logger.warning("TG-Matrix 检测脚本不存在，回退旧检查逻辑｜%s", script_path)
             raise FileNotFoundError(str(script_path))
 
         timeout_seconds = max(5, int(getattr(self.collection_manager.settings, "account_check_timeout_seconds", 25) or 25))
@@ -258,7 +262,7 @@ class DmAccountChecker:
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.collection_manager.settings.tg_matrix_dir),
+                cwd=str(script_path.parent.parent.parent.parent),
             )
             stdout, stderr = await process.communicate()
             result = self._parse_tgmatrix_script_result(process.returncode, stdout, stderr)
@@ -278,6 +282,35 @@ class DmAccountChecker:
             return result
 
         return last_result or {"status": "unknown", "reason": "account_check_no_result"}
+
+    def _resolve_tgmatrix_script_path(self) -> Path:
+        relative = Path("electron") / "accounts" / "check-engine" / "telethon_spambot_check.py"
+        project_root = Path(__file__).resolve().parent.parent
+        workspace_root = project_root.parent
+        candidates: list[Path] = []
+
+        configured = getattr(self.collection_manager.settings, "tg_matrix_dir", None)
+        if configured:
+            configured_path = Path(configured)
+            candidates.append(configured_path / relative)
+            candidates.append(configured_path)
+
+        for dirname in ("tg-group", "tg-matrix-bot", "TG-Matrix", "tg-matrix"):
+            candidates.append(workspace_root / dirname / relative)
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            key = str(resolved).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if resolved.is_file():
+                return resolved
+
+        if configured:
+            return (Path(configured) / relative).resolve()
+        return (workspace_root / "tg-group" / relative).resolve()
 
     def _build_proxy_attempts(self, account_row) -> list[dict[str, Any] | None]:
         owner_id = 0

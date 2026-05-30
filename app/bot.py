@@ -94,6 +94,13 @@ ACCOUNT_UNSELECTED_EMOJI_ID = "5301020349515712616"    # 🔴
 THREAD_EMOJI_ID = "5217475010746145177"                # 🚀
 
 
+class _SuppressNoisyHttpxFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith(("httpx", "httpcore")) and record.levelno < logging.WARNING:
+            return False
+        return True
+
+
 class DmCollectorBot:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -5152,7 +5159,11 @@ def configure_logging() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        force=True,
     )
     # Suppress long-polling noise like repeated getUpdates 200 OK lines.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    noisy_http_filter = _SuppressNoisyHttpxFilter()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(noisy_http_filter)
