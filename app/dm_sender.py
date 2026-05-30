@@ -769,7 +769,9 @@ class DmSenderManager:
         lowered = short.lower()
         if "cannot send requests while disconnected" in lowered or ("disconnected" in lowered and "request" in lowered):
             return "account_disconnected", "账号掉线了，连接已经断开，没法继续发请求", False
-        if "the key is not registered in the system" in lowered or "invokewit" in lowered:
+        if "too many requests" in lowered or "retry after" in lowered:
+            return "too_many_requests", "请求过于频繁", True
+        if "the key is not registered in the system" in lowered:
             return "session_invalid", "账号鉴权 key 无效或未注册，当前账号不能继续发送", False
         if any(keyword in lowered for keyword in ("auth key", "authkey", "unauthorized", "session revoked", "user deactivated", "input_user_deactivated", "phone number banned", "user_deactivated_ban", "deactivated", "banned", "revoked")):
             return "session_invalid", "账号失效或被封禁了，当前 session 不能继续使用", False
@@ -797,8 +799,6 @@ class DmSenderManager:
             return "bot_target", "目标不是可私信的普通用户", False
         if "user is blocked" in lowered or "you blocked" in lowered:
             return "blocked", "对方已拉黑或账号关系异常", False
-        if "too many requests" in lowered or "retry after" in lowered:
-            return "too_many_requests", "请求过于频繁", True
         if "user is restricted" in lowered or "mutual" in lowered:
             return "mutual_limit", "账号存在双向或发送限制", True
         if "frozen" in lowered:
@@ -1190,7 +1190,9 @@ class DmSenderManager:
         lowered = short.lower()
         if "cannot send requests while disconnected" in lowered or ("disconnected" in lowered and "request" in lowered):
             return "account_disconnected", "账号掉线了，连接已经断开，没法继续发请求", False
-        if "the key is not registered in the system" in lowered or "invokewit" in lowered:
+        if "too many requests" in lowered or "retry after" in lowered:
+            return "too_many_requests", "请求过于频繁", True
+        if "the key is not registered in the system" in lowered:
             return "session_invalid", "账号鉴权 key 无效或未注册，当前账号不能继续发送", False
         if any(keyword in lowered for keyword in ("auth key", "authkey", "unauthorized", "session revoked", "user deactivated", "input_user_deactivated", "phone number banned", "user_deactivated_ban", "deactivated", "banned", "revoked")):
             return "session_invalid", "账号失效或被封禁了，当前 session 不能继续使用", False
@@ -1222,8 +1224,6 @@ class DmSenderManager:
             return "bot_target", "目标不是可私信的普通用户", False
         if "user is blocked" in lowered or "you blocked" in lowered:
             return "blocked", "对方已拉黑或账号关系异常", False
-        if "too many requests" in lowered or "retry after" in lowered:
-            return "too_many_requests", "请求过于频繁", True
         if "user is restricted" in lowered or "mutual" in lowered:
             return "mutual_limit", "账号存在双向或发送限制", True
         if "frozen" in lowered:

@@ -5089,7 +5089,7 @@ class DmCollectorBot:
         text = raw.lower()
         if any(key in text for key in ["session 格式与当前环境不兼容", "too many values to unpack"]):
             return "session 格式不兼容（原文件未改写）"
-        if status == "unauthorized" or any(key in text for key in ["user_deactivated", "banned", "revoked", "auth key duplicated", "phone_number_banned", "the key is not registered in the system", "invokewit"]):
+        if status == "unauthorized" or any(key in text for key in ["user_deactivated", "banned", "revoked", "auth key duplicated", "phone_number_banned", "the key is not registered in the system"]):
             return "session 已失效或已封禁"
         if any(key in text for key in ["malformed", "not valid sqlite", "file is not a database", "缺少 sessions 表", "没有可用的登录记录", "缺少 telethon 必要字段", "已损坏或不是有效 sqlite"]):
             return "session 已损坏"
